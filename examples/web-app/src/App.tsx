@@ -209,14 +209,56 @@ function App() {
               </p>
             )}
             {downloadResult.signatures && downloadResult.signatures.length > 0 && (
-              <p>
-                <strong>Signature Verified:</strong>{' '}
-                {downloadResult.verified ? (
-                  <span className="success">Yes</span>
-                ) : (
-                  <span className="error">No</span>
-                )}
-              </p>
+              <div className={`signature-section ${downloadResult.verified ? 'verified' : 'failed'}`}>
+                <h4>Notary Signature</h4>
+
+                {/* Verification Status */}
+                <div className="verification-status">
+                  {downloadResult.verified ? (
+                    <div className="status-badge success">
+                      <span className="icon">✓</span>
+                      <span>Signature Verified</span>
+                    </div>
+                  ) : (
+                    <div className="status-badge error">
+                      <span className="icon">✗</span>
+                      <span>Verification Failed</span>
+                    </div>
+                  )}
+                  <p className="verification-explanation">
+                    {downloadResult.verified
+                      ? `Signature is cryptographically valid and signer matches the gateway notary.`
+                      : `Signature verification failed. The signature may be invalid or the signer doesn't match the known notary.`}
+                  </p>
+                </div>
+
+                {/* Signature Details */}
+                {downloadResult.signatures.map((sig, index) => (
+                  <div key={index} className="signature-details">
+                    <div className="detail-row">
+                      <span className="label">Signer:</span>
+                      <code className="value">{sig.signer}</code>
+                      {notaryInfo?.address && (
+                        <span className={sig.signer.toLowerCase() === notaryInfo.address.toLowerCase() ? 'badge success' : 'badge warning'}>
+                          {sig.signer.toLowerCase() === notaryInfo.address.toLowerCase() ? 'Matches Gateway Notary' : 'Unknown Signer'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Type:</span>
+                      <span className="value">{sig.type}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Timestamp:</span>
+                      <span className="value">{new Date(sig.timestamp).toLocaleString()}</span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Data Hash:</span>
+                      <code className="value small">{sig.data_hash}</code>
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
             <div className="content-preview">
               <strong>Content:</strong>
