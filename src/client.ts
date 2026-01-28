@@ -25,7 +25,7 @@ import { buildMetadata, extractContent, verifyContentHash } from './metadata.js'
 import { verifyAllSignatures } from './notary.js';
 import { toBytes } from './utils.js';
 
-const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
+const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.dev.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
 
 /**
@@ -209,27 +209,21 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    // The response could be raw JSON or the file content
-    const contentType = response.headers.get('content-type') ?? '';
-
     let metadata: ProvenanceMetadata;
     let signatures: NotarySignature[] | undefined;
 
-    if (contentType.includes('application/json')) {
-      const data = (await response.json()) as { metadata: ProvenanceMetadata; signatures?: NotarySignature[] };
+    // Parse response - gateway may return metadata directly or wrapped in {metadata: ...}
+    const data = (await response.json()) as
+      | ProvenanceMetadata
+      | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] };
+
+    if ('metadata' in data && data.metadata) {
+      // Wrapped format: {metadata: {...}, signatures: [...]}
       metadata = data.metadata;
       signatures = data.signatures;
     } else {
-      // Try to parse as JSON anyway
-      const text = await response.text();
-      const parsed = JSON.parse(text) as ProvenanceMetadata | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] };
-
-      if ('metadata' in parsed) {
-        metadata = parsed.metadata;
-        signatures = parsed.signatures;
-      } else {
-        metadata = parsed;
-      }
+      // Direct format: {data: "...", content_hash: "...", stamp_id: "..."}
+      metadata = data as ProvenanceMetadata;
     }
 
     // Extract file content
@@ -270,9 +264,16 @@ export class ProvenanceClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
+    // Merge headers, adding X-Payment-Mode: free for x402 compatibility
+    const headers = new Headers(init?.headers);
+    if (!headers.has('X-Payment-Mode')) {
+      headers.set('X-Payment-Mode', 'free');
+    }
+
     try {
       const response = await fetch(url, {
         ...init,
+        headers,
         signal: controller.signal,
       });
       return response;

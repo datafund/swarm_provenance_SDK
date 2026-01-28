@@ -209,7 +209,7 @@ function verifyAllSignatures(signatures, metadata, expectedSigner) {
 }
 
 // src/client.ts
-var DEFAULT_GATEWAY_URL = "https://provenance-gateway.datafund.io";
+var DEFAULT_GATEWAY_URL = "https://provenance-gateway.dev.datafund.io";
 var DEFAULT_TIMEOUT = 3e4;
 var ProvenanceClient = class {
   gatewayUrl;
@@ -356,22 +356,14 @@ var ProvenanceClient = class {
     if (!response.ok) {
       throw await this.handleError(response);
     }
-    const contentType = response.headers.get("content-type") ?? "";
     let metadata;
     let signatures;
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
+    const data = await response.json();
+    if ("metadata" in data && data.metadata) {
       metadata = data.metadata;
       signatures = data.signatures;
     } else {
-      const text = await response.text();
-      const parsed = JSON.parse(text);
-      if ("metadata" in parsed) {
-        metadata = parsed.metadata;
-        signatures = parsed.signatures;
-      } else {
-        metadata = parsed;
-      }
+      metadata = data;
     }
     const file = extractContent(metadata);
     const contentHashValid = verifyContentHash(metadata);
@@ -402,9 +394,14 @@ var ProvenanceClient = class {
     const url = `${this.gatewayUrl}${path}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const headers = new Headers(init?.headers);
+    if (!headers.has("X-Payment-Mode")) {
+      headers.set("X-Payment-Mode", "free");
+    }
     try {
       const response = await fetch(url, {
         ...init,
+        headers,
         signal: controller.signal
       });
       return response;
