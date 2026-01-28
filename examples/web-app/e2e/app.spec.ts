@@ -188,17 +188,8 @@ test.describe('Notary Integration', () => {
       return;
     }
 
-    // Check if upload was actually signed (gateway might not have signed it)
-    const wasSigned = await page.getByText(/Signed by notary/).isVisible();
-    if (!wasSigned) {
-      // Gateway didn't sign - this is a gateway issue, not UI issue
-      // Log and skip rather than fail
-      console.log('Upload succeeded but was not signed by notary - gateway may not support signing');
-      test.skip();
-      return;
-    }
-
     // Get reference and download
+    // Note: Upload response doesn't include signed_document by design - signatures are only returned on download
     const reference = await page.locator('.upload .result code').first().textContent();
     expect(reference).toMatch(/^[a-f0-9]{64}$/);
 
@@ -214,8 +205,8 @@ test.describe('Notary Integration', () => {
     // Check if signatures are present in download result
     const hasSignatures = await page.locator('.signature-section').isVisible();
     if (!hasSignatures) {
-      // Gateway returned content but without signatures - this is a gateway issue
-      console.log('Download succeeded but no signatures returned - gateway may not return signatures');
+      // Gateway returned content but without signatures - maybe notary signing wasn't applied
+      console.log('Download succeeded but no signatures returned - notary signing may not have been applied');
       test.skip();
       return;
     }

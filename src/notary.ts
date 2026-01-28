@@ -23,33 +23,61 @@ export function reconstructSignedMessage(
 }
 
 /**
+ * Convert a value to canonical JSON (sorted keys, no whitespace)
+ */
+function toCanonicalJson(value: unknown): string {
+  if (value === null || value === undefined) {
+    return JSON.stringify(value);
+  }
+  if (typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(toCanonicalJson).join(',') + ']';
+  }
+  // Object - sort keys
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  const pairs = keys.map(
+    (k) => JSON.stringify(k) + ':' + toCanonicalJson((value as Record<string, unknown>)[k])
+  );
+  return '{' + pairs.join(',') + '}';
+}
+
+/**
  * Verify that the data hash in the signature matches the metadata
  */
 export function verifyDataHash(signature: NotarySignature, metadata: ProvenanceMetadata): boolean {
-  // The data hash should be computed from the hashed fields
-  // Typically this is the content_hash from metadata
+  // The data hash is SHA-256 of the canonical JSON of the hashed fields
+  // Per gateway docs: hash of canonical JSON (sorted keys, no whitespace)
   const hashedFields = signature.hashed_fields;
 
-  // Build the data to hash based on hashed_fields
-  const dataToHash = hashedFields
-    .map((field) => {
-      if (field === 'content_hash') {
-        return metadata.content_hash;
-      }
-      if (field === 'data') {
-        return metadata.data;
-      }
-      if (field === 'stamp_id') {
-        return metadata.stamp_id;
-      }
-      if (field === 'provenance_standard') {
-        return metadata.provenance_standard ?? '';
-      }
-      return '';
-    })
-    .join('');
+  // Get the value to hash based on hashed_fields
+  // Typically ["data"] means hash the canonical JSON of metadata.data
+  let valueToHash: unknown;
 
-  const computedHash = sha256Hex(dataToHash);
+  if (hashedFields.length === 1 && hashedFields[0] === 'data') {
+    // Most common case: hash the data field
+    valueToHash = metadata.data;
+  } else {
+    // Build object from multiple fields
+    const obj: Record<string, unknown> = {};
+    for (const field of hashedFields) {
+      if (field === 'content_hash') {
+        obj[field] = metadata.content_hash;
+      } else if (field === 'data') {
+        obj[field] = metadata.data;
+      } else if (field === 'stamp_id') {
+        obj[field] = metadata.stamp_id;
+      } else if (field === 'provenance_standard') {
+        obj[field] = metadata.provenance_standard ?? '';
+      }
+    }
+    valueToHash = obj;
+  }
+
+  // Compute canonical JSON and hash it
+  const canonicalJson = toCanonicalJson(valueToHash);
+  const computedHash = sha256Hex(canonicalJson);
   return computedHash === signature.data_hash;
 }
 

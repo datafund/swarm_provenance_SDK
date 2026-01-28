@@ -140,24 +140,44 @@ function parseMetadata(json) {
 }
 
 // src/notary.ts
+function toCanonicalJson(value) {
+  if (value === null || value === void 0) {
+    return JSON.stringify(value);
+  }
+  if (typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map(toCanonicalJson).join(",") + "]";
+  }
+  const keys = Object.keys(value).sort();
+  const pairs = keys.map(
+    (k) => JSON.stringify(k) + ":" + toCanonicalJson(value[k])
+  );
+  return "{" + pairs.join(",") + "}";
+}
 function verifyDataHash(signature, metadata) {
   const hashedFields = signature.hashed_fields;
-  const dataToHash = hashedFields.map((field) => {
-    if (field === "content_hash") {
-      return metadata.content_hash;
+  let valueToHash;
+  if (hashedFields.length === 1 && hashedFields[0] === "data") {
+    valueToHash = metadata.data;
+  } else {
+    const obj = {};
+    for (const field of hashedFields) {
+      if (field === "content_hash") {
+        obj[field] = metadata.content_hash;
+      } else if (field === "data") {
+        obj[field] = metadata.data;
+      } else if (field === "stamp_id") {
+        obj[field] = metadata.stamp_id;
+      } else if (field === "provenance_standard") {
+        obj[field] = metadata.provenance_standard ?? "";
+      }
     }
-    if (field === "data") {
-      return metadata.data;
-    }
-    if (field === "stamp_id") {
-      return metadata.stamp_id;
-    }
-    if (field === "provenance_standard") {
-      return metadata.provenance_standard ?? "";
-    }
-    return "";
-  }).join("");
-  const computedHash = sha256Hex(dataToHash);
+    valueToHash = obj;
+  }
+  const canonicalJson = toCanonicalJson(valueToHash);
+  const computedHash = sha256Hex(canonicalJson);
   return computedHash === signature.data_hash;
 }
 function verifySignature(signature, metadata, expectedSigner) {
@@ -359,11 +379,25 @@ var ProvenanceClient = class {
     let metadata;
     let signatures;
     const data = await response.json();
-    if ("metadata" in data && data.metadata) {
+    if ("metadata" in data && data.metadata && typeof data.metadata === "object") {
       metadata = data.metadata;
       signatures = data.signatures;
     } else {
-      metadata = data;
+      const directData = data;
+      if (directData.signatures && Array.isArray(directData.signatures)) {
+        signatures = directData.signatures;
+      }
+      metadata = {
+        data: directData.data,
+        content_hash: directData.content_hash,
+        stamp_id: directData.stamp_id
+      };
+      if (directData.provenance_standard !== void 0) {
+        metadata.provenance_standard = directData.provenance_standard;
+      }
+      if (directData.encryption !== void 0) {
+        metadata.encryption = directData.encryption;
+      }
     }
     const file = extractContent(metadata);
     const contentHashValid = verifyContentHash(metadata);

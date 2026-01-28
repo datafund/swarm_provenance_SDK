@@ -325,25 +325,24 @@ describe('ProvenanceClient', () => {
     it('should verify signatures when present', async () => {
       const contentHash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
 
-      // Mock download
+      // Mock download - using gateway format with signatures at same level
       mockFetch.mockResolvedValueOnce({
         ok: true,
         headers: new Map([['content-type', 'application/json']]),
         json: () => Promise.resolve({
-          metadata: {
-            data: 'aGVsbG8=',
-            content_hash: contentHash,
-            stamp_id: 'stamp123',
-          },
+          data: 'aGVsbG8=',
+          content_hash: contentHash,
+          stamp_id: 'stamp123',
           signatures: [
             {
-              type: 'eip191',
+              type: 'notary',
               signer: '0xNotary',
               timestamp: '2024-01-01T00:00:00Z',
-              data_hash: 'd7914fe546b684688bb95f4f888a92dfc680603a75f23eb823658031fff766d9', // sha256 of contentHash
+              // sha256 of canonicalJson("aGVsbG8=") = sha256('"aGVsbG8="')
+              data_hash: 'a06044467a47dac725953f9aec884c638596d7e61cec202a335986aac31e092e',
               signature: '0xsig',
-              hashed_fields: ['content_hash'],
-              signed_message_format: 'format',
+              hashed_fields: ['data'],
+              signed_message_format: '{data_hash}|{timestamp}',
             },
           ],
         }),

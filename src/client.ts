@@ -212,18 +212,34 @@ export class ProvenanceClient {
     let metadata: ProvenanceMetadata;
     let signatures: NotarySignature[] | undefined;
 
-    // Parse response - gateway may return metadata directly or wrapped in {metadata: ...}
+    // Parse response - gateway may return:
+    // 1. Wrapped format: {metadata: {...}, signatures: [...]}
+    // 2. Direct format: {data: "...", content_hash: "...", stamp_id: "...", signatures?: [...]}
     const data = (await response.json()) as
-      | ProvenanceMetadata
-      | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] };
+      | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
+      | (ProvenanceMetadata & { signatures?: NotarySignature[] });
 
-    if ('metadata' in data && data.metadata) {
-      // Wrapped format: {metadata: {...}, signatures: [...]}
+    if ('metadata' in data && data.metadata && typeof data.metadata === 'object') {
+      // Wrapped format
       metadata = data.metadata;
       signatures = data.signatures;
     } else {
-      // Direct format: {data: "...", content_hash: "...", stamp_id: "..."}
-      metadata = data as ProvenanceMetadata;
+      // Direct format - signatures at same level as metadata fields
+      const directData = data as ProvenanceMetadata & { signatures?: NotarySignature[] };
+      if (directData.signatures && Array.isArray(directData.signatures)) {
+        signatures = directData.signatures;
+      }
+      metadata = {
+        data: directData.data,
+        content_hash: directData.content_hash,
+        stamp_id: directData.stamp_id,
+      };
+      if (directData.provenance_standard !== undefined) {
+        metadata.provenance_standard = directData.provenance_standard;
+      }
+      if (directData.encryption !== undefined) {
+        metadata.encryption = directData.encryption;
+      }
     }
 
     // Extract file content

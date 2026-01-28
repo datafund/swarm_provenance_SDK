@@ -9,19 +9,46 @@ import { buildMetadata } from '../../src/metadata.js';
 import { sha256Hex } from '../../src/utils.js';
 import type { NotarySignature, ProvenanceMetadata } from '../../src/types.js';
 
+/**
+ * Compute the expected data_hash as the gateway does:
+ * SHA-256 of canonical JSON (sorted keys, no whitespace)
+ */
+function computeDataHash(value: unknown): string {
+  const canonicalJson = toCanonicalJson(value);
+  return sha256Hex(canonicalJson);
+}
+
+function toCanonicalJson(value: unknown): string {
+  if (value === null || value === undefined) {
+    return JSON.stringify(value);
+  }
+  if (typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(toCanonicalJson).join(',') + ']';
+  }
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  const pairs = keys.map(
+    (k) => JSON.stringify(k) + ':' + toCanonicalJson((value as Record<string, unknown>)[k])
+  );
+  return '{' + pairs.join(',') + '}';
+}
+
 describe('verifyDataHash', () => {
-  it('should return true when hash matches content_hash', () => {
+  it('should return true when hash matches data field (gateway format)', () => {
     const content = 'Hello, World!';
     const metadata = buildMetadata(content, { stampId: 'stamp123' });
 
+    // Gateway uses hashed_fields: ['data'] and hashes canonical JSON of the data field
     const signature: NotarySignature = {
-      type: 'eip191',
+      type: 'notary',
       signer: '0x1234567890123456789012345678901234567890',
       timestamp: '2024-01-01T00:00:00Z',
-      data_hash: sha256Hex(metadata.content_hash),
+      data_hash: computeDataHash(metadata.data),
       signature: '0xsignature',
-      hashed_fields: ['content_hash'],
-      signed_message_format: 'Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}',
+      hashed_fields: ['data'],
+      signed_message_format: '{data_hash}|{timestamp}',
     };
 
     expect(verifyDataHash(signature, metadata)).toBe(true);
@@ -31,13 +58,13 @@ describe('verifyDataHash', () => {
     const metadata = buildMetadata('Hello', { stampId: 'stamp123' });
 
     const signature: NotarySignature = {
-      type: 'eip191',
+      type: 'notary',
       signer: '0x1234567890123456789012345678901234567890',
       timestamp: '2024-01-01T00:00:00Z',
       data_hash: 'wrong_hash_value',
       signature: '0xsignature',
-      hashed_fields: ['content_hash'],
-      signed_message_format: 'Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}',
+      hashed_fields: ['data'],
+      signed_message_format: '{data_hash}|{timestamp}',
     };
 
     expect(verifyDataHash(signature, metadata)).toBe(false);
@@ -46,17 +73,20 @@ describe('verifyDataHash', () => {
   it('should handle multiple hashed fields', () => {
     const metadata = buildMetadata('test', { stampId: 'stamp123', standard: 'v1' });
 
-    // Hash of content_hash + stamp_id concatenated
-    const expectedHash = sha256Hex(metadata.content_hash + metadata.stamp_id);
+    // When multiple fields, hash canonical JSON of object with those fields
+    const expectedHash = computeDataHash({
+      content_hash: metadata.content_hash,
+      stamp_id: metadata.stamp_id,
+    });
 
     const signature: NotarySignature = {
-      type: 'eip191',
+      type: 'notary',
       signer: '0x1234567890123456789012345678901234567890',
       timestamp: '2024-01-01T00:00:00Z',
       data_hash: expectedHash,
       signature: '0xsignature',
       hashed_fields: ['content_hash', 'stamp_id'],
-      signed_message_format: 'Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}',
+      signed_message_format: '{data_hash}|{timestamp}',
     };
 
     expect(verifyDataHash(signature, metadata)).toBe(true);
@@ -68,30 +98,30 @@ describe('reconstructSignedMessage', () => {
     const metadata = buildMetadata('test', { stampId: 'stamp123' });
 
     const signature: NotarySignature = {
-      type: 'eip191',
+      type: 'notary',
       signer: '0x1234567890123456789012345678901234567890',
       timestamp: '2024-01-15T10:30:00Z',
       data_hash: 'abc123',
       signature: '0xsig',
-      hashed_fields: ['content_hash'],
-      signed_message_format: 'Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}',
+      hashed_fields: ['data'],
+      signed_message_format: '{data_hash}|{timestamp}',
     };
 
     const message = reconstructSignedMessage(signature, metadata);
 
-    expect(message).toBe('Provenance Notary\nTimestamp: 2024-01-15T10:30:00Z\nData Hash: abc123');
+    expect(message).toBe('abc123|2024-01-15T10:30:00Z');
   });
 });
 
 describe('verifySignature', () => {
   const createValidSignature = (metadata: ProvenanceMetadata): NotarySignature => ({
-    type: 'eip191',
+    type: 'notary',
     signer: '0xNotaryAddress123',
     timestamp: '2024-01-01T00:00:00Z',
-    data_hash: sha256Hex(metadata.content_hash),
+    data_hash: computeDataHash(metadata.data),
     signature: '0xvalidSignature',
-    hashed_fields: ['content_hash'],
-    signed_message_format: 'Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}',
+    hashed_fields: ['data'],
+    signed_message_format: '{data_hash}|{timestamp}',
   });
 
   it('should return valid=true when data hash matches', () => {
@@ -157,13 +187,13 @@ describe('verifyAllSignatures', () => {
     signer: string,
     valid: boolean
   ): NotarySignature => ({
-    type: 'eip191',
+    type: 'notary',
     signer,
     timestamp: '2024-01-01T00:00:00Z',
-    data_hash: valid ? sha256Hex(metadata.content_hash) : 'invalid_hash',
+    data_hash: valid ? computeDataHash(metadata.data) : 'invalid_hash',
     signature: '0xsig',
-    hashed_fields: ['content_hash'],
-    signed_message_format: 'Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}',
+    hashed_fields: ['data'],
+    signed_message_format: '{data_hash}|{timestamp}',
   });
 
   it('should return allValid=true when all signatures are valid', () => {
