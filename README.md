@@ -164,6 +164,18 @@ const result = verifySignature(signature, metadata, expectedSigner);
 // => { valid: boolean, dataHashValid: boolean, signerValid?: boolean }
 ```
 
+## Demo App
+
+A reference React app is available at `examples/web-app/`:
+
+```bash
+cd examples/web-app
+pnpm install
+pnpm dev
+```
+
+Open http://localhost:5173 to try uploading and downloading with the SDK.
+
 ## Development
 
 ```bash
