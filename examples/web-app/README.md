@@ -39,6 +39,38 @@ const result = await client.upload('Hello, World!', {
 const downloaded = await client.download(result.reference);
 ```
 
+## Testing
+
+End-to-end tests using Playwright:
+
+```bash
+# Run all tests
+pnpm test
+
+# Run tests with browser visible
+pnpm test:headed
+
+# Run tests with Playwright UI
+pnpm test:ui
+```
+
+### Test Coverage
+
+- Page loads correctly
+- Gateway health check displays status
+- No console errors (including CORS)
+- Upload/download UI elements present
+- Full upload and download cycle
+
+## Development
+
+```bash
+pnpm install      # Install dependencies
+pnpm dev          # Start dev server
+pnpm build        # Build for production
+pnpm test         # Run e2e tests
+```
+
 ## Screenshot
 
 ```

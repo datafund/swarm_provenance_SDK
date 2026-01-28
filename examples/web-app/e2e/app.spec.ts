@@ -99,6 +99,61 @@ test.describe('Swarm Provenance Demo', () => {
   });
 });
 
+test.describe('Error Handling', () => {
+  test('download with invalid reference shows error', async ({ page }) => {
+    await page.goto('/');
+
+    // Wait for gateway to be connected
+    await expect(page.getByText('Connected')).toBeVisible({ timeout: 10000 });
+
+    // Enter invalid reference (wrong format)
+    const downloadInput = page.locator('input[type="text"]');
+    await downloadInput.fill('invalid-reference');
+
+    // Click download
+    await page.locator('button').filter({ hasText: 'Download' }).click();
+
+    // Wait for error message
+    await expect(page.locator('.download .error')).toBeVisible({ timeout: 15000 });
+  });
+
+  test('download with non-existent reference shows error', async ({ page }) => {
+    await page.goto('/');
+
+    // Wait for gateway to be connected
+    await expect(page.getByText('Connected')).toBeVisible({ timeout: 10000 });
+
+    // Enter valid format but non-existent reference
+    const downloadInput = page.locator('input[type="text"]');
+    await downloadInput.fill('0'.repeat(64));
+
+    // Click download
+    await page.locator('button').filter({ hasText: 'Download' }).click();
+
+    // Wait for error message
+    await expect(page.locator('.download .error')).toBeVisible({ timeout: 15000 });
+  });
+});
+
+test.describe('Notary Integration', () => {
+  test('notary checkbox appears when notary is available', async ({ page }) => {
+    await page.goto('/');
+
+    // Wait for gateway status to load
+    await expect(page.getByText('Connected')).toBeVisible({ timeout: 10000 });
+
+    // Check if notary info is displayed
+    const notaryText = page.getByText(/Notary:/);
+    await expect(notaryText).toBeVisible({ timeout: 5000 });
+
+    // If notary is available, checkbox should be visible
+    const notaryAvailable = await page.getByText('Available').isVisible();
+    if (notaryAvailable) {
+      await expect(page.getByLabel('Sign with Notary')).toBeVisible();
+    }
+  });
+});
+
 test.describe('Upload and Download Flow', () => {
   test('full upload and download cycle', async ({ page }) => {
     test.setTimeout(120000); // 2 minute timeout for full cycle

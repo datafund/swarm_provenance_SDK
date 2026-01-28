@@ -21,7 +21,7 @@ Application (Fairdrop, Verity, etc.)
 
 ## Gateway API Endpoints
 
-Base URL: `https://provenance-gateway.datafund.io`
+Base URL: `https://provenance-gateway.dev.datafund.io` (default)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -88,11 +88,26 @@ src/
 
 ## Testing Strategy
 
-- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation
+- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (89 tests)
 - **Integration tests** (`tests/integration/`): Real gateway, full round-trips
+- **E2E tests** (`examples/web-app/e2e/`): Playwright browser tests (11 tests)
 
 Run unit tests: `pnpm test`
 Run integration tests: `pnpm test:integration`
+Run e2e tests: `cd examples/web-app && pnpm test`
+
+## Demo App
+
+Reference React app at `examples/web-app/`:
+
+```bash
+cd examples/web-app
+pnpm install
+pnpm dev          # Start dev server at http://localhost:5173
+pnpm test         # Run Playwright e2e tests
+```
+
+Features: upload text/files, download by reference, notary signing, metadata display.
 
 ## Dependencies
 
@@ -124,9 +139,11 @@ pnpm format         # Prettier
 
 | Environment | URL |
 |-------------|-----|
+| Dev (default) | `https://provenance-gateway.dev.datafund.io` |
 | Production | `https://provenance-gateway.datafund.io` |
-| Dev | `https://provenance-gateway.dev.datafund.io` (if available) |
 | Local | `http://localhost:8000` (swarm_connect) |
+
+Note: SDK adds `X-Payment-Mode: free` header by default for x402 compatibility.
 
 ## Related Projects
 
