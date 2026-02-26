@@ -103,6 +103,8 @@ export interface ChainClientConfig {
   rpcUrl?: string;
   /** Custom contract address (overrides preset) */
   contractAddress?: Address;
+  /** Timeout in ms for waiting for transaction receipts (default: 120_000) */
+  txTimeout?: number;
 }
 
 /** Minimal signer interface for transaction signing */

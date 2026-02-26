@@ -579,6 +579,7 @@ var ChainClient = class {
   contractAddress;
   preset;
   signer;
+  txTimeout;
   constructor(config) {
     if (typeof config.chain === "string") {
       const preset = CHAIN_PRESETS[config.chain];
@@ -594,6 +595,7 @@ var ChainClient = class {
     const rpcUrl = config.rpcUrl ?? this.preset.rpcUrl;
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
+    this.txTimeout = config.txTimeout ?? 12e4;
     if (this.contractAddress === ZERO_ADDRESS) {
       throw new ChainConfigurationError(
         `Contract not yet deployed on ${this.preset.name}. Use a chain with a deployed contract.`
@@ -907,7 +909,9 @@ var ChainClient = class {
     }
     try {
       const receipt = await this.publicClient.waitForTransactionReceipt({
-        hash: txHash
+        hash: txHash,
+        timeout: this.txTimeout,
+        pollingInterval: 2e3
       });
       if (receipt.status === "reverted") {
         throw new ChainTransactionError("Transaction reverted", txHash);

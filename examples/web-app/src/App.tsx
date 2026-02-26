@@ -124,7 +124,7 @@ function App() {
       const signer: ChainSigner = await fromEip1193Provider(window.ethereum);
       const address = await signer.getAddress();
       setWalletAddress(address);
-      setChainClient(new ChainClient({ chain: 'base-sepolia', signer }));
+      setChainClient(new ChainClient({ chain: 'base-sepolia', signer, txTimeout: 120_000 }));
     } catch (err) {
       setAnchorError(err instanceof Error ? err.message : 'Failed to connect wallet');
     } finally {

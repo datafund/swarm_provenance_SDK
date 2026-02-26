@@ -66,6 +66,7 @@ export class ChainClient {
   private readonly contractAddress: Address;
   private readonly preset: ChainPreset;
   private readonly signer: ChainSigner | undefined;
+  private readonly txTimeout: number;
 
   constructor(config: ChainClientConfig) {
     // Resolve chain preset
@@ -84,6 +85,7 @@ export class ChainClient {
     const rpcUrl = config.rpcUrl ?? this.preset.rpcUrl;
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
+    this.txTimeout = config.txTimeout ?? 120_000;
 
     if (this.contractAddress === ZERO_ADDRESS) {
       throw new ChainConfigurationError(
@@ -478,6 +480,8 @@ export class ChainClient {
     try {
       const receipt = await this.publicClient.waitForTransactionReceipt({
         hash: txHash,
+        timeout: this.txTimeout,
+        pollingInterval: 2_000,
       });
 
       if (receipt.status === 'reverted') {

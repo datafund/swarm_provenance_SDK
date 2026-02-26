@@ -90,6 +90,8 @@ interface ChainClientConfig {
     rpcUrl?: string;
     /** Custom contract address (overrides preset) */
     contractAddress?: Address;
+    /** Timeout in ms for waiting for transaction receipts (default: 120_000) */
+    txTimeout?: number;
 }
 /** Minimal signer interface for transaction signing */
 interface ChainSigner {
@@ -125,6 +127,7 @@ declare class ChainClient {
     private readonly contractAddress;
     private readonly preset;
     private readonly signer;
+    private readonly txTimeout;
     constructor(config: ChainClientConfig);
     /**
      * Check if a data hash is registered on-chain.
