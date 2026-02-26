@@ -6,37 +6,58 @@ import { DataNotRegisteredError, SignerRequiredError } from '../../src/chain/err
 import type { ChainSigner, Hex } from '../../src/chain/types.js';
 
 /**
- * Integration tests against Base Sepolia.
+ * Integration tests against a DataProvenance contract.
  * Run with: pnpm test:integration
  *
- * Read tests work without configuration.
- * Write tests require CHAIN_PRIVATE_KEY env var with a funded Base Sepolia wallet.
+ * Environment variables:
+ *   CHAIN_RPC_URL      - RPC endpoint (default: https://sepolia.base.org)
+ *   CHAIN_CONTRACT     - Contract address (default: Base Sepolia preset)
+ *   CHAIN_PRIVATE_KEY  - Private key for write tests (optional)
+ *   CHAIN_TEST_HASH    - Known registered hash to verify (optional)
+ *
+ * For local Hardhat:
+ *   CHAIN_RPC_URL=http://127.0.0.1:8545
+ *   CHAIN_CONTRACT=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
+ *   CHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
  */
 
 const RPC_URL = process.env['CHAIN_RPC_URL'] ?? 'https://sepolia.base.org';
+const CONTRACT_ADDRESS = process.env['CHAIN_CONTRACT'] as `0x${string}` | undefined;
 const PRIVATE_KEY = process.env['CHAIN_PRIVATE_KEY'] as Hex | undefined;
-
-// Known registered hash on Base Sepolia (from CLI tests) - update if needed
 const KNOWN_HASH = process.env['CHAIN_TEST_HASH'];
 
-describe('Chain Integration (Base Sepolia)', () => {
+// Build chain config: use custom preset if contract is overridden, otherwise base-sepolia
+function getChainConfig(signer?: ChainSigner) {
+  const base: import('../../src/chain/types.js').ChainClientConfig = CONTRACT_ADDRESS
+    ? {
+        chain: {
+          chainId: 31337,
+          name: 'local',
+          rpcUrl: RPC_URL,
+          contractAddress: CONTRACT_ADDRESS,
+          explorerUrl: 'http://localhost',
+        },
+        rpcUrl: RPC_URL,
+      }
+    : { chain: 'base-sepolia', rpcUrl: RPC_URL };
+
+  if (signer) {
+    base.signer = signer;
+  }
+  return base;
+}
+
+describe('Chain Integration', () => {
   let readClient: ChainClient;
   let writeClient: ChainClient | undefined;
   let signer: ChainSigner | undefined;
 
   beforeAll(async () => {
-    readClient = new ChainClient({
-      chain: 'base-sepolia',
-      rpcUrl: RPC_URL,
-    });
+    readClient = new ChainClient(getChainConfig());
 
     if (PRIVATE_KEY) {
       signer = await fromPrivateKey(PRIVATE_KEY, RPC_URL);
-      writeClient = new ChainClient({
-        chain: 'base-sepolia',
-        rpcUrl: RPC_URL,
-        signer,
-      });
+      writeClient = new ChainClient(getChainConfig(signer));
     }
   });
 
@@ -79,7 +100,7 @@ describe('Chain Integration (Base Sepolia)', () => {
 
     it('should return explorer URL', () => {
       const url = readClient.getExplorerUrl('0xabc123');
-      expect(url).toBe('https://sepolia.basescan.org/tx/0xabc123');
+      expect(url).toContain('/tx/0xabc123');
     });
   });
 
