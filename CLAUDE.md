@@ -101,7 +101,7 @@ src/
 
 ## Testing Strategy
 
-- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (140 tests)
+- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (155 tests)
 - **Integration tests** (`tests/integration/`): Real gateway, full round-trips
 - **E2E tests** (`examples/web-app/e2e/`): Playwright browser tests (11 tests)
 
@@ -224,15 +224,22 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 - **Address**: `0x9a3c6F47B69211F05891CCb7aD33596290b9fE64`
 - **Explorer**: https://sepolia.basescan.org/address/0x9a3c6F47B69211F05891CCb7aD33596290b9fE64
 
-### Phase 1 (implemented)
+### Methods
 
 | Method | Type | Signer | Description |
 |--------|------|--------|-------------|
 | `verifyOnChain(hash)` | Read | No | Check if hash is registered |
 | `getDataRecord(hash)` | Read | No | Get full provenance record |
+| `getUserDataRecords(address)` | Read | No | Get all hashes owned by address |
+| `hasAddressAccessed(hash, address)` | Read | No | Check if address accessed hash |
+| `isAuthorizedDelegate(owner, delegate)` | Read | No | Check delegate authorization |
 | `anchor(hash, type)` | Write | Yes | Register hash on-chain |
+| `anchorFor(hash, type, owner)` | Write | Yes | Register on behalf of owner (operator) |
 | `recordAccess(hash)` | Write | Yes | Record access event |
-
-### Phase 2 (planned)
-
-`anchorFor`, `batchAnchor`, `recordTransformation`, `batchRecordAccess`, `setDataStatus`, `batchSetDataStatus`, `transferOwnership`, `setDelegate`, `getUserDataRecords`, `hasAddressAccessed`, `isAuthorizedDelegate`
+| `recordTransformation(orig, new, desc)` | Write | Yes | Record data transformation |
+| `setDataStatus(hash, status)` | Write | Yes | Set record status |
+| `transferOwnership(hash, newOwner)` | Write | Yes | Transfer data ownership |
+| `setDelegate(delegate, authorized)` | Write | Yes | Authorize/revoke delegate |
+| `batchAnchor(items)` | Write | Yes | Batch register multiple hashes |
+| `batchRecordAccess(hashes)` | Write | Yes | Batch record access |
+| `batchSetDataStatus(items)` | Write | Yes | Batch set statuses |

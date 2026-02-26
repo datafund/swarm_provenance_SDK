@@ -13,8 +13,19 @@ import {
   DataNotRegisteredError,
   SignerRequiredError,
 } from './errors.js';
-import { normalizeHash, validateDataType } from './validation.js';
-import { encodeRegisterData, encodeRecordAccess } from './contract.js';
+import { normalizeHash, validateDataType, validateAddress } from './validation.js';
+import {
+  encodeRegisterData,
+  encodeRegisterDataFor,
+  encodeRecordAccess,
+  encodeRecordTransformation,
+  encodeSetDataStatus,
+  encodeSetDelegate,
+  encodeTransferDataOwnership,
+  encodeBatchRegisterData,
+  encodeBatchRecordAccess,
+  encodeBatchSetDataStatus,
+} from './contract.js';
 import type {
   Address,
   ChainClientConfig,
@@ -23,6 +34,11 @@ import type {
   ChainSigner,
   AnchorResult,
   AccessResult,
+  TransformResult,
+  StatusResult,
+  TransferResult,
+  DelegateResult,
+  BatchResult,
   TransactionResult,
   DataStatus,
 } from './types.js';
@@ -155,6 +171,74 @@ export class ChainClient {
     }
   }
 
+  /**
+   * Get all data record hashes owned by a user.
+   */
+  async getUserDataRecords(user: string): Promise<string[]> {
+    validateAddress(user);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getUserDataRecords',
+        args: [user as Address],
+      });
+
+      return [...(result as readonly Hex[])];
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get user data records: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Check if an address has accessed a data hash.
+   */
+  async hasAddressAccessed(dataHash: string, accessor: string): Promise<boolean> {
+    const hash = normalizeHash(dataHash);
+    validateAddress(accessor);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'hasAddressAccessed',
+        args: [hash, accessor as Address],
+      });
+
+      return result;
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to check access: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Check if an address is an authorized delegate for an owner.
+   */
+  async isAuthorizedDelegate(owner: string, delegate: string): Promise<boolean> {
+    validateAddress(owner);
+    validateAddress(delegate);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'isAuthorizedDelegate',
+        args: [owner as Address, delegate as Address],
+      });
+
+      return result;
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to check delegate: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   // ─── Write Operations ────────────────────────────────────────
 
   /**
@@ -196,6 +280,170 @@ export class ChainClient {
       ...receipt,
       dataHash: hash,
       accessor,
+    };
+  }
+
+  /**
+   * Anchor a data hash on-chain on behalf of another owner (operator only).
+   * Requires a signer with operator role.
+   */
+  async anchorFor(dataHash: string, dataType: string, actualOwner: string): Promise<AnchorResult> {
+    this.requireSigner();
+    validateDataType(dataType);
+    validateAddress(actualOwner);
+
+    const hash = normalizeHash(dataHash);
+    const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address);
+
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      dataHash: hash,
+      dataType,
+      owner: actualOwner as Address,
+    };
+  }
+
+  /**
+   * Record a data transformation on-chain.
+   * Requires a signer.
+   */
+  async recordTransformation(
+    originalHash: string,
+    newHash: string,
+    description: string,
+  ): Promise<TransformResult> {
+    this.requireSigner();
+
+    const origHash = normalizeHash(originalHash);
+    const nHash = normalizeHash(newHash);
+    const data = encodeRecordTransformation(origHash, nHash, description);
+
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      originalHash: origHash,
+      newHash: nHash,
+      description,
+    };
+  }
+
+  /**
+   * Set the status of a data record (owner only).
+   * Requires a signer.
+   */
+  async setDataStatus(dataHash: string, newStatus: DataStatus): Promise<StatusResult> {
+    this.requireSigner();
+
+    const hash = normalizeHash(dataHash);
+    const data = encodeSetDataStatus(hash, newStatus as number);
+
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      dataHash: hash,
+      newStatus,
+    };
+  }
+
+  /**
+   * Transfer data ownership to a new address.
+   * Requires a signer (current owner).
+   */
+  async transferOwnership(dataHash: string, newOwner: string): Promise<TransferResult> {
+    this.requireSigner();
+    validateAddress(newOwner);
+
+    const hash = normalizeHash(dataHash);
+    const data = encodeTransferDataOwnership(hash, newOwner as Address);
+
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      dataHash: hash,
+      newOwner: newOwner as Address,
+    };
+  }
+
+  /**
+   * Authorize or revoke a delegate for the signer's account.
+   * Requires a signer.
+   */
+  async setDelegate(delegate: string, authorized: boolean): Promise<DelegateResult> {
+    this.requireSigner();
+    validateAddress(delegate);
+
+    const data = encodeSetDelegate(delegate as Address, authorized);
+
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      delegate: delegate as Address,
+      authorized,
+    };
+  }
+
+  /**
+   * Anchor multiple data hashes in a single transaction.
+   * Requires a signer.
+   */
+  async batchAnchor(items: Array<{ dataHash: string; dataType: string }>): Promise<BatchResult> {
+    this.requireSigner();
+
+    const hashes = items.map((item) => normalizeHash(item.dataHash));
+    const types = items.map((item) => {
+      validateDataType(item.dataType);
+      return item.dataType;
+    });
+
+    const data = encodeBatchRegisterData(hashes, types);
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      count: items.length,
+    };
+  }
+
+  /**
+   * Record access for multiple data hashes in a single transaction.
+   * Requires a signer.
+   */
+  async batchRecordAccess(dataHashes: string[]): Promise<BatchResult> {
+    this.requireSigner();
+
+    const hashes = dataHashes.map((h) => normalizeHash(h));
+    const data = encodeBatchRecordAccess(hashes);
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      count: dataHashes.length,
+    };
+  }
+
+  /**
+   * Set status for multiple data records in a single transaction.
+   * Requires a signer.
+   */
+  async batchSetDataStatus(
+    items: Array<{ dataHash: string; status: DataStatus }>,
+  ): Promise<BatchResult> {
+    this.requireSigner();
+
+    const hashes = items.map((item) => normalizeHash(item.dataHash));
+    const statuses = items.map((item) => item.status as number);
+    const data = encodeBatchSetDataStatus(hashes, statuses);
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      count: items.length,
     };
   }
 

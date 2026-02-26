@@ -494,6 +494,11 @@ function normalizeHash(hash) {
     `Invalid data hash: expected 64 hex characters (with or without 0x prefix), got "${hash}"`
   );
 }
+function validateAddress(address) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    throw new ChainValidationError(`Invalid Ethereum address: "${address}"`);
+  }
+}
 function validateDataType(dataType) {
   if (!dataType || dataType.trim().length === 0) {
     throw new ChainValidationError("Data type must not be empty");
@@ -506,11 +511,67 @@ function encodeRegisterData(dataHash, dataType) {
     args: [dataHash, dataType]
   });
 }
+function encodeRegisterDataFor(dataHash, dataType, actualOwner) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "registerDataFor",
+    args: [dataHash, dataType, actualOwner]
+  });
+}
 function encodeRecordAccess(dataHash) {
   return viem.encodeFunctionData({
     abi: DATA_PROVENANCE_ABI,
     functionName: "recordAccess",
     args: [dataHash]
+  });
+}
+function encodeRecordTransformation(originalDataHash, newDataHash, transformation) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "recordTransformation",
+    args: [originalDataHash, newDataHash, transformation]
+  });
+}
+function encodeSetDataStatus(dataHash, newStatus) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "setDataStatus",
+    args: [dataHash, newStatus]
+  });
+}
+function encodeSetDelegate(delegate, authorized) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "setDelegate",
+    args: [delegate, authorized]
+  });
+}
+function encodeTransferDataOwnership(dataHash, newOwner) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "transferDataOwnership",
+    args: [dataHash, newOwner]
+  });
+}
+function encodeBatchRegisterData(dataHashes, dataTypes) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "batchRegisterData",
+    args: [dataHashes, dataTypes]
+  });
+}
+function encodeBatchRecordAccess(dataHashes) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "batchRecordAccess",
+    args: [dataHashes]
+  });
+}
+function encodeBatchSetDataStatus(dataHashes, statuses) {
+  return viem.encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: "batchSetDataStatus",
+    args: [dataHashes, statuses]
   });
 }
 
@@ -600,6 +661,65 @@ var ChainClient = class {
       );
     }
   }
+  /**
+   * Get all data record hashes owned by a user.
+   */
+  async getUserDataRecords(user) {
+    validateAddress(user);
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: "getUserDataRecords",
+        args: [user]
+      });
+      return [...result];
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get user data records: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  /**
+   * Check if an address has accessed a data hash.
+   */
+  async hasAddressAccessed(dataHash, accessor) {
+    const hash = normalizeHash(dataHash);
+    validateAddress(accessor);
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: "hasAddressAccessed",
+        args: [hash, accessor]
+      });
+      return result;
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to check access: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  /**
+   * Check if an address is an authorized delegate for an owner.
+   */
+  async isAuthorizedDelegate(owner, delegate) {
+    validateAddress(owner);
+    validateAddress(delegate);
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: "isAuthorizedDelegate",
+        args: [owner, delegate]
+      });
+      return result;
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to check delegate: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
   // ─── Write Operations ────────────────────────────────────────
   /**
    * Anchor a data hash on-chain by registering it in the DataProvenance contract.
@@ -633,6 +753,134 @@ var ChainClient = class {
       ...receipt,
       dataHash: hash,
       accessor
+    };
+  }
+  /**
+   * Anchor a data hash on-chain on behalf of another owner (operator only).
+   * Requires a signer with operator role.
+   */
+  async anchorFor(dataHash, dataType, actualOwner) {
+    this.requireSigner();
+    validateDataType(dataType);
+    validateAddress(actualOwner);
+    const hash = normalizeHash(dataHash);
+    const data = encodeRegisterDataFor(hash, dataType, actualOwner);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      dataHash: hash,
+      dataType,
+      owner: actualOwner
+    };
+  }
+  /**
+   * Record a data transformation on-chain.
+   * Requires a signer.
+   */
+  async recordTransformation(originalHash, newHash, description) {
+    this.requireSigner();
+    const origHash = normalizeHash(originalHash);
+    const nHash = normalizeHash(newHash);
+    const data = encodeRecordTransformation(origHash, nHash, description);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      originalHash: origHash,
+      newHash: nHash,
+      description
+    };
+  }
+  /**
+   * Set the status of a data record (owner only).
+   * Requires a signer.
+   */
+  async setDataStatus(dataHash, newStatus) {
+    this.requireSigner();
+    const hash = normalizeHash(dataHash);
+    const data = encodeSetDataStatus(hash, newStatus);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      dataHash: hash,
+      newStatus
+    };
+  }
+  /**
+   * Transfer data ownership to a new address.
+   * Requires a signer (current owner).
+   */
+  async transferOwnership(dataHash, newOwner) {
+    this.requireSigner();
+    validateAddress(newOwner);
+    const hash = normalizeHash(dataHash);
+    const data = encodeTransferDataOwnership(hash, newOwner);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      dataHash: hash,
+      newOwner
+    };
+  }
+  /**
+   * Authorize or revoke a delegate for the signer's account.
+   * Requires a signer.
+   */
+  async setDelegate(delegate, authorized) {
+    this.requireSigner();
+    validateAddress(delegate);
+    const data = encodeSetDelegate(delegate, authorized);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      delegate,
+      authorized
+    };
+  }
+  /**
+   * Anchor multiple data hashes in a single transaction.
+   * Requires a signer.
+   */
+  async batchAnchor(items) {
+    this.requireSigner();
+    const hashes = items.map((item) => normalizeHash(item.dataHash));
+    const types = items.map((item) => {
+      validateDataType(item.dataType);
+      return item.dataType;
+    });
+    const data = encodeBatchRegisterData(hashes, types);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      count: items.length
+    };
+  }
+  /**
+   * Record access for multiple data hashes in a single transaction.
+   * Requires a signer.
+   */
+  async batchRecordAccess(dataHashes) {
+    this.requireSigner();
+    const hashes = dataHashes.map((h) => normalizeHash(h));
+    const data = encodeBatchRecordAccess(hashes);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      count: dataHashes.length
+    };
+  }
+  /**
+   * Set status for multiple data records in a single transaction.
+   * Requires a signer.
+   */
+  async batchSetDataStatus(items) {
+    this.requireSigner();
+    const hashes = items.map((item) => normalizeHash(item.dataHash));
+    const statuses = items.map((item) => item.status);
+    const data = encodeBatchSetDataStatus(hashes, statuses);
+    const receipt = await this.sendAndWait(data);
+    return {
+      ...receipt,
+      count: items.length
     };
   }
   // ─── Helpers ─────────────────────────────────────────────────

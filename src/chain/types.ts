@@ -54,6 +54,36 @@ export interface AccessResult extends TransactionResult {
   accessor: Address;
 }
 
+/** Result of a recordTransformation operation */
+export interface TransformResult extends TransactionResult {
+  originalHash: string;
+  newHash: string;
+  description: string;
+}
+
+/** Result of a setDataStatus operation */
+export interface StatusResult extends TransactionResult {
+  dataHash: string;
+  newStatus: DataStatus;
+}
+
+/** Result of a transferDataOwnership operation */
+export interface TransferResult extends TransactionResult {
+  dataHash: string;
+  newOwner: Address;
+}
+
+/** Result of a setDelegate operation */
+export interface DelegateResult extends TransactionResult {
+  delegate: Address;
+  authorized: boolean;
+}
+
+/** Result of a batch operation */
+export interface BatchResult extends TransactionResult {
+  count: number;
+}
+
 /** Chain preset configuration */
 export interface ChainPreset {
   chainId: number;

@@ -16,6 +16,11 @@ export type {
   TransactionResult,
   AnchorResult,
   AccessResult,
+  TransformResult,
+  StatusResult,
+  TransferResult,
+  DelegateResult,
+  BatchResult,
 } from './types.js';
 
 export { DataStatus } from './types.js';

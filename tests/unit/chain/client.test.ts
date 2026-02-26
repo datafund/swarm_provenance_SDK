@@ -209,6 +209,207 @@ describe('ChainClient', () => {
     });
   });
 
+  // ─── Phase 2 Read Operations ────────────────────────────────
+
+  describe('getUserDataRecords', () => {
+    it('should return list of hashes', async () => {
+      mockReadContract.mockResolvedValueOnce([SAMPLE_HASH_0X]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const result = await client.getUserDataRecords(MOCK_ADDRESS);
+      expect(result).toEqual([SAMPLE_HASH_0X]);
+    });
+
+    it('should throw on invalid address', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getUserDataRecords('bad')).rejects.toThrow('Invalid Ethereum address');
+    });
+  });
+
+  describe('hasAddressAccessed', () => {
+    it('should return true when accessed', async () => {
+      mockReadContract.mockResolvedValueOnce(true);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const result = await client.hasAddressAccessed(SAMPLE_HASH, MOCK_ADDRESS);
+      expect(result).toBe(true);
+    });
+
+    it('should return false when not accessed', async () => {
+      mockReadContract.mockResolvedValueOnce(false);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const result = await client.hasAddressAccessed(SAMPLE_HASH, MOCK_ADDRESS);
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('isAuthorizedDelegate', () => {
+    it('should return boolean', async () => {
+      mockReadContract.mockResolvedValueOnce(true);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const result = await client.isAuthorizedDelegate(MOCK_ADDRESS, MOCK_ADDRESS);
+      expect(result).toBe(true);
+    });
+  });
+
+  // ─── Phase 2 Write Operations ────────────────────────────────
+
+  describe('anchorFor', () => {
+    it('should throw SignerRequiredError without signer', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS)).rejects.toThrow(SignerRequiredError);
+    });
+
+    it('should anchor for another owner', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(100),
+        gasUsed: BigInt(60000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS);
+
+      expect(result.owner).toBe(MOCK_ADDRESS);
+      expect(result.dataHash).toBe(SAMPLE_HASH_0X);
+    });
+  });
+
+  describe('recordTransformation', () => {
+    it('should record transformation', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(101),
+        gasUsed: BigInt(55000),
+      });
+
+      const newHash = 'cd'.repeat(32);
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.recordTransformation(SAMPLE_HASH, newHash, 'filtered PII');
+
+      expect(result.originalHash).toBe(SAMPLE_HASH_0X);
+      expect(result.newHash).toBe(`0x${newHash}`);
+      expect(result.description).toBe('filtered PII');
+    });
+  });
+
+  describe('setDataStatus', () => {
+    it('should set status', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(102),
+        gasUsed: BigInt(40000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.setDataStatus(SAMPLE_HASH, DataStatus.RESTRICTED);
+
+      expect(result.dataHash).toBe(SAMPLE_HASH_0X);
+      expect(result.newStatus).toBe(DataStatus.RESTRICTED);
+    });
+  });
+
+  describe('transferOwnership', () => {
+    it('should transfer ownership', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(103),
+        gasUsed: BigInt(45000),
+      });
+
+      const newOwner: Address = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.transferOwnership(SAMPLE_HASH, newOwner);
+
+      expect(result.dataHash).toBe(SAMPLE_HASH_0X);
+      expect(result.newOwner).toBe(newOwner);
+    });
+
+    it('should throw on invalid address', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.transferOwnership(SAMPLE_HASH, 'bad')).rejects.toThrow('Invalid Ethereum address');
+    });
+  });
+
+  describe('setDelegate', () => {
+    it('should set delegate', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(104),
+        gasUsed: BigInt(35000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.setDelegate(MOCK_ADDRESS, true);
+
+      expect(result.delegate).toBe(MOCK_ADDRESS);
+      expect(result.authorized).toBe(true);
+    });
+  });
+
+  describe('batchAnchor', () => {
+    it('should batch anchor multiple hashes', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(105),
+        gasUsed: BigInt(120000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.batchAnchor([
+        { dataHash: SAMPLE_HASH, dataType: 'dataset' },
+        { dataHash: 'cd'.repeat(32), dataType: 'model' },
+      ]);
+
+      expect(result.count).toBe(2);
+      expect(result.txHash).toBe(MOCK_TX_HASH);
+    });
+  });
+
+  describe('batchRecordAccess', () => {
+    it('should batch record access', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(106),
+        gasUsed: BigInt(80000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.batchRecordAccess([SAMPLE_HASH, 'cd'.repeat(32)]);
+
+      expect(result.count).toBe(2);
+    });
+  });
+
+  describe('batchSetDataStatus', () => {
+    it('should batch set status', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(107),
+        gasUsed: BigInt(90000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.batchSetDataStatus([
+        { dataHash: SAMPLE_HASH, status: DataStatus.RESTRICTED },
+        { dataHash: 'cd'.repeat(32), status: DataStatus.DELETED },
+      ]);
+
+      expect(result.count).toBe(2);
+    });
+  });
+
   describe('getExplorerUrl', () => {
     it('should return correct explorer URL', () => {
       const client = new ChainClient({ chain: 'base-sepolia' });

@@ -47,6 +47,31 @@ interface AccessResult extends TransactionResult {
     dataHash: string;
     accessor: Address;
 }
+/** Result of a recordTransformation operation */
+interface TransformResult extends TransactionResult {
+    originalHash: string;
+    newHash: string;
+    description: string;
+}
+/** Result of a setDataStatus operation */
+interface StatusResult extends TransactionResult {
+    dataHash: string;
+    newStatus: DataStatus;
+}
+/** Result of a transferDataOwnership operation */
+interface TransferResult extends TransactionResult {
+    dataHash: string;
+    newOwner: Address;
+}
+/** Result of a setDelegate operation */
+interface DelegateResult extends TransactionResult {
+    delegate: Address;
+    authorized: boolean;
+}
+/** Result of a batch operation */
+interface BatchResult extends TransactionResult {
+    count: number;
+}
 /** Chain preset configuration */
 interface ChainPreset {
     chainId: number;
@@ -111,6 +136,18 @@ declare class ChainClient {
      */
     getDataRecord(dataHash: string): Promise<ChainProvenanceRecord>;
     /**
+     * Get all data record hashes owned by a user.
+     */
+    getUserDataRecords(user: string): Promise<string[]>;
+    /**
+     * Check if an address has accessed a data hash.
+     */
+    hasAddressAccessed(dataHash: string, accessor: string): Promise<boolean>;
+    /**
+     * Check if an address is an authorized delegate for an owner.
+     */
+    isAuthorizedDelegate(owner: string, delegate: string): Promise<boolean>;
+    /**
      * Anchor a data hash on-chain by registering it in the DataProvenance contract.
      * Requires a signer.
      */
@@ -120,6 +157,52 @@ declare class ChainClient {
      * Requires a signer.
      */
     recordAccess(dataHash: string): Promise<AccessResult>;
+    /**
+     * Anchor a data hash on-chain on behalf of another owner (operator only).
+     * Requires a signer with operator role.
+     */
+    anchorFor(dataHash: string, dataType: string, actualOwner: string): Promise<AnchorResult>;
+    /**
+     * Record a data transformation on-chain.
+     * Requires a signer.
+     */
+    recordTransformation(originalHash: string, newHash: string, description: string): Promise<TransformResult>;
+    /**
+     * Set the status of a data record (owner only).
+     * Requires a signer.
+     */
+    setDataStatus(dataHash: string, newStatus: DataStatus): Promise<StatusResult>;
+    /**
+     * Transfer data ownership to a new address.
+     * Requires a signer (current owner).
+     */
+    transferOwnership(dataHash: string, newOwner: string): Promise<TransferResult>;
+    /**
+     * Authorize or revoke a delegate for the signer's account.
+     * Requires a signer.
+     */
+    setDelegate(delegate: string, authorized: boolean): Promise<DelegateResult>;
+    /**
+     * Anchor multiple data hashes in a single transaction.
+     * Requires a signer.
+     */
+    batchAnchor(items: Array<{
+        dataHash: string;
+        dataType: string;
+    }>): Promise<BatchResult>;
+    /**
+     * Record access for multiple data hashes in a single transaction.
+     * Requires a signer.
+     */
+    batchRecordAccess(dataHashes: string[]): Promise<BatchResult>;
+    /**
+     * Set status for multiple data records in a single transaction.
+     * Requires a signer.
+     */
+    batchSetDataStatus(items: Array<{
+        dataHash: string;
+        status: DataStatus;
+    }>): Promise<BatchResult>;
     /**
      * Get the explorer URL for a transaction hash.
      */
@@ -240,4 +323,4 @@ declare const CHAIN_PRESETS: Record<string, ChainPreset>;
  */
 declare function normalizeHash(hash: string): Hex;
 
-export { type AccessResult, type Address, type AnchorResult, BASE_MAINNET, BASE_SEPOLIA, CHAIN_PRESETS, ChainClient, type ChainClientConfig, ChainConfigurationError, ChainConnectionError, ChainError, type ChainPreset, type ChainProvenanceRecord, type ChainSigner, ChainTransactionError, type ChainTransformation, ChainValidationError, DataNotRegisteredError, DataStatus, type Hex, SignerRequiredError, type TransactionResult, fromEip1193Provider, fromPrivateKey, fromViemWalletClient, normalizeHash };
+export { type AccessResult, type Address, type AnchorResult, BASE_MAINNET, BASE_SEPOLIA, type BatchResult, CHAIN_PRESETS, ChainClient, type ChainClientConfig, ChainConfigurationError, ChainConnectionError, ChainError, type ChainPreset, type ChainProvenanceRecord, type ChainSigner, ChainTransactionError, type ChainTransformation, ChainValidationError, DataNotRegisteredError, DataStatus, type DelegateResult, type Hex, SignerRequiredError, type StatusResult, type TransactionResult, type TransferResult, type TransformResult, fromEip1193Provider, fromPrivateKey, fromViemWalletClient, normalizeHash };
