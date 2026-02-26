@@ -1,3 +1,5 @@
+export { G as GatewayConnectionError, N as NotaryError, P as ProvenanceError, S as StampError, V as VerificationError } from './errors-jmDO4tHj.js';
+
 /**
  * Configuration options for ProvenanceClient
  */
@@ -176,39 +178,6 @@ declare class ProvenanceClient {
 }
 
 /**
- * Base error class for all SDK errors
- */
-declare class ProvenanceError extends Error {
-    readonly code?: string | undefined;
-    constructor(message: string, code?: string | undefined);
-}
-/**
- * Error connecting to or communicating with the gateway
- */
-declare class GatewayConnectionError extends ProvenanceError {
-    readonly statusCode?: number | undefined;
-    constructor(message: string, statusCode?: number | undefined, code?: string);
-}
-/**
- * Error related to postage stamps (acquisition, validation, etc.)
- */
-declare class StampError extends ProvenanceError {
-    constructor(message: string, code?: string);
-}
-/**
- * Error related to notary signing service
- */
-declare class NotaryError extends ProvenanceError {
-    constructor(message: string, code?: string);
-}
-/**
- * Error when signature verification fails
- */
-declare class VerificationError extends ProvenanceError {
-    constructor(message: string, code?: string);
-}
-
-/**
  * Options for building provenance metadata
  */
 interface MetadataBuilderOptions {
@@ -294,4 +263,4 @@ declare function base64ToBytes(base64: string): Uint8Array;
  */
 declare function isValidSwarmReference(ref: string): boolean;
 
-export { type AcquiredStamp, type DownloadOptions, type DownloadResult, GatewayConnectionError, NotaryError, type NotaryInfo, type NotarySignature, type PoolStatus, ProvenanceClient, type ProvenanceClientConfig, ProvenanceError, type ProvenanceMetadata, type SignedDocument, StampError, type UploadOptions, type UploadResult, VerificationError, base64ToBytes, buildMetadata, bytesToBase64, extractContent, isValidSwarmReference, parseMetadata, serializeMetadata, sha256Hex, toBytes, verifyAllSignatures, verifyContentHash, verifyDataHash, verifySignature };
+export { type AcquiredStamp, type DownloadOptions, type DownloadResult, type NotaryInfo, type NotarySignature, type PoolStatus, ProvenanceClient, type ProvenanceClientConfig, type ProvenanceMetadata, type SignedDocument, type UploadOptions, type UploadResult, base64ToBytes, buildMetadata, bytesToBase64, extractContent, isValidSwarmReference, parseMetadata, serializeMetadata, sha256Hex, toBytes, verifyAllSignatures, verifyContentHash, verifyDataHash, verifySignature };
