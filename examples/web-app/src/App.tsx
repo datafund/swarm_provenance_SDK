@@ -49,7 +49,11 @@ function App() {
   // Chain state
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [chainClient, setChainClient] = useState<ChainClient | null>(null);
+  const [chainPreset, setChainPreset] = useState<string>('base-sepolia');
+  const [chainName, setChainName] = useState<string | null>(null);
+  const [wrongChain, setWrongChain] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [anchorHash, setAnchorHash] = useState('');
   const [anchorType, setAnchorType] = useState('dataset');
   const [anchoring, setAnchoring] = useState(false);
@@ -115,6 +119,27 @@ function App() {
     }
   };
 
+  // Supported chain IDs
+  const SUPPORTED_CHAINS: Record<number, string> = { 31337: 'hardhat', 84532: 'base-sepolia' };
+  const CHAIN_NAMES: Record<number, string> = {
+    1: 'Ethereum Mainnet', 31337: 'Hardhat', 84532: 'Base Sepolia',
+    8453: 'Base', 11155111: 'Sepolia', 137: 'Polygon',
+  };
+
+  const setupChainClient = async (signer: ChainSigner, chainId: number) => {
+    const preset = SUPPORTED_CHAINS[chainId];
+    if (preset) {
+      setChainPreset(preset);
+      setChainName(CHAIN_NAMES[chainId] || `Chain ${chainId}`);
+      setWrongChain(false);
+      setChainClient(new ChainClient({ chain: preset, signer, txTimeout: 120_000 }));
+    } else {
+      setChainName(CHAIN_NAMES[chainId] || `Unknown (${chainId})`);
+      setWrongChain(true);
+      setChainClient(null);
+    }
+  };
+
   const handleConnectWallet = async () => {
     if (!window.ethereum) return;
     setConnecting(true);
@@ -124,11 +149,82 @@ function App() {
       const signer: ChainSigner = await fromEip1193Provider(window.ethereum);
       const address = await signer.getAddress();
       setWalletAddress(address);
-      setChainClient(new ChainClient({ chain: 'base-sepolia', signer, txTimeout: 120_000 }));
+
+      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' }) as string;
+      const chainId = parseInt(chainIdHex, 16);
+      await setupChainClient(signer, chainId);
+
+      // Listen for chain changes
+      window.ethereum.on?.('chainChanged', () => {
+        window.location.reload();
+      });
     } catch (err) {
       setAnchorError(err instanceof Error ? err.message : 'Failed to connect wallet');
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const handleSwitchChain = async (targetChainId: number) => {
+    if (!window.ethereum) return;
+    setSwitching(true);
+    setAnchorError(null);
+
+    const hexChainId = `0x${targetChainId.toString(16)}`;
+
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: hexChainId }],
+      });
+    } catch (err: any) {
+      // 4902 = chain not added to MetaMask yet
+      if (err?.code === 4902 || err?.message?.includes('Unrecognized chain ID')) {
+        try {
+          if (targetChainId === 31337) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: hexChainId,
+                chainName: 'Hardhat Local',
+                rpcUrls: ['http://127.0.0.1:8545'],
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+              }],
+            });
+          } else if (targetChainId === 84532) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: hexChainId,
+                chainName: 'Base Sepolia',
+                rpcUrls: ['https://sepolia.base.org'],
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                blockExplorerUrls: ['https://sepolia.basescan.org'],
+              }],
+            });
+          }
+        } catch (addErr) {
+          setAnchorError(addErr instanceof Error ? addErr.message : 'Failed to add network');
+          setSwitching(false);
+          return;
+        }
+      } else {
+        setAnchorError(err instanceof Error ? err.message : 'Failed to switch network');
+        setSwitching(false);
+        return;
+      }
+    }
+
+    // After switching, re-setup the client
+    try {
+      const signer: ChainSigner = await fromEip1193Provider(window.ethereum);
+      const address = await signer.getAddress();
+      setWalletAddress(address);
+      await setupChainClient(signer, targetChainId);
+    } catch (err) {
+      setAnchorError(err instanceof Error ? err.message : 'Failed to reconnect after switch');
+    } finally {
+      setSwitching(false);
     }
   };
 
@@ -142,11 +238,15 @@ function App() {
       if (!anchorHash.trim()) {
         throw new Error('Please enter a data hash to anchor');
       }
+      console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType);
+      console.log('[anchor] Chain preset:', chainPreset);
       const result = await chainClient.anchor(anchorHash.trim(), anchorType);
+      console.log('[anchor] Success:', result);
       setAnchorResult(result);
       // Auto-populate verify hash
       setVerifyHash(anchorHash.trim());
     } catch (err) {
+      console.error('[anchor] Error:', err);
       setAnchorError(err instanceof Error ? err.message : 'Anchor failed');
     } finally {
       setAnchoring(false);
@@ -163,8 +263,8 @@ function App() {
       if (!verifyHash.trim()) {
         throw new Error('Please enter a hash to verify');
       }
-      // Read-only client - no signer needed
-      const readClient = new ChainClient({ chain: 'base-sepolia' });
+      // Read-only client - uses same chain as connected wallet (or base-sepolia default)
+      const readClient = new ChainClient({ chain: chainPreset });
       const record = await readClient.getDataRecord(verifyHash.trim());
       setVerifyRecord(record);
     } catch (err) {
@@ -383,7 +483,7 @@ function App() {
       <section className="chain">
         <h2>Blockchain Anchoring</h2>
         <p className="section-description">
-          Anchor data hashes on the DataProvenance contract (Base Sepolia) for immutable on-chain provenance.
+          Anchor data hashes on the DataProvenance contract for immutable on-chain provenance.
         </p>
 
         {/* Wallet Connection */}
@@ -397,11 +497,32 @@ function App() {
           <div className="wallet-status">
             <span className="success">Connected:</span>{' '}
             <code>{walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</code>
+            {chainName && (
+              <span style={{ marginLeft: 12 }}>
+                on <strong>{chainName}</strong>
+                {wrongChain && <span className="error" style={{ marginLeft: 8 }}>Unsupported chain</span>}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Wrong chain warning */}
+        {walletAddress && wrongChain && (
+          <div className="chain-switch">
+            <p className="warning">
+              Please switch to a supported network:
+            </p>
+            <button className="small" onClick={() => handleSwitchChain(31337)} disabled={switching}>
+              {switching ? 'Switching...' : 'Switch to Hardhat (local)'}
+            </button>
+            <button className="small" onClick={() => handleSwitchChain(84532)} disabled={switching}>
+              {switching ? 'Switching...' : 'Switch to Base Sepolia'}
+            </button>
           </div>
         )}
 
         {/* Anchor Form */}
-        {walletAddress && (
+        {walletAddress && !wrongChain && (
           <>
             <h3>Anchor Data</h3>
             <div className="input-group">

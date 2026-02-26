@@ -18,10 +18,20 @@ export const BASE_MAINNET: ChainPreset = {
   explorerUrl: 'https://basescan.org',
 };
 
+/** Local Hardhat preset for development */
+export const HARDHAT_LOCAL: ChainPreset = {
+  chainId: 31337,
+  name: 'hardhat',
+  rpcUrl: 'http://127.0.0.1:8545',
+  contractAddress: '0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9',
+  explorerUrl: 'http://localhost',
+};
+
 /** All available chain presets indexed by name */
 export const CHAIN_PRESETS: Record<string, ChainPreset> = {
   'base-sepolia': BASE_SEPOLIA,
   'base': BASE_MAINNET,
+  'hardhat': HARDHAT_LOCAL,
 };
 
 /** Zero bytes32 value (used to detect unregistered records) */

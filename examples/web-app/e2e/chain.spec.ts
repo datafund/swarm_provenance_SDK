@@ -40,7 +40,6 @@ test.describe('Chain Section - Layout', () => {
 
   test('shows section description mentioning DataProvenance', async ({ page }) => {
     await expect(page.getByText('DataProvenance contract')).toBeVisible();
-    await expect(page.getByText('Base Sepolia')).toBeVisible();
   });
 
   test('verify section is always visible', async ({ page }) => {

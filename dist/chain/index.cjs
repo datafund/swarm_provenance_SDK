@@ -411,9 +411,17 @@ var BASE_MAINNET = {
   contractAddress: "0x0000000000000000000000000000000000000000",
   explorerUrl: "https://basescan.org"
 };
+var HARDHAT_LOCAL = {
+  chainId: 31337,
+  name: "hardhat",
+  rpcUrl: "http://127.0.0.1:8545",
+  contractAddress: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  explorerUrl: "http://localhost"
+};
 var CHAIN_PRESETS = {
   "base-sepolia": BASE_SEPOLIA,
-  "base": BASE_MAINNET
+  "base": BASE_MAINNET,
+  "hardhat": HARDHAT_LOCAL
 };
 var ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 var ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
