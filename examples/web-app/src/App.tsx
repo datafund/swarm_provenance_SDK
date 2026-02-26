@@ -5,8 +5,28 @@ import {
   type DownloadResult,
   type NotaryInfo,
 } from '@datafund/swarm-provenance';
+import {
+  ChainClient,
+  fromEip1193Provider,
+  DataStatus,
+  type ChainSigner,
+  type ChainProvenanceRecord,
+  type AnchorResult,
+} from '@datafund/swarm-provenance/chain';
 
 const client = new ProvenanceClient();
+
+// EIP-1193 provider type for window.ethereum
+interface Eip1193Provider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+  on?(event: string, handler: (...args: unknown[]) => void): void;
+}
+
+declare global {
+  interface Window {
+    ethereum?: Eip1193Provider;
+  }
+}
 
 function App() {
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -25,6 +45,23 @@ function App() {
   const [downloading, setDownloading] = useState(false);
   const [downloadResult, setDownloadResult] = useState<DownloadResult | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  // Chain state
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [chainClient, setChainClient] = useState<ChainClient | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [anchorHash, setAnchorHash] = useState('');
+  const [anchorType, setAnchorType] = useState('dataset');
+  const [anchoring, setAnchoring] = useState(false);
+  const [anchorResult, setAnchorResult] = useState<AnchorResult | null>(null);
+  const [anchorError, setAnchorError] = useState<string | null>(null);
+  const [verifyHash, setVerifyHash] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [verifyRecord, setVerifyRecord] = useState<ChainProvenanceRecord | null>(null);
+  const [verifyNotFound, setVerifyNotFound] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  const hasWallet = typeof window !== 'undefined' && !!window.ethereum;
 
   // Check health and notary on mount
   useEffect(() => {
@@ -50,6 +87,8 @@ function App() {
 
       setUploadResult(result);
       setDownloadRef(result.reference);
+      // Auto-populate anchor hash with the content hash
+      setAnchorHash(result.metadata.content_hash);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -73,6 +112,78 @@ function App() {
       setDownloadError(err instanceof Error ? err.message : 'Download failed');
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handleConnectWallet = async () => {
+    if (!window.ethereum) return;
+    setConnecting(true);
+    setAnchorError(null);
+
+    try {
+      const signer: ChainSigner = await fromEip1193Provider(window.ethereum);
+      const address = await signer.getAddress();
+      setWalletAddress(address);
+      setChainClient(new ChainClient({ chain: 'base-sepolia', signer }));
+    } catch (err) {
+      setAnchorError(err instanceof Error ? err.message : 'Failed to connect wallet');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleAnchor = async () => {
+    if (!chainClient) return;
+    setAnchoring(true);
+    setAnchorError(null);
+    setAnchorResult(null);
+
+    try {
+      if (!anchorHash.trim()) {
+        throw new Error('Please enter a data hash to anchor');
+      }
+      const result = await chainClient.anchor(anchorHash.trim(), anchorType);
+      setAnchorResult(result);
+      // Auto-populate verify hash
+      setVerifyHash(anchorHash.trim());
+    } catch (err) {
+      setAnchorError(err instanceof Error ? err.message : 'Anchor failed');
+    } finally {
+      setAnchoring(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    setVerifying(true);
+    setVerifyError(null);
+    setVerifyRecord(null);
+    setVerifyNotFound(false);
+
+    try {
+      if (!verifyHash.trim()) {
+        throw new Error('Please enter a hash to verify');
+      }
+      // Read-only client - no signer needed
+      const readClient = new ChainClient({ chain: 'base-sepolia' });
+      const record = await readClient.getDataRecord(verifyHash.trim());
+      setVerifyRecord(record);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('not registered')) {
+        setVerifyNotFound(true);
+      } else {
+        setVerifyError(err instanceof Error ? err.message : 'Verification failed');
+      }
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const statusLabel = (status: DataStatus) => {
+    switch (status) {
+      case DataStatus.ACTIVE: return 'Active';
+      case DataStatus.RESTRICTED: return 'Restricted';
+      case DataStatus.DELETED: return 'Deleted';
+      default: return `Unknown (${String(status)})`;
     }
   };
 
@@ -264,6 +375,144 @@ function App() {
               <strong>Content:</strong>
               <pre>{new TextDecoder().decode(downloadResult.file)}</pre>
             </div>
+          </div>
+        )}
+      </section>
+
+      {/* Chain Anchoring Section */}
+      <section className="chain">
+        <h2>Blockchain Anchoring</h2>
+        <p className="section-description">
+          Anchor data hashes on the DataProvenance contract (Base Sepolia) for immutable on-chain provenance.
+        </p>
+
+        {/* Wallet Connection */}
+        {!hasWallet ? (
+          <p className="warning">No wallet detected. Install MetaMask to use chain features.</p>
+        ) : !walletAddress ? (
+          <button onClick={handleConnectWallet} disabled={connecting}>
+            {connecting ? 'Connecting...' : 'Connect Wallet'}
+          </button>
+        ) : (
+          <div className="wallet-status">
+            <span className="success">Connected:</span>{' '}
+            <code>{walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</code>
+          </div>
+        )}
+
+        {/* Anchor Form */}
+        {walletAddress && (
+          <>
+            <h3>Anchor Data</h3>
+            <div className="input-group">
+              <label>Data Hash (SHA256):</label>
+              <input
+                type="text"
+                value={anchorHash}
+                onChange={(e) => setAnchorHash(e.target.value)}
+                placeholder="64 hex characters (auto-populated after upload)"
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Data Type:</label>
+              <input
+                type="text"
+                value={anchorType}
+                onChange={(e) => setAnchorType(e.target.value)}
+                placeholder="e.g. dataset, model, document"
+              />
+            </div>
+
+            <button onClick={handleAnchor} disabled={anchoring || !anchorHash.trim()}>
+              {anchoring ? 'Anchoring...' : 'Anchor On-Chain'}
+            </button>
+          </>
+        )}
+
+        {anchorError && <p className="error">{anchorError}</p>}
+
+        {anchorResult && (
+          <div className="result">
+            <h3>Anchored Successfully</h3>
+            <div className="detail-row">
+              <span className="label">Tx Hash:</span>
+              <a href={anchorResult.explorerUrl} target="_blank" rel="noopener noreferrer">
+                <code className="value">{anchorResult.txHash.slice(0, 10)}...{anchorResult.txHash.slice(-8)}</code>
+              </a>
+            </div>
+            <div className="detail-row">
+              <span className="label">Block:</span>
+              <span className="value">{anchorResult.blockNumber}</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Gas Used:</span>
+              <span className="value">{anchorResult.gasUsed.toString()}</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Owner:</span>
+              <code className="value">{anchorResult.owner}</code>
+            </div>
+          </div>
+        )}
+
+        {/* Verify On-Chain */}
+        <h3>Verify On-Chain</h3>
+        <div className="input-group">
+          <label>Data Hash to verify:</label>
+          <input
+            type="text"
+            value={verifyHash}
+            onChange={(e) => setVerifyHash(e.target.value)}
+            placeholder="64 hex characters"
+          />
+        </div>
+
+        <button onClick={handleVerify} disabled={verifying || !verifyHash.trim()}>
+          {verifying ? 'Verifying...' : 'Verify On-Chain'}
+        </button>
+
+        {verifyError && <p className="error">{verifyError}</p>}
+
+        {verifyNotFound && (
+          <div className="result" style={{ borderLeftColor: '#ffc107' }}>
+            <p><strong>Not found.</strong> This hash is not registered on-chain.</p>
+          </div>
+        )}
+
+        {verifyRecord && (
+          <div className="result">
+            <h3>On-Chain Record</h3>
+            <div className="detail-row">
+              <span className="label">Owner:</span>
+              <code className="value">{verifyRecord.owner}</code>
+            </div>
+            <div className="detail-row">
+              <span className="label">Data Type:</span>
+              <span className="value">{verifyRecord.dataType}</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Status:</span>
+              <span className={`badge ${verifyRecord.status === DataStatus.ACTIVE ? 'success' : 'warning'}`}>
+                {statusLabel(verifyRecord.status)}
+              </span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Registered:</span>
+              <span className="value">{new Date(verifyRecord.timestamp * 1000).toLocaleString()}</span>
+            </div>
+            {verifyRecord.accessors.length > 0 && (
+              <div className="detail-row">
+                <span className="label">Accessors:</span>
+                <span className="value">{verifyRecord.accessors.length}</span>
+              </div>
+            )}
+            {verifyRecord.transformations.length > 0 && (
+              <div className="detail-row">
+                <span className="label">Transforms:</span>
+                <span className="value">{verifyRecord.transformations.length}</span>
+              </div>
+            )}
           </div>
         )}
       </section>
