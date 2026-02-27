@@ -8,19 +8,25 @@ jobs:
   publish:
     runs-on: ubuntu-latest
 
-    # Only publish when package.json version has changed
+    permissions:
+      contents: write
+      id-token: write
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
-      - name: Use Node.js 20.x
+      - name: Use Node.js 22.x
         uses: actions/setup-node@v4
         with:
-          node-version: 20.x
+          node-version: 22.x
           cache: 'pnpm'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Install latest npm
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: pnpm install
@@ -52,14 +58,28 @@ jobs:
             echo "published=false" >> $GITHUB_OUTPUT
             echo "Version ${PACKAGE_VERSION} not yet published."
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm
         if: steps.version-check.outputs.published == 'false'
-        run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --access public --no-git-checks --provenance
+
+      - name: Verify publish
+        if: steps.version-check.outputs.published == 'false'
+        run: |
+          echo "Waiting for npm registry to propagate..."
+          PACKAGE_NAME="${{ steps.version-check.outputs.name }}"
+          PACKAGE_VERSION="${{ steps.version-check.outputs.version }}"
+
+          for i in 1 2 3 4 5 6; do
+            sleep 10
+            if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version 2>/dev/null; then
+              echo "Verified: ${PACKAGE_NAME}@${PACKAGE_VERSION} is live on npm"
+              exit 0
+            fi
+            echo "Attempt $i: not yet visible, retrying..."
+          done
+
+          echo "::warning::Package published but not yet visible on npm registry after 60s. It may take a few more minutes to propagate."
 
       - name: Tag release
         if: steps.version-check.outputs.published == 'false'
