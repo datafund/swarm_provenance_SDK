@@ -59,7 +59,7 @@
     "type": "git",
     "url": "https://github.com/datafund/swarm_provenance_SDK.git"
   },
-  "homepage": "https://github.com/datafund/swarm_provenance_SDK#readme",
+  "homepage": "https://provenance.datafund.io/",
   "bugs": {
     "url": "https://github.com/datafund/swarm_provenance_SDK/issues"
   },

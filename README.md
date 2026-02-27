@@ -5,11 +5,13 @@ TypeScript SDK for storing and retrieving provenance data via the Swarm network.
 ## Installation
 
 ```bash
-# From GitHub (current)
-pnpm add datafund/swarm_provenance_SDK
-
-# From npm (coming soon)
 pnpm add @datafund/swarm-provenance
+```
+
+For blockchain anchoring features, also install viem:
+
+```bash
+pnpm add @datafund/swarm-provenance viem
 ```
 
 ## Quick Start
@@ -189,11 +191,7 @@ const result = verifySignature(signature, metadata, expectedSigner);
 
 ## Blockchain Anchoring (`/chain`)
 
-The chain module provides on-chain data provenance via a DataProvenance smart contract. It uses [viem](https://viem.sh) as an optional peer dependency.
-
-```bash
-pnpm add viem
-```
+The chain module provides on-chain data provenance via a DataProvenance smart contract. It uses [viem](https://viem.sh) as an optional peer dependency (see [Installation](#installation)).
 
 ### `ChainClient`
 
