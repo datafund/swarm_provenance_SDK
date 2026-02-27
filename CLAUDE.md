@@ -154,6 +154,42 @@ pnpm lint           # ESLint
 pnpm format         # Prettier
 ```
 
+## Git Workflow & Releases
+
+### Branching
+
+- **`main`** — Protected. Requires 1 PR review, enforced for admins. No direct pushes.
+- **`development`** — Integration branch. All feature work merges here first.
+- **Feature branches** — Created from `development`: `feature/<name>`, `fix/<name>`, `chore/<name>`.
+
+### Flow
+
+1. Create feature branch from `development`
+2. Do work, commit, push, create PR to `development`
+3. Merge to `development` after CI passes
+4. When ready to release: bump version in `package.json`, create PR from `development` → `main`
+5. After merge to `main`, CI auto-publishes to npm and creates a git tag
+
+### Releasing to npm
+
+Publishing is automated via `.github/workflows/publish.yml`:
+- Triggers on push to `main`
+- Checks if `package.json` version is already published
+- If new version: runs tests, builds, publishes to npm, tags `vX.Y.Z`
+- If version unchanged: skips publish (safe for non-release merges)
+
+To release a new version:
+1. On `development`, bump version: edit `package.json` `"version"` field
+2. Commit: `chore: bump version to X.Y.Z`
+3. Create PR `development` → `main`
+4. After merge, npm publish happens automatically
+
+### CI
+
+- `.github/workflows/ci.yml` — Runs on all PRs and pushes to `main`/`development`
+- Matrix: Node 18.x + 20.x
+- Steps: typecheck → lint → test → build → verify dist
+
 ## Gateway URLs
 
 | Environment | URL |
