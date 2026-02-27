@@ -1,0 +1,68 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    # Only publish when package.json version has changed
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Check if version already published
+        id: version-check
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          echo "version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+          echo "name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version 2>/dev/null; then
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "Version ${PACKAGE_VERSION} already published, skipping."
+          else
+            echo "published=false" >> $GITHUB_OUTPUT
+            echo "Version ${PACKAGE_VERSION} not yet published."
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm
+        if: steps.version-check.outputs.published == 'false'
+        run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag release
+        if: steps.version-check.outputs.published == 'false'
+        run: |
+          git tag "v${{ steps.version-check.outputs.version }}"
+          git push origin "v${{ steps.version-check.outputs.version }}"
