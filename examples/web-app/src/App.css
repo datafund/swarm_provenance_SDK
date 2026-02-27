@@ -280,3 +280,56 @@ p.error {
   background: #fff3cd;
   color: #856404;
 }
+
+/* Chain Section */
+.section-description {
+  color: #666;
+  font-size: 14px;
+  margin-bottom: 15px;
+}
+
+.wallet-status {
+  padding: 10px 15px;
+  background: #f0fff4;
+  border-radius: 6px;
+  border: 1px solid #c3e6cb;
+  margin-bottom: 15px;
+  font-size: 14px;
+}
+
+.chain-switch {
+  padding: 12px 15px;
+  background: #fff8e1;
+  border-radius: 6px;
+  border: 1px solid #ffe082;
+  margin-bottom: 15px;
+}
+
+.chain-switch p {
+  margin: 0 0 10px 0;
+}
+
+.chain-switch button {
+  margin-right: 8px;
+  margin-left: 0;
+}
+
+.chain .result a {
+  color: #0066cc;
+  text-decoration: none;
+}
+
+.chain .result a:hover {
+  text-decoration: underline;
+}
+
+.chain h3 {
+  margin-top: 25px;
+  padding-top: 15px;
+  border-top: 1px solid #eee;
+}
+
+.chain h3:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}

@@ -5,8 +5,28 @@ import {
   type DownloadResult,
   type NotaryInfo,
 } from '@datafund/swarm-provenance';
+import {
+  ChainClient,
+  fromEip1193Provider,
+  DataStatus,
+  type ChainSigner,
+  type ChainProvenanceRecord,
+  type AnchorResult,
+} from '@datafund/swarm-provenance/chain';
 
 const client = new ProvenanceClient();
+
+// EIP-1193 provider type for window.ethereum
+interface Eip1193Provider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+  on?(event: string, handler: (...args: unknown[]) => void): void;
+}
+
+declare global {
+  interface Window {
+    ethereum?: Eip1193Provider;
+  }
+}
 
 function App() {
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -25,6 +45,27 @@ function App() {
   const [downloading, setDownloading] = useState(false);
   const [downloadResult, setDownloadResult] = useState<DownloadResult | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  // Chain state
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [chainClient, setChainClient] = useState<ChainClient | null>(null);
+  const [chainPreset, setChainPreset] = useState<string>('base-sepolia');
+  const [chainName, setChainName] = useState<string | null>(null);
+  const [wrongChain, setWrongChain] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [anchorHash, setAnchorHash] = useState('');
+  const [anchorType, setAnchorType] = useState('dataset');
+  const [anchoring, setAnchoring] = useState(false);
+  const [anchorResult, setAnchorResult] = useState<AnchorResult | null>(null);
+  const [anchorError, setAnchorError] = useState<string | null>(null);
+  const [verifyHash, setVerifyHash] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [verifyRecord, setVerifyRecord] = useState<ChainProvenanceRecord | null>(null);
+  const [verifyNotFound, setVerifyNotFound] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  const hasWallet = typeof window !== 'undefined' && !!window.ethereum;
 
   // Check health and notary on mount
   useEffect(() => {
@@ -50,6 +91,8 @@ function App() {
 
       setUploadResult(result);
       setDownloadRef(result.reference);
+      // Auto-populate anchor hash with the content hash
+      setAnchorHash(result.metadata.content_hash);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -73,6 +116,174 @@ function App() {
       setDownloadError(err instanceof Error ? err.message : 'Download failed');
     } finally {
       setDownloading(false);
+    }
+  };
+
+  // Supported chain IDs
+  const SUPPORTED_CHAINS: Record<number, string> = { 31337: 'hardhat', 84532: 'base-sepolia' };
+  const CHAIN_NAMES: Record<number, string> = {
+    1: 'Ethereum Mainnet', 31337: 'Hardhat', 84532: 'Base Sepolia',
+    8453: 'Base', 11155111: 'Sepolia', 137: 'Polygon',
+  };
+
+  const setupChainClient = async (signer: ChainSigner, chainId: number) => {
+    const preset = SUPPORTED_CHAINS[chainId];
+    if (preset) {
+      setChainPreset(preset);
+      setChainName(CHAIN_NAMES[chainId] || `Chain ${chainId}`);
+      setWrongChain(false);
+      setChainClient(new ChainClient({ chain: preset, signer, txTimeout: 120_000 }));
+    } else {
+      setChainName(CHAIN_NAMES[chainId] || `Unknown (${chainId})`);
+      setWrongChain(true);
+      setChainClient(null);
+    }
+  };
+
+  const handleConnectWallet = async () => {
+    if (!window.ethereum) return;
+    setConnecting(true);
+    setAnchorError(null);
+
+    try {
+      const signer: ChainSigner = await fromEip1193Provider(window.ethereum);
+      const address = await signer.getAddress();
+      setWalletAddress(address);
+
+      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' }) as string;
+      const chainId = parseInt(chainIdHex, 16);
+      await setupChainClient(signer, chainId);
+
+      // Listen for chain changes
+      window.ethereum.on?.('chainChanged', () => {
+        window.location.reload();
+      });
+    } catch (err) {
+      setAnchorError(err instanceof Error ? err.message : 'Failed to connect wallet');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleSwitchChain = async (targetChainId: number) => {
+    if (!window.ethereum) return;
+    setSwitching(true);
+    setAnchorError(null);
+
+    const hexChainId = `0x${targetChainId.toString(16)}`;
+
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: hexChainId }],
+      });
+    } catch (err: any) {
+      // 4902 = chain not added to MetaMask yet
+      if (err?.code === 4902 || err?.message?.includes('Unrecognized chain ID')) {
+        try {
+          if (targetChainId === 31337) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: hexChainId,
+                chainName: 'Hardhat Local',
+                rpcUrls: ['http://127.0.0.1:8545'],
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+              }],
+            });
+          } else if (targetChainId === 84532) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: hexChainId,
+                chainName: 'Base Sepolia',
+                rpcUrls: ['https://sepolia.base.org'],
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                blockExplorerUrls: ['https://sepolia.basescan.org'],
+              }],
+            });
+          }
+        } catch (addErr) {
+          setAnchorError(addErr instanceof Error ? addErr.message : 'Failed to add network');
+          setSwitching(false);
+          return;
+        }
+      } else {
+        setAnchorError(err instanceof Error ? err.message : 'Failed to switch network');
+        setSwitching(false);
+        return;
+      }
+    }
+
+    // After switching, re-setup the client
+    try {
+      const signer: ChainSigner = await fromEip1193Provider(window.ethereum);
+      const address = await signer.getAddress();
+      setWalletAddress(address);
+      await setupChainClient(signer, targetChainId);
+    } catch (err) {
+      setAnchorError(err instanceof Error ? err.message : 'Failed to reconnect after switch');
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const handleAnchor = async () => {
+    if (!chainClient) return;
+    setAnchoring(true);
+    setAnchorError(null);
+    setAnchorResult(null);
+
+    try {
+      if (!anchorHash.trim()) {
+        throw new Error('Please enter a data hash to anchor');
+      }
+      console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType);
+      console.log('[anchor] Chain preset:', chainPreset);
+      const result = await chainClient.anchor(anchorHash.trim(), anchorType);
+      console.log('[anchor] Success:', result);
+      setAnchorResult(result);
+      // Auto-populate verify hash
+      setVerifyHash(anchorHash.trim());
+    } catch (err) {
+      console.error('[anchor] Error:', err);
+      setAnchorError(err instanceof Error ? err.message : 'Anchor failed');
+    } finally {
+      setAnchoring(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    setVerifying(true);
+    setVerifyError(null);
+    setVerifyRecord(null);
+    setVerifyNotFound(false);
+
+    try {
+      if (!verifyHash.trim()) {
+        throw new Error('Please enter a hash to verify');
+      }
+      // Read-only client - uses same chain as connected wallet (or base-sepolia default)
+      const readClient = new ChainClient({ chain: chainPreset });
+      const record = await readClient.getDataRecord(verifyHash.trim());
+      setVerifyRecord(record);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('not registered')) {
+        setVerifyNotFound(true);
+      } else {
+        setVerifyError(err instanceof Error ? err.message : 'Verification failed');
+      }
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const statusLabel = (status: DataStatus) => {
+    switch (status) {
+      case DataStatus.ACTIVE: return 'Active';
+      case DataStatus.RESTRICTED: return 'Restricted';
+      case DataStatus.DELETED: return 'Deleted';
+      default: return `Unknown (${String(status)})`;
     }
   };
 
@@ -264,6 +475,165 @@ function App() {
               <strong>Content:</strong>
               <pre>{new TextDecoder().decode(downloadResult.file)}</pre>
             </div>
+          </div>
+        )}
+      </section>
+
+      {/* Chain Anchoring Section */}
+      <section className="chain">
+        <h2>Blockchain Anchoring</h2>
+        <p className="section-description">
+          Anchor data hashes on the DataProvenance contract for immutable on-chain provenance.
+        </p>
+
+        {/* Wallet Connection */}
+        {!hasWallet ? (
+          <p className="warning">No wallet detected. Install MetaMask to use chain features.</p>
+        ) : !walletAddress ? (
+          <button onClick={handleConnectWallet} disabled={connecting}>
+            {connecting ? 'Connecting...' : 'Connect Wallet'}
+          </button>
+        ) : (
+          <div className="wallet-status">
+            <span className="success">Connected:</span>{' '}
+            <code>{walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</code>
+            {chainName && (
+              <span style={{ marginLeft: 12 }}>
+                on <strong>{chainName}</strong>
+                {wrongChain && <span className="error" style={{ marginLeft: 8 }}>Unsupported chain</span>}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Wrong chain warning */}
+        {walletAddress && wrongChain && (
+          <div className="chain-switch">
+            <p className="warning">
+              Please switch to a supported network:
+            </p>
+            <button className="small" onClick={() => handleSwitchChain(31337)} disabled={switching}>
+              {switching ? 'Switching...' : 'Switch to Hardhat (local)'}
+            </button>
+            <button className="small" onClick={() => handleSwitchChain(84532)} disabled={switching}>
+              {switching ? 'Switching...' : 'Switch to Base Sepolia'}
+            </button>
+          </div>
+        )}
+
+        {/* Anchor Form */}
+        {walletAddress && !wrongChain && (
+          <>
+            <h3>Anchor Data</h3>
+            <div className="input-group">
+              <label>Data Hash (SHA256):</label>
+              <input
+                type="text"
+                value={anchorHash}
+                onChange={(e) => setAnchorHash(e.target.value)}
+                placeholder="64 hex characters (auto-populated after upload)"
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Data Type:</label>
+              <input
+                type="text"
+                value={anchorType}
+                onChange={(e) => setAnchorType(e.target.value)}
+                placeholder="e.g. dataset, model, document"
+              />
+            </div>
+
+            <button onClick={handleAnchor} disabled={anchoring || !anchorHash.trim()}>
+              {anchoring ? 'Anchoring...' : 'Anchor On-Chain'}
+            </button>
+          </>
+        )}
+
+        {anchorError && <p className="error">{anchorError}</p>}
+
+        {anchorResult && (
+          <div className="result">
+            <h3>Anchored Successfully</h3>
+            <div className="detail-row">
+              <span className="label">Tx Hash:</span>
+              <a href={anchorResult.explorerUrl} target="_blank" rel="noopener noreferrer">
+                <code className="value">{anchorResult.txHash.slice(0, 10)}...{anchorResult.txHash.slice(-8)}</code>
+              </a>
+            </div>
+            <div className="detail-row">
+              <span className="label">Block:</span>
+              <span className="value">{anchorResult.blockNumber}</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Gas Used:</span>
+              <span className="value">{anchorResult.gasUsed.toString()}</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Owner:</span>
+              <code className="value">{anchorResult.owner}</code>
+            </div>
+          </div>
+        )}
+
+        {/* Verify On-Chain */}
+        <h3>Verify On-Chain</h3>
+        <div className="input-group">
+          <label>Data Hash to verify:</label>
+          <input
+            type="text"
+            value={verifyHash}
+            onChange={(e) => setVerifyHash(e.target.value)}
+            placeholder="64 hex characters"
+          />
+        </div>
+
+        <button onClick={handleVerify} disabled={verifying || !verifyHash.trim()}>
+          {verifying ? 'Verifying...' : 'Verify On-Chain'}
+        </button>
+
+        {verifyError && <p className="error">{verifyError}</p>}
+
+        {verifyNotFound && (
+          <div className="result" style={{ borderLeftColor: '#ffc107' }}>
+            <p><strong>Not found.</strong> This hash is not registered on-chain.</p>
+          </div>
+        )}
+
+        {verifyRecord && (
+          <div className="result">
+            <h3>On-Chain Record</h3>
+            <div className="detail-row">
+              <span className="label">Owner:</span>
+              <code className="value">{verifyRecord.owner}</code>
+            </div>
+            <div className="detail-row">
+              <span className="label">Data Type:</span>
+              <span className="value">{verifyRecord.dataType}</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Status:</span>
+              <span className={`badge ${verifyRecord.status === DataStatus.ACTIVE ? 'success' : 'warning'}`}>
+                {statusLabel(verifyRecord.status)}
+              </span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Registered:</span>
+              <span className="value">{new Date(verifyRecord.timestamp * 1000).toLocaleString()}</span>
+            </div>
+            {verifyRecord.accessors.length > 0 && (
+              <div className="detail-row">
+                <span className="label">Accessors:</span>
+                <span className="value">{verifyRecord.accessors.length}</span>
+              </div>
+            )}
+            {verifyRecord.transformations.length > 0 && (
+              <div className="detail-row">
+                <span className="label">Transforms:</span>
+                <span className="value">{verifyRecord.transformations.length}</span>
+              </div>
+            )}
           </div>
         )}
       </section>

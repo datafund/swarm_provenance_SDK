@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: ['src/index.ts', 'src/chain/index.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   clean: true,
@@ -11,4 +11,5 @@ export default defineConfig({
   minify: false,
   target: 'es2022',
   outDir: 'dist',
+  external: ['viem'],
 });

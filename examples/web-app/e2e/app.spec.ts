@@ -64,7 +64,7 @@ test.describe('Swarm Provenance Demo', () => {
 
   test('shows download section with input', async ({ page }) => {
     await expect(page.locator('h2').filter({ hasText: 'Download' })).toBeVisible();
-    await expect(page.locator('input[type="text"]')).toBeVisible();
+    await expect(page.getByPlaceholder('Enter Swarm reference')).toBeVisible();
     await expect(page.locator('button').filter({ hasText: 'Download' })).toBeVisible();
   });
 
@@ -89,7 +89,7 @@ test.describe('Swarm Provenance Demo', () => {
   });
 
   test('can enter reference for download', async ({ page }) => {
-    const input = page.locator('input[type="text"]');
+    const input = page.getByPlaceholder('Enter Swarm reference');
     await input.fill('a'.repeat(64));
     await expect(input).toHaveValue('a'.repeat(64));
 
@@ -107,7 +107,7 @@ test.describe('Error Handling', () => {
     await expect(page.getByText('Connected')).toBeVisible({ timeout: 10000 });
 
     // Enter invalid reference (wrong format)
-    const downloadInput = page.locator('input[type="text"]');
+    const downloadInput = page.getByPlaceholder('Enter Swarm reference');
     await downloadInput.fill('invalid-reference');
 
     // Click download
@@ -124,7 +124,7 @@ test.describe('Error Handling', () => {
     await expect(page.getByText('Connected')).toBeVisible({ timeout: 10000 });
 
     // Enter valid format but non-existent reference
-    const downloadInput = page.locator('input[type="text"]');
+    const downloadInput = page.getByPlaceholder('Enter Swarm reference');
     await downloadInput.fill('0'.repeat(64));
 
     // Click download
@@ -289,7 +289,7 @@ test.describe('Upload and Download Flow', () => {
     expect(reference).toMatch(/^[a-f0-9]{64}$/);
 
     // Reference should auto-populate in download input
-    const downloadInput = page.locator('input[type="text"]');
+    const downloadInput = page.getByPlaceholder('Enter Swarm reference');
     await expect(downloadInput).toHaveValue(reference!);
 
     // Click download
