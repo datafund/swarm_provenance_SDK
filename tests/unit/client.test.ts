@@ -128,8 +128,14 @@ describe('ProvenanceClient', () => {
         ok: true,
         json: () => Promise.resolve({
           enabled: true,
-          available: { '17': 5, '20': 3 },
-          reserve: { '17': 10, '20': 5 },
+          reserve_config: { '17': 1, '20': 1 },
+          current_levels: { '17': 52, '20': 5 },
+          available_stamps: { '17': ['stamp1', 'stamp2'], '20': ['stamp3'] },
+          total_stamps: 57,
+          low_reserve_warning: false,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
         }),
       });
 
@@ -137,7 +143,10 @@ describe('ProvenanceClient', () => {
       const status = await client.poolStatus();
 
       expect(status.enabled).toBe(true);
-      expect(status.available['17']).toBe(5);
+      expect(status.available['17']).toBe(52);
+      expect(status.reserve['17']).toBe(1);
+      expect(status.totalStamps).toBe(57);
+      expect(status.lowReserveWarning).toBe(false);
     });
 
     it('should return disabled when 404', async () => {
@@ -150,6 +159,8 @@ describe('ProvenanceClient', () => {
       const status = await client.poolStatus();
 
       expect(status.enabled).toBe(false);
+      expect(status.totalStamps).toBe(0);
+      expect(status.lowReserveWarning).toBe(false);
     });
   });
 
@@ -231,7 +242,7 @@ describe('ProvenanceClient', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // No stamp acquisition
     });
 
-    it('should include signed document when notary signing', async () => {
+    it('should upload with notary signing (signatures available on download)', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
@@ -246,32 +257,14 @@ describe('ProvenanceClient', () => {
         ok: true,
         json: () => Promise.resolve({
           reference: 'abcd1234'.repeat(8),
-          signed_document: {
-            metadata: {
-              data: 'SGVsbG8=',
-              content_hash: 'hash123',
-              stamp_id: 'stamp123',
-            },
-            signatures: [
-              {
-                type: 'eip191',
-                signer: '0xNotary',
-                timestamp: '2024-01-01T00:00:00Z',
-                data_hash: 'hash',
-                signature: '0xsig',
-                hashed_fields: ['content_hash'],
-                signed_message_format: 'format',
-              },
-            ],
-          },
         }),
       });
 
       const client = new ProvenanceClient();
       const result = await client.upload('Hello', { sign: 'notary' });
 
-      expect(result.signedDocument).toBeDefined();
-      expect(result.signedDocument?.signatures).toHaveLength(1);
+      expect(result.reference).toBe('abcd1234'.repeat(8));
+      expect(result.metadata.stamp_id).toBe('stamp123');
     });
 
     it('should throw NotaryError when notary signing fails', async () => {

@@ -87,7 +87,7 @@ export class ProvenanceClient {
 
     if (!response.ok) {
       if (response.status === 404) {
-        return { enabled: false, available: {}, reserve: {} };
+        return { enabled: false, available: {}, reserve: {}, totalStamps: 0, lowReserveWarning: false };
       }
       throw await this.handleError(response);
     }
@@ -95,8 +95,12 @@ export class ProvenanceClient {
     const data = (await response.json()) as GatewayPoolStatusResponse;
     return {
       enabled: data.enabled,
-      available: data.available,
-      reserve: data.reserve,
+      available: Object.fromEntries(
+        Object.entries(data.current_levels).map(([k, v]) => [k, v])
+      ),
+      reserve: data.reserve_config,
+      totalStamps: data.total_stamps,
+      lowReserveWarning: data.low_reserve_warning,
     };
   }
 
@@ -184,19 +188,10 @@ export class ProvenanceClient {
 
     const data = (await response.json()) as GatewayUploadResponse;
 
-    const result: UploadResult = {
+    return {
       reference: data.reference,
       metadata,
     };
-
-    if (data.signed_document) {
-      result.signedDocument = {
-        metadata: data.signed_document.metadata,
-        signatures: data.signed_document.signatures,
-      };
-    }
-
-    return result;
   }
 
   /**
