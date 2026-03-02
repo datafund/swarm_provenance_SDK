@@ -6,6 +6,7 @@ import {
   ChainConnectionError,
   ChainTransactionError,
   ChainValidationError,
+  DataAlreadyRegisteredError,
   DataNotRegisteredError,
   SignerRequiredError,
 } from '../../../src/chain/errors.js';
@@ -42,6 +43,19 @@ describe('ChainError hierarchy', () => {
     const err = new ChainValidationError('bad input');
     expect(err).toBeInstanceOf(ChainError);
     expect(err.code).toBe('CHAIN_VALIDATION');
+  });
+
+  it('DataAlreadyRegisteredError has correct properties', () => {
+    const err = new DataAlreadyRegisteredError('0x123', '0xowner', 1700000000, 'dataset');
+    expect(err).toBeInstanceOf(ChainError);
+    expect(err.code).toBe('DATA_ALREADY_REGISTERED');
+    expect(err.name).toBe('DataAlreadyRegisteredError');
+    expect(err.message).toContain('0x123');
+    expect(err.message).toContain('already registered');
+    expect(err.dataHash).toBe('0x123');
+    expect(err.owner).toBe('0xowner');
+    expect(err.timestamp).toBe(1700000000);
+    expect(err.dataType).toBe('dataset');
   });
 
   it('DataNotRegisteredError includes hash in message', () => {

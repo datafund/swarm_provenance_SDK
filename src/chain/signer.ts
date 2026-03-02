@@ -30,6 +30,7 @@ export function fromViemWalletClient(walletClient: {
   sendTransaction(args: {
     to: Address;
     data: Hex;
+    gas?: bigint;
   }): Promise<Hex>;
 }): ChainSigner {
   if (!walletClient.account) {
@@ -44,8 +45,12 @@ export function fromViemWalletClient(walletClient: {
     getAddress(): Promise<Address> {
       return Promise.resolve(account.address);
     },
-    sendTransaction(tx: { to: Address; data: Hex }): Promise<Hex> {
-      return walletClient.sendTransaction(tx);
+    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
+      return walletClient.sendTransaction({
+        to: tx.to,
+        data: tx.data,
+        ...(tx.gas ? { gas: tx.gas } : {}),
+      });
     },
   };
 }
@@ -82,11 +87,12 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
     getAddress(): Promise<Address> {
       return Promise.resolve(account.address);
     },
-    sendTransaction(tx: { to: Address; data: Hex }): Promise<Hex> {
+    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
       return client.sendTransaction({
         to: tx.to,
         data: tx.data,
         chain: null, // let the RPC determine the chain
+        ...(tx.gas ? { gas: tx.gas } : {}),
       });
     },
   };
@@ -116,7 +122,7 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
     getAddress(): Promise<Address> {
       return Promise.resolve(address);
     },
-    async sendTransaction(tx: { to: Address; data: Hex }): Promise<Hex> {
+    async sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
       const txHash = (await provider.request({
         method: 'eth_sendTransaction',
         params: [
@@ -124,6 +130,7 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
             from: address,
             to: tx.to,
             data: tx.data,
+            ...(tx.gas ? { gas: `0x${tx.gas.toString(16)}` } : {}),
           },
         ],
       })) as Hex;
