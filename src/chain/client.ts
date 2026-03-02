@@ -261,7 +261,16 @@ export class ChainClient {
     const data = encodeRegisterData(hash, dataType);
     const owner = await this.signer!.getAddress();
 
-    const receipt = await this.sendAndWait(data);
+    let receipt: TransactionResult;
+    try {
+      receipt = await this.sendAndWait(data);
+    } catch (error) {
+      // Fallback: pre-check may miss due to RPC read lag
+      if (this.isAlreadyRegisteredRevert(error)) {
+        await this.throwAlreadyRegistered(hash, dataHash);
+      }
+      throw error;
+    }
 
     return {
       ...receipt,
@@ -305,7 +314,15 @@ export class ChainClient {
 
     const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address);
 
-    const receipt = await this.sendAndWait(data);
+    let receipt: TransactionResult;
+    try {
+      receipt = await this.sendAndWait(data);
+    } catch (error) {
+      if (this.isAlreadyRegisteredRevert(error)) {
+        await this.throwAlreadyRegistered(hash, dataHash);
+      }
+      throw error;
+    }
 
     return {
       ...receipt,
@@ -501,6 +518,31 @@ export class ChainClient {
         throw error;
       }
       // DataNotRegisteredError means the hash is free — proceed
+    }
+  }
+
+  private isAlreadyRegisteredRevert(error: unknown): boolean {
+    return (
+      error instanceof ChainTransactionError &&
+      /already registered/i.test(error.message)
+    );
+  }
+
+  private async throwAlreadyRegistered(normalizedHash: Hex, originalHash: string): Promise<never> {
+    try {
+      const record = await this.getDataRecord(normalizedHash);
+      throw new DataAlreadyRegisteredError(
+        originalHash,
+        record.owner,
+        record.timestamp,
+        record.dataType,
+      );
+    } catch (error) {
+      if (error instanceof DataAlreadyRegisteredError) {
+        throw error;
+      }
+      // If we can't fetch the record, throw a basic version
+      throw new DataAlreadyRegisteredError(originalHash, '', 0, '');
     }
   }
 

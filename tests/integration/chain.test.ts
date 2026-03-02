@@ -5,7 +5,6 @@ import { DataStatus } from '../../src/chain/types.js';
 import {
   DataAlreadyRegisteredError,
   DataNotRegisteredError,
-  ChainTransactionError,
   SignerRequiredError,
 } from '../../src/chain/errors.js';
 import type { ChainSigner, Hex } from '../../src/chain/types.js';
@@ -25,6 +24,21 @@ import type { ChainSigner, Hex } from '../../src/chain/types.js';
  *   CHAIN_CONTRACT=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
  *   CHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
  */
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Retry an assertion with delays to handle RPC read lag on public testnets */
+async function waitFor<T>(fn: () => Promise<T>, retries = 5, delayMs = 2_000): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch {
+      if (i === retries - 1) throw new Error(`waitFor failed after ${retries} retries`);
+      await sleep(delayMs);
+    }
+  }
+  throw new Error('unreachable');
+}
 
 const RPC_URL = process.env['CHAIN_RPC_URL'] ?? 'https://sepolia.base.org';
 const CONTRACT_ADDRESS = process.env['CHAIN_CONTRACT'] as `0x${string}` | undefined;
@@ -130,9 +144,11 @@ describe('Chain Integration', () => {
       expect(result.explorerUrl).toContain(result.txHash);
       expect(result.dataType).toBe('integration-test');
 
-      // Verify it's now on-chain
-      const exists = await readClient.verifyOnChain(uniqueHash);
-      expect(exists).toBe(true);
+      // Verify it's now on-chain (retry for RPC read lag on public testnets)
+      await waitFor(async () => {
+        const exists = await readClient.verifyOnChain(uniqueHash);
+        expect(exists).toBe(true);
+      });
 
       // Get the full record
       const record = await readClient.getDataRecord(uniqueHash);
@@ -152,10 +168,13 @@ describe('Chain Integration', () => {
       const uniqueHash = `${timestamp}${'d'.repeat(48)}`;
       await writeClient.anchor(uniqueHash, 'duplicate-test');
 
-      // Attempt to anchor the same hash again — should throw before sending tx
-      await expect(writeClient.anchor(uniqueHash, 'duplicate-test')).rejects.toThrow(
-        DataAlreadyRegisteredError,
-      );
+      // Attempt to anchor the same hash again — should throw DataAlreadyRegisteredError
+      // via pre-check (if RPC has caught up) or via contract revert fallback
+      await waitFor(async () => {
+        await expect(writeClient!.anchor(uniqueHash, 'duplicate-test')).rejects.toThrow(
+          DataAlreadyRegisteredError,
+        );
+      });
 
       // Verify error has context fields
       try {
@@ -227,12 +246,14 @@ describe('Chain Integration', () => {
       expect(result.txHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
       expect(result.accessor).toBe(await signer.getAddress());
 
-      // Verify access was recorded
-      const accessed = await readClient.hasAddressAccessed(
-        uniqueHash,
-        await signer.getAddress(),
-      );
-      expect(accessed).toBe(true);
+      // Verify access was recorded (retry for RPC read lag)
+      await waitFor(async () => {
+        const accessed = await readClient.hasAddressAccessed(
+          uniqueHash,
+          await signer!.getAddress(),
+        );
+        expect(accessed).toBe(true);
+      });
     });
   });
 });
