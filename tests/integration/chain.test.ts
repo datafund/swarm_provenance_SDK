@@ -2,7 +2,12 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { ChainClient } from '../../src/chain/client.js';
 import { fromPrivateKey } from '../../src/chain/signer.js';
 import { DataStatus } from '../../src/chain/types.js';
-import { DataNotRegisteredError, SignerRequiredError } from '../../src/chain/errors.js';
+import {
+  DataAlreadyRegisteredError,
+  DataNotRegisteredError,
+  ChainTransactionError,
+  SignerRequiredError,
+} from '../../src/chain/errors.js';
 import type { ChainSigner, Hex } from '../../src/chain/types.js';
 
 /**
@@ -134,6 +139,76 @@ describe('Chain Integration', () => {
       expect(record.dataType).toBe('integration-test');
       expect(record.owner).toBe(await signer.getAddress());
       expect(record.status).toBe(DataStatus.ACTIVE);
+    });
+
+    it('should throw DataAlreadyRegisteredError when anchoring duplicate hash', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Anchor a unique hash first
+      const timestamp = Date.now().toString(16).padStart(16, '0');
+      const uniqueHash = `${timestamp}${'d'.repeat(48)}`;
+      await writeClient.anchor(uniqueHash, 'duplicate-test');
+
+      // Attempt to anchor the same hash again — should throw before sending tx
+      await expect(writeClient.anchor(uniqueHash, 'duplicate-test')).rejects.toThrow(
+        DataAlreadyRegisteredError,
+      );
+
+      // Verify error has context fields
+      try {
+        await writeClient.anchor(uniqueHash, 'duplicate-test');
+      } catch (err) {
+        expect(err).toBeInstanceOf(DataAlreadyRegisteredError);
+        const e = err as DataAlreadyRegisteredError;
+        expect(e.owner).toBe(await signer.getAddress());
+        expect(e.dataType).toBe('duplicate-test');
+        expect(e.timestamp).toBeGreaterThan(0);
+      }
+    });
+
+    it('should fail with insufficient gas limit', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Create a client with an absurdly low gas limit
+      const lowGasClient = new ChainClient({
+        ...getChainConfig(signer),
+        signer,
+        gasLimit: 21_000, // bare minimum for ETH transfer, way too low for contract call
+      });
+
+      const timestamp = Date.now().toString(16).padStart(16, '0');
+      const uniqueHash = `${timestamp}${'e'.repeat(48)}`;
+
+      // Should fail — either tx send fails or tx reverts due to out of gas
+      await expect(lowGasClient.anchor(uniqueHash, 'gas-test')).rejects.toThrow();
+    });
+
+    it('should succeed with explicit gas limit', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Create a client with a reasonable explicit gas limit
+      const gasClient = new ChainClient({
+        ...getChainConfig(signer),
+        signer,
+        gasLimit: 500_000,
+      });
+
+      const timestamp = Date.now().toString(16).padStart(16, '0');
+      const uniqueHash = `${timestamp}${'f'.repeat(48)}`;
+
+      const result = await gasClient.anchor(uniqueHash, 'gas-limit-test');
+      expect(result.txHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
+      expect(result.gasUsed).toBeGreaterThan(0);
+      expect(result.gasUsed).toBeLessThan(500_000n);
     });
 
     it('should record access', async () => {
