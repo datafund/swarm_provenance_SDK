@@ -86,8 +86,6 @@ export interface UploadResult {
   reference: string;
   /** The provenance metadata that was uploaded */
   metadata: ProvenanceMetadata;
-  /** Signed document if notary signing was requested */
-  signedDocument?: SignedDocument;
 }
 
 /**
@@ -124,10 +122,14 @@ export interface NotaryInfo {
 export interface PoolStatus {
   /** Whether the stamp pool is enabled */
   enabled: boolean;
-  /** Available stamps by depth */
+  /** Available stamps by depth (count per depth) */
   available: Record<string, number>;
-  /** Reserve levels */
+  /** Reserve configuration by depth */
   reserve: Record<string, number>;
+  /** Total number of stamps across all depths */
+  totalStamps: number;
+  /** Whether any depth is below its reserve threshold */
+  lowReserveWarning: boolean;
 }
 
 /**
@@ -153,10 +155,6 @@ export interface GatewayHealthResponse {
 
 export interface GatewayUploadResponse {
   reference: string;
-  signed_document?: {
-    metadata: ProvenanceMetadata;
-    signatures: NotarySignature[];
-  };
 }
 
 export interface GatewayDownloadResponse {
@@ -173,8 +171,14 @@ export interface GatewayNotaryInfoResponse {
 
 export interface GatewayPoolStatusResponse {
   enabled: boolean;
-  available: Record<string, number>;
-  reserve: Record<string, number>;
+  reserve_config: Record<string, number>;
+  current_levels: Record<string, number>;
+  available_stamps: Record<string, string[]>;
+  total_stamps: number;
+  low_reserve_warning: boolean;
+  last_check: string;
+  next_check: string;
+  errors: string[];
 }
 
 export interface GatewayAcquireStampResponse {

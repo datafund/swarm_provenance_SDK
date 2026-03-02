@@ -105,6 +105,8 @@ export interface ChainClientConfig {
   contractAddress?: Address;
   /** Timeout in ms for waiting for transaction receipts (default: 120_000) */
   txTimeout?: number;
+  /** Explicit gas limit for transactions. Skips provider estimation when set. */
+  gasLimit?: bigint | number;
 }
 
 /** Minimal signer interface for transaction signing */
@@ -115,5 +117,6 @@ export interface ChainSigner {
   sendTransaction(tx: {
     to: Address;
     data: Hex;
+    gas?: bigint;
   }): Promise<Hex>;
 }

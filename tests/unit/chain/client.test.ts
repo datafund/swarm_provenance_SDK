@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ChainClient } from '../../../src/chain/client.js';
 import {
   ChainConfigurationError,
+  ChainValidationError,
+  DataAlreadyRegisteredError,
   SignerRequiredError,
 } from '../../../src/chain/errors.js';
 import { DataStatus } from '../../../src/chain/types.js';
@@ -154,6 +156,17 @@ describe('ChainClient', () => {
     });
 
     it('should anchor data and return result', async () => {
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
         blockNumber: BigInt(12345),
@@ -174,6 +187,17 @@ describe('ChainClient', () => {
     });
 
     it('should throw on reverted transaction', async () => {
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'reverted',
         blockNumber: BigInt(12345),
@@ -183,6 +207,48 @@ describe('ChainClient', () => {
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
       await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow('reverted');
+    });
+
+    it('should throw DataAlreadyRegisteredError when hash is already registered', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: SAMPLE_HASH_0X,
+        owner: MOCK_ADDRESS,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow(DataAlreadyRegisteredError);
+    });
+
+    it('should proceed when hash is not registered', async () => {
+      // Pre-check: hash not registered (getDataRecord returns zero)
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(12345),
+        gasUsed: BigInt(50000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.anchor(SAMPLE_HASH, 'dataset');
+
+      expect(result.txHash).toBe(MOCK_TX_HASH);
+      expect(result.dataHash).toBe(SAMPLE_HASH_0X);
     });
   });
 
@@ -262,7 +328,34 @@ describe('ChainClient', () => {
       await expect(client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS)).rejects.toThrow(SignerRequiredError);
     });
 
+    it('should throw DataAlreadyRegisteredError when hash is already registered', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: SAMPLE_HASH_0X,
+        owner: MOCK_ADDRESS,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS)).rejects.toThrow(DataAlreadyRegisteredError);
+    });
+
     it('should anchor for another owner', async () => {
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
         blockNumber: BigInt(100),
@@ -407,6 +500,103 @@ describe('ChainClient', () => {
       ]);
 
       expect(result.count).toBe(2);
+    });
+  });
+
+  describe('gasLimit config', () => {
+    it('should pass gas limit to signer when configured', async () => {
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(200),
+        gasUsed: BigInt(50000),
+      });
+
+      const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer, gasLimit: 500_000 });
+      await client.anchor(SAMPLE_HASH, 'dataset');
+
+      expect(sendTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ gas: BigInt(500_000) }),
+      );
+    });
+
+    it('should not pass gas when gasLimit is not configured', async () => {
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformations: [],
+        accessors: [],
+        status: 0,
+      });
+
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(201),
+        gasUsed: BigInt(50000),
+      });
+
+      const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await client.anchor(SAMPLE_HASH, 'dataset');
+
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      expect(sendTransaction.mock.calls[0][0]).not.toHaveProperty('gas');
+    });
+  });
+
+  describe('batch size validation', () => {
+    it('should throw on empty batch', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.batchAnchor([])).rejects.toThrow(ChainValidationError);
+      await expect(client.batchAnchor([])).rejects.toThrow('at least one item');
+    });
+
+    it('should throw when batch exceeds maximum size', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const items = Array.from({ length: 51 }, (_, i) => ({
+        dataHash: `${i.toString(16).padStart(2, '0')}`.repeat(32),
+        dataType: 'dataset',
+      }));
+
+      await expect(client.batchAnchor(items)).rejects.toThrow(ChainValidationError);
+      await expect(client.batchAnchor(items)).rejects.toThrow('exceeds maximum of 50');
+    });
+
+    it('should throw on empty batchRecordAccess', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.batchRecordAccess([])).rejects.toThrow(ChainValidationError);
+    });
+
+    it('should throw on empty batchSetDataStatus', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.batchSetDataStatus([])).rejects.toThrow(ChainValidationError);
     });
   });
 

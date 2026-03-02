@@ -10,6 +10,8 @@ import {
   ChainConfigurationError,
   ChainConnectionError,
   ChainTransactionError,
+  ChainValidationError,
+  DataAlreadyRegisteredError,
   DataNotRegisteredError,
   SignerRequiredError,
 } from './errors.js';
@@ -67,6 +69,7 @@ export class ChainClient {
   private readonly preset: ChainPreset;
   private readonly signer: ChainSigner | undefined;
   private readonly txTimeout: number;
+  private readonly gasLimit: bigint | undefined;
 
   constructor(config: ChainClientConfig) {
     // Resolve chain preset
@@ -86,6 +89,7 @@ export class ChainClient {
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
+    this.gasLimit = config.gasLimit != null ? BigInt(config.gasLimit) : undefined;
 
     if (this.contractAddress === ZERO_ADDRESS) {
       throw new ChainConfigurationError(
@@ -252,10 +256,21 @@ export class ChainClient {
     validateDataType(dataType);
 
     const hash = normalizeHash(dataHash);
+    await this.checkNotRegistered(hash, dataHash);
+
     const data = encodeRegisterData(hash, dataType);
     const owner = await this.signer!.getAddress();
 
-    const receipt = await this.sendAndWait(data);
+    let receipt: TransactionResult;
+    try {
+      receipt = await this.sendAndWait(data);
+    } catch (error) {
+      // Fallback: pre-check may miss due to RPC read lag
+      if (this.isAlreadyRegisteredRevert(error)) {
+        await this.throwAlreadyRegistered(hash, dataHash);
+      }
+      throw error;
+    }
 
     return {
       ...receipt,
@@ -295,9 +310,19 @@ export class ChainClient {
     validateAddress(actualOwner);
 
     const hash = normalizeHash(dataHash);
+    await this.checkNotRegistered(hash, dataHash);
+
     const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address);
 
-    const receipt = await this.sendAndWait(data);
+    let receipt: TransactionResult;
+    try {
+      receipt = await this.sendAndWait(data);
+    } catch (error) {
+      if (this.isAlreadyRegisteredRevert(error)) {
+        await this.throwAlreadyRegistered(hash, dataHash);
+      }
+      throw error;
+    }
 
     return {
       ...receipt,
@@ -396,6 +421,7 @@ export class ChainClient {
    */
   async batchAnchor(items: Array<{ dataHash: string; dataType: string }>): Promise<BatchResult> {
     this.requireSigner();
+    this.validateBatchSize(items.length);
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
     const types = items.map((item) => {
@@ -418,6 +444,7 @@ export class ChainClient {
    */
   async batchRecordAccess(dataHashes: string[]): Promise<BatchResult> {
     this.requireSigner();
+    this.validateBatchSize(dataHashes.length);
 
     const hashes = dataHashes.map((h) => normalizeHash(h));
     const data = encodeBatchRecordAccess(hashes);
@@ -437,6 +464,7 @@ export class ChainClient {
     items: Array<{ dataHash: string; status: DataStatus }>,
   ): Promise<BatchResult> {
     this.requireSigner();
+    this.validateBatchSize(items.length);
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
     const statuses = items.map((item) => item.status as number);
@@ -464,12 +492,67 @@ export class ChainClient {
     }
   }
 
+  private validateBatchSize(count: number): void {
+    const MAX_BATCH_SIZE = 50;
+    if (count === 0) {
+      throw new ChainValidationError('Batch must contain at least one item');
+    }
+    if (count > MAX_BATCH_SIZE) {
+      throw new ChainValidationError(
+        `Batch size ${count} exceeds maximum of ${MAX_BATCH_SIZE}. Split into smaller batches.`
+      );
+    }
+  }
+
+  private async checkNotRegistered(normalizedHash: Hex, originalHash: string): Promise<void> {
+    try {
+      const record = await this.getDataRecord(normalizedHash);
+      throw new DataAlreadyRegisteredError(
+        originalHash,
+        record.owner,
+        record.timestamp,
+        record.dataType,
+      );
+    } catch (error) {
+      if (error instanceof DataAlreadyRegisteredError) {
+        throw error;
+      }
+      // DataNotRegisteredError means the hash is free — proceed
+    }
+  }
+
+  private isAlreadyRegisteredRevert(error: unknown): boolean {
+    return (
+      error instanceof ChainTransactionError &&
+      /already registered/i.test(error.message)
+    );
+  }
+
+  private async throwAlreadyRegistered(normalizedHash: Hex, originalHash: string): Promise<never> {
+    try {
+      const record = await this.getDataRecord(normalizedHash);
+      throw new DataAlreadyRegisteredError(
+        originalHash,
+        record.owner,
+        record.timestamp,
+        record.dataType,
+      );
+    } catch (error) {
+      if (error instanceof DataAlreadyRegisteredError) {
+        throw error;
+      }
+      // If we can't fetch the record, throw a basic version
+      throw new DataAlreadyRegisteredError(originalHash, '', 0, '');
+    }
+  }
+
   private async sendAndWait(data: Hex): Promise<TransactionResult> {
     let txHash: Hex;
     try {
       txHash = await this.signer!.sendTransaction({
         to: this.contractAddress,
         data,
+        ...(this.gasLimit ? { gas: this.gasLimit } : {}),
       });
     } catch (error) {
       throw new ChainTransactionError(
