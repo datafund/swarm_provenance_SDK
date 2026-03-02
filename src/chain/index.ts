@@ -32,6 +32,7 @@ export {
   ChainConnectionError,
   ChainTransactionError,
   ChainValidationError,
+  DataAlreadyRegisteredError,
   DataNotRegisteredError,
   SignerRequiredError,
 } from './errors.js';

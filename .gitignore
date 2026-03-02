@@ -1,8 +1,8 @@
 # Dependencies
 node_modules/
 
-# Build output - NOT ignored, needed for GitHub installs
-# dist/
+# Build output
+dist/
 
 # IDE
 .idea/

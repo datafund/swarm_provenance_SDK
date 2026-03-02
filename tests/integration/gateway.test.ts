@@ -50,6 +50,8 @@ describe('Gateway Integration', () => {
       if (status.enabled) {
         expect(typeof status.available).toBe('object');
         expect(typeof status.reserve).toBe('object');
+        expect(typeof status.totalStamps).toBe('number');
+        expect(typeof status.lowReserveWarning).toBe('boolean');
       }
     });
   });
@@ -106,10 +108,9 @@ describe('Gateway Integration', () => {
         sign: 'notary',
       });
 
-      expect(uploadResult.signedDocument).toBeDefined();
-      expect(uploadResult.signedDocument?.signatures.length).toBeGreaterThan(0);
+      expect(uploadResult.reference).toMatch(/^[a-f0-9]{64}$/);
 
-      // Download and verify
+      // Signatures are stored on Swarm, visible on download
       const downloadResult = await client.download(uploadResult.reference);
 
       expect(downloadResult.verified).toBe(true);

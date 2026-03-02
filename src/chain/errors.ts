@@ -70,6 +70,22 @@ export class DataNotRegisteredError extends ChainError {
 }
 
 /**
+ * Data hash is already registered on-chain
+ */
+export class DataAlreadyRegisteredError extends ChainError {
+  constructor(
+    public readonly dataHash: string,
+    public readonly owner: string,
+    public readonly timestamp: number,
+    public readonly dataType: string,
+  ) {
+    super(`Data hash ${dataHash} is already registered on-chain`, 'DATA_ALREADY_REGISTERED');
+    this.name = 'DataAlreadyRegisteredError';
+    Object.setPrototypeOf(this, DataAlreadyRegisteredError.prototype);
+  }
+}
+
+/**
  * Write operation attempted without a signer
  */
 export class SignerRequiredError extends ChainError {

@@ -2,7 +2,11 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { ChainClient } from '../../src/chain/client.js';
 import { fromPrivateKey } from '../../src/chain/signer.js';
 import { DataStatus } from '../../src/chain/types.js';
-import { DataNotRegisteredError, SignerRequiredError } from '../../src/chain/errors.js';
+import {
+  DataAlreadyRegisteredError,
+  DataNotRegisteredError,
+  SignerRequiredError,
+} from '../../src/chain/errors.js';
 import type { ChainSigner, Hex } from '../../src/chain/types.js';
 
 /**
@@ -20,6 +24,21 @@ import type { ChainSigner, Hex } from '../../src/chain/types.js';
  *   CHAIN_CONTRACT=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
  *   CHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
  */
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Retry an assertion with delays to handle RPC read lag on public testnets */
+async function waitFor<T>(fn: () => Promise<T>, retries = 5, delayMs = 2_000): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch {
+      if (i === retries - 1) throw new Error(`waitFor failed after ${retries} retries`);
+      await sleep(delayMs);
+    }
+  }
+  throw new Error('unreachable');
+}
 
 const RPC_URL = process.env['CHAIN_RPC_URL'] ?? 'https://sepolia.base.org';
 const CONTRACT_ADDRESS = process.env['CHAIN_CONTRACT'] as `0x${string}` | undefined;
@@ -125,15 +144,90 @@ describe('Chain Integration', () => {
       expect(result.explorerUrl).toContain(result.txHash);
       expect(result.dataType).toBe('integration-test');
 
-      // Verify it's now on-chain
-      const exists = await readClient.verifyOnChain(uniqueHash);
-      expect(exists).toBe(true);
+      // Verify it's now on-chain (retry for RPC read lag on public testnets)
+      await waitFor(async () => {
+        const exists = await readClient.verifyOnChain(uniqueHash);
+        expect(exists).toBe(true);
+      });
 
       // Get the full record
       const record = await readClient.getDataRecord(uniqueHash);
       expect(record.dataType).toBe('integration-test');
       expect(record.owner).toBe(await signer.getAddress());
       expect(record.status).toBe(DataStatus.ACTIVE);
+    });
+
+    it('should throw DataAlreadyRegisteredError when anchoring duplicate hash', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Anchor a unique hash first
+      const timestamp = Date.now().toString(16).padStart(16, '0');
+      const uniqueHash = `${timestamp}${'d'.repeat(48)}`;
+      await writeClient.anchor(uniqueHash, 'duplicate-test');
+
+      // Attempt to anchor the same hash again — should throw DataAlreadyRegisteredError
+      // via pre-check (if RPC has caught up) or via contract revert fallback
+      await waitFor(async () => {
+        await expect(writeClient!.anchor(uniqueHash, 'duplicate-test')).rejects.toThrow(
+          DataAlreadyRegisteredError,
+        );
+      });
+
+      // Verify error has context fields
+      try {
+        await writeClient.anchor(uniqueHash, 'duplicate-test');
+      } catch (err) {
+        expect(err).toBeInstanceOf(DataAlreadyRegisteredError);
+        const e = err as DataAlreadyRegisteredError;
+        expect(e.owner).toBe(await signer.getAddress());
+        expect(e.dataType).toBe('duplicate-test');
+        expect(e.timestamp).toBeGreaterThan(0);
+      }
+    });
+
+    it('should fail with insufficient gas limit', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Create a client with an absurdly low gas limit
+      const lowGasClient = new ChainClient({
+        ...getChainConfig(signer),
+        signer,
+        gasLimit: 21_000, // bare minimum for ETH transfer, way too low for contract call
+      });
+
+      const timestamp = Date.now().toString(16).padStart(16, '0');
+      const uniqueHash = `${timestamp}${'e'.repeat(48)}`;
+
+      // Should fail — either tx send fails or tx reverts due to out of gas
+      await expect(lowGasClient.anchor(uniqueHash, 'gas-test')).rejects.toThrow();
+    });
+
+    it('should succeed with explicit gas limit', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Create a client with a reasonable explicit gas limit
+      const gasClient = new ChainClient({
+        ...getChainConfig(signer),
+        signer,
+        gasLimit: 500_000,
+      });
+
+      const timestamp = Date.now().toString(16).padStart(16, '0');
+      const uniqueHash = `${timestamp}${'f'.repeat(48)}`;
+
+      const result = await gasClient.anchor(uniqueHash, 'gas-limit-test');
+      expect(result.txHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
+      expect(result.gasUsed).toBeGreaterThan(0);
+      expect(result.gasUsed).toBeLessThan(500_000n);
     });
 
     it('should record access', async () => {
@@ -152,12 +246,14 @@ describe('Chain Integration', () => {
       expect(result.txHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
       expect(result.accessor).toBe(await signer.getAddress());
 
-      // Verify access was recorded
-      const accessed = await readClient.hasAddressAccessed(
-        uniqueHash,
-        await signer.getAddress(),
-      );
-      expect(accessed).toBe(true);
+      // Verify access was recorded (retry for RPC read lag)
+      await waitFor(async () => {
+        const accessed = await readClient.hasAddressAccessed(
+          uniqueHash,
+          await signer!.getAddress(),
+        );
+        expect(accessed).toBe(true);
+      });
     });
   });
 });

@@ -1,15 +1,25 @@
 # @datafund/swarm-provenance
 
+[![npm version](https://img.shields.io/npm/v/@datafund/swarm-provenance)](https://www.npmjs.com/package/@datafund/swarm-provenance)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 TypeScript SDK for storing and retrieving provenance data via the Swarm network.
+
+## Requirements
+
+- Node.js >= 18.0.0
+- [viem](https://viem.sh) >= 2.0.0 (optional, for blockchain anchoring only)
 
 ## Installation
 
 ```bash
-# From GitHub (current)
-pnpm add datafund/swarm_provenance_SDK
-
-# From npm (coming soon)
 pnpm add @datafund/swarm-provenance
+```
+
+For blockchain anchoring features, also install viem:
+
+```bash
+pnpm add @datafund/swarm-provenance viem
 ```
 
 ## Quick Start
@@ -189,11 +199,7 @@ const result = verifySignature(signature, metadata, expectedSigner);
 
 ## Blockchain Anchoring (`/chain`)
 
-The chain module provides on-chain data provenance via a DataProvenance smart contract. It uses [viem](https://viem.sh) as an optional peer dependency.
-
-```bash
-pnpm add viem
-```
+The chain module provides on-chain data provenance via a DataProvenance smart contract. It uses [viem](https://viem.sh) as an optional peer dependency (see [Installation](#installation)).
 
 ### `ChainClient`
 
@@ -349,6 +355,17 @@ pnpm typecheck
 # Lint
 pnpm lint
 ```
+
+## Contributing
+
+Contributions are welcome. Please open an issue first to discuss what you'd like to change.
+
+1. Fork the repo
+2. Create a feature branch from `development` (`git checkout -b feature/my-feature development`)
+3. Commit your changes
+4. Push and open a PR against `development`
+
+All PRs to `main` require a review. See the [development](#development) section for build and test commands.
 
 ## Related Projects
 

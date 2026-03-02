@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { fromViemWalletClient } from '../../../src/chain/signer.js';
 import { ChainConfigurationError } from '../../../src/chain/errors.js';
 import type { Address, Hex } from '../../../src/chain/types.js';
@@ -43,5 +43,42 @@ describe('fromViemWalletClient', () => {
       data: '0xabcdef',
     });
     expect(result).toBe(MOCK_TX_HASH);
+  });
+
+  it('should forward gas param to wallet client when provided', async () => {
+    const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
+    const mockWalletClient = {
+      account: { address: MOCK_ADDRESS },
+      sendTransaction,
+    };
+
+    const signer = fromViemWalletClient(mockWalletClient);
+    await signer.sendTransaction({
+      to: '0x9a3c6F47B69211F05891CCb7aD33596290b9fE64',
+      data: '0xabcdef',
+      gas: BigInt(500_000),
+    });
+
+    expect(sendTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ gas: BigInt(500_000) }),
+    );
+  });
+
+  it('should not include gas when not provided', async () => {
+    const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
+    const mockWalletClient = {
+      account: { address: MOCK_ADDRESS },
+      sendTransaction,
+    };
+
+    const signer = fromViemWalletClient(mockWalletClient);
+    await signer.sendTransaction({
+      to: '0x9a3c6F47B69211F05891CCb7aD33596290b9fE64',
+      data: '0xabcdef',
+    });
+
+    expect(sendTransaction).toHaveBeenCalledTimes(1);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    expect(sendTransaction.mock.calls[0][0]).not.toHaveProperty('gas');
   });
 });
