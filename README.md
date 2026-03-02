@@ -1,6 +1,14 @@
 # @datafund/swarm-provenance
 
+[![npm version](https://img.shields.io/npm/v/@datafund/swarm-provenance)](https://www.npmjs.com/package/@datafund/swarm-provenance)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 TypeScript SDK for storing and retrieving provenance data via the Swarm network.
+
+## Requirements
+
+- Node.js >= 18.0.0
+- [viem](https://viem.sh) >= 2.0.0 (optional, for blockchain anchoring only)
 
 ## Installation
 
@@ -347,6 +355,17 @@ pnpm typecheck
 # Lint
 pnpm lint
 ```
+
+## Contributing
+
+Contributions are welcome. Please open an issue first to discuss what you'd like to change.
+
+1. Fork the repo
+2. Create a feature branch from `development` (`git checkout -b feature/my-feature development`)
+3. Commit your changes
+4. Push and open a PR against `development`
+
+All PRs to `main` require a review. See the [development](#development) section for build and test commands.
 
 ## Related Projects
 
