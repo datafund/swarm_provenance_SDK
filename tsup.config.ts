@@ -11,5 +11,5 @@ export default defineConfig({
   minify: false,
   target: 'es2022',
   outDir: 'dist',
-  external: ['viem'],
+  external: ['viem', '@x402/fetch', '@x402/evm', '@x402/evm/exact/client'],
 });

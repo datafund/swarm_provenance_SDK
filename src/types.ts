@@ -1,4 +1,43 @@
 /**
+ * Wallet interface for x402 payment signing.
+ * Compatible with viem's WalletClient extended with publicActions, or
+ * composed via `toClientEvmSigner(account, publicClient)` from @x402/evm.
+ */
+export interface PaymentWallet {
+  address: `0x${string}`;
+  signTypedData(args: {
+    domain: Record<string, unknown>;
+    types: Record<string, unknown>;
+    primaryType: string;
+    message: Record<string, unknown>;
+  }): Promise<`0x${string}`>;
+  readContract(args: {
+    address: `0x${string}`;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+  }): Promise<unknown>;
+}
+
+/**
+ * Configuration for x402 automatic payment mode
+ */
+export interface X402PaymentConfig {
+  /** Wallet that signs x402 payment authorizations */
+  wallet: PaymentWallet;
+  /** CAIP-2 network identifier (default: 'eip155:84532' for Base Sepolia) */
+  network?: `${string}:${string}`;
+}
+
+/**
+ * Payment mode for gateway access.
+ * - 'free': Sends X-Payment-Mode: free header (default, rate-limited)
+ * - 'none': No payment header (get raw 402 responses)
+ * - X402PaymentConfig: Automatic x402 USDC payments
+ */
+export type PaymentMode = 'free' | 'none' | X402PaymentConfig;
+
+/**
  * Configuration options for ProvenanceClient
  */
 export interface ProvenanceClientConfig {
@@ -6,6 +45,8 @@ export interface ProvenanceClientConfig {
   gatewayUrl?: string;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
+  /** Payment mode for gateway access (default: 'free') */
+  payment?: PaymentMode;
 }
 
 /**

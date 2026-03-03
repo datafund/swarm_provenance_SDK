@@ -4,6 +4,9 @@ export { ProvenanceClient } from './client.js';
 // Types
 export type {
   ProvenanceClientConfig,
+  PaymentWallet,
+  X402PaymentConfig,
+  PaymentMode,
   UploadOptions,
   DownloadOptions,
   UploadResult,
@@ -23,6 +26,9 @@ export {
   StampError,
   NotaryError,
   VerificationError,
+  PaymentError,
+  PaymentConfigurationError,
+  PaymentRateLimitError,
 } from './errors.js';
 
 // Utilities (for advanced use)

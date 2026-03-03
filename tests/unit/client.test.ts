@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ProvenanceClient } from '../../src/client.js';
-import { GatewayConnectionError, StampError, NotaryError } from '../../src/errors.js';
+import { GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -400,6 +400,111 @@ describe('ProvenanceClient', () => {
 
       // health() catches errors and returns false
       await expect(client.health()).resolves.toBe(false);
+    });
+  });
+
+  describe('payment modes', () => {
+    function getRequestHeaders(): Headers {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      return mockFetch.mock.calls[0][1].headers as Headers;
+    }
+
+    it('should send X-Payment-Mode: free header by default', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      const client = new ProvenanceClient();
+      await client.health();
+
+      expect(getRequestHeaders().get('X-Payment-Mode')).toBe('free');
+    });
+
+    it('should send X-Payment-Mode: free header when payment is "free"', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      const client = new ProvenanceClient({ payment: 'free' });
+      await client.health();
+
+      expect(getRequestHeaders().get('X-Payment-Mode')).toBe('free');
+    });
+
+    it('should not send X-Payment-Mode header when payment is "none"', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      const client = new ProvenanceClient({ payment: 'none' });
+      await client.health();
+
+      expect(getRequestHeaders().has('X-Payment-Mode')).toBe(false);
+    });
+
+    it('should accept x402 config in constructor without error', () => {
+      const mockWallet = {
+        address: '0x1234567890abcdef1234567890abcdef12345678' as `0x${string}`,
+        signTypedData: vi.fn(),
+        readContract: vi.fn(),
+      };
+      const client = new ProvenanceClient({
+        payment: { wallet: mockWallet },
+      });
+      expect(client).toBeInstanceOf(ProvenanceClient);
+    });
+
+    it('should throw PaymentRateLimitError on 429 in free mode', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({
+          'Retry-After': '60',
+          'X-RateLimit-Limit': '3',
+          'X-RateLimit-Remaining': '0',
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.health()).resolves.toBe(false);
+    });
+
+    it('should include retry metadata in PaymentRateLimitError', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({
+          'Retry-After': '60',
+          'X-RateLimit-Limit': '3',
+          'X-RateLimit-Remaining': '0',
+        }),
+      });
+
+      const client = new ProvenanceClient();
+
+      // Use notaryInfo() which doesn't swallow errors like health()
+      try {
+        await client.notaryInfo();
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(PaymentRateLimitError);
+        const rateError = error as PaymentRateLimitError;
+        expect(rateError.retryAfterSeconds).toBe(60);
+        expect(rateError.requestsLimit).toBe(3);
+        expect(rateError.requestsRemaining).toBe(0);
+        expect(rateError.code).toBe('PAYMENT_RATE_LIMIT');
+      }
+    });
+
+    it('should not throw PaymentRateLimitError on 429 when payment is "none"', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({}),
+        json: () => Promise.resolve({ detail: 'Rate limited' }),
+      });
+
+      const client = new ProvenanceClient({ payment: 'none' });
+      // Should throw regular GatewayConnectionError, not PaymentRateLimitError
+      await expect(client.notaryInfo()).rejects.toThrow(GatewayConnectionError);
+      await expect(client.notaryInfo()).rejects.not.toThrow(PaymentRateLimitError);
     });
   });
 });
