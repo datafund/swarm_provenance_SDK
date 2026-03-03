@@ -25,7 +25,7 @@ import { buildMetadata, extractContent, verifyContentHash } from './metadata.js'
 import { verifyAllSignatures } from './notary.js';
 import { toBytes } from './utils.js';
 
-const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.dev.datafund.io';
+const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
 
 /**

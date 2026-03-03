@@ -24,7 +24,7 @@ Application (Fairdrop, Verity, etc.)
 
 ## Gateway API Endpoints
 
-Base URL: `https://provenance-gateway.dev.datafund.io` (default)
+Base URL: `https://provenance-gateway.datafund.io` (default)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -194,8 +194,8 @@ To release a new version:
 
 | Environment | URL |
 |-------------|-----|
-| Dev (default) | `https://provenance-gateway.dev.datafund.io` |
-| Production | `https://provenance-gateway.datafund.io` |
+| Production (default) | `https://provenance-gateway.datafund.io` |
+| Dev | `https://provenance-gateway.dev.datafund.io` |
 | Local | `http://localhost:8000` (swarm_connect) |
 
 Note: SDK adds `X-Payment-Mode: free` header by default for x402 compatibility.
