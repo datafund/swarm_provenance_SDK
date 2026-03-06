@@ -126,6 +126,8 @@ Features: upload text/files, download by reference, notary signing, metadata dis
 
 - `@noble/hashes` - SHA256 (same as Fairdrop v3)
 - `viem` - Optional peer dependency for blockchain anchoring (`./chain` entry point)
+- `@x402/fetch` - Optional peer dependency for x402 payment mode
+- `@x402/evm` - Optional peer dependency for x402 EVM payment signing
 
 ## Build Output
 
@@ -198,7 +200,34 @@ To release a new version:
 | Dev | `https://provenance-gateway.dev.datafund.io` |
 | Local | `http://localhost:8000` (swarm_connect) |
 
-Note: SDK adds `X-Payment-Mode: free` header by default for x402 compatibility.
+## Payment Modes (x402)
+
+The gateway supports the x402 payment protocol for paid access with higher rate limits.
+
+| Mode | Config | Behavior |
+|------|--------|----------|
+| Free (default) | `payment: 'free'` | Sends `X-Payment-Mode: free` header. Rate-limited (3 req/min). |
+| None | `payment: 'none'` | No payment header. Gets raw 402 responses. |
+| x402 paid | `payment: { wallet }` | Automatic USDC payments via `@x402/fetch`. No rate limits. |
+
+**Dependencies for x402 mode**: `@x402/fetch` and `@x402/evm` (optional peer deps, dynamically imported).
+
+**Setup**:
+```typescript
+import { createWalletClient, http, publicActions } from 'viem';
+import { baseSepolia } from 'viem/chains';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const wallet = createWalletClient({
+  account: privateKeyToAccount('0x...'),
+  chain: baseSepolia,
+  transport: http(),
+}).extend(publicActions);
+
+const client = new ProvenanceClient({ payment: { wallet } });
+```
+
+The `PaymentWallet` interface requires `address`, `signTypedData`, and `readContract` — matching viem's `WalletClient.extend(publicActions)` or `@x402/evm`'s `toClientEvmSigner()`.
 
 ## Related Projects
 
@@ -222,6 +251,8 @@ Note: SDK adds `X-Payment-Mode: free` header by default for x402 compatibility.
 | `CHAIN_VALIDATION` | ChainValidationError | Bad hash format, invalid input |
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
+| `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
+| `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
 
 ## Blockchain Anchoring
 
