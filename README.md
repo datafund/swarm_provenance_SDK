@@ -22,6 +22,12 @@ For blockchain anchoring features, also install viem:
 pnpm add @datafund/swarm-provenance viem
 ```
 
+For x402 paid gateway access (higher rate limits), also install:
+
+```bash
+pnpm add @datafund/swarm-provenance @x402/fetch @x402/evm viem
+```
+
 ## Quick Start
 
 ```typescript
@@ -40,6 +46,37 @@ console.log('Uploaded:', result.reference);
 const downloaded = await client.download(result.reference);
 console.log('Content:', new TextDecoder().decode(downloaded.file));
 ```
+
+### x402 Payment Mode
+
+By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-limited. For higher throughput, configure x402 automatic USDC payments:
+
+```typescript
+import { ProvenanceClient } from '@datafund/swarm-provenance';
+import { createWalletClient, http } from 'viem';
+import { baseSepolia } from 'viem/chains';
+import { privateKeyToAccount } from 'viem/accounts';
+import { publicActions } from 'viem';
+
+// Create a signer with readContract support
+const wallet = createWalletClient({
+  account: privateKeyToAccount('0x...'),
+  chain: baseSepolia,
+  transport: http(),
+}).extend(publicActions);
+
+const client = new ProvenanceClient({
+  payment: { wallet },
+});
+
+// Requests that receive 402 responses are automatically paid via USDC
+const result = await client.upload('Hello, World!');
+```
+
+Payment modes:
+- `'free'` (default) — sends `X-Payment-Mode: free` header, rate-limited
+- `'none'` — no payment header, gets raw 402 responses
+- `{ wallet }` — automatic x402 USDC payments via `@x402/fetch`
 
 ### Blockchain Anchoring
 
@@ -79,8 +116,9 @@ await chain.anchor(contentHash, 'dataset');
 
 ```typescript
 const client = new ProvenanceClient({
-  gatewayUrl?: string,  // default: https://provenance-gateway.datafund.io
-  timeout?: number,     // default: 30000ms
+  gatewayUrl?: string,      // default: https://provenance-gateway.datafund.io
+  timeout?: number,         // default: 30000ms
+  payment?: PaymentMode,    // default: 'free' (see x402 Payment Mode)
 });
 ```
 
@@ -99,7 +137,6 @@ const result = await client.upload(content, {
 // {
 //   reference: string,           // Swarm hash
 //   metadata: ProvenanceMetadata,
-//   signedDocument?: SignedDocument,
 // }
 ```
 
@@ -147,12 +184,19 @@ import {
   StampError,
   NotaryError,
   VerificationError,
+  PaymentError,
+  PaymentConfigurationError,
+  PaymentRateLimitError,
 } from '@datafund/swarm-provenance';
 
 try {
   await client.upload(content);
 } catch (error) {
-  if (error instanceof StampError) {
+  if (error instanceof PaymentRateLimitError) {
+    console.error('Rate limited, retry after:', error.retryAfterSeconds, 'seconds');
+  } else if (error instanceof PaymentConfigurationError) {
+    console.error('Missing @x402 packages:', error.message);
+  } else if (error instanceof StampError) {
     console.error('Stamp acquisition failed:', error.message);
   } else if (error instanceof GatewayConnectionError) {
     console.error('Gateway error:', error.statusCode, error.message);

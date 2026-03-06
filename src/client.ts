@@ -1,5 +1,7 @@
 import type {
   ProvenanceClientConfig,
+  PaymentMode,
+  X402PaymentConfig,
   UploadOptions,
   DownloadOptions,
   UploadResult,
@@ -20,12 +22,14 @@ import {
   GatewayConnectionError,
   StampError,
   NotaryError,
+  PaymentRateLimitError,
 } from './errors.js';
 import { buildMetadata, extractContent, verifyContentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { toBytes } from './utils.js';
+import { createX402Fetch } from './payment.js';
 
-const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.dev.datafund.io';
+const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
 
 /**
@@ -34,10 +38,32 @@ const DEFAULT_TIMEOUT = 30000;
 export class ProvenanceClient {
   private readonly gatewayUrl: string;
   private readonly timeout: number;
+  private readonly paymentMode: PaymentMode;
+  private x402Fetch: typeof fetch | undefined;
+  private x402FetchPromise: Promise<typeof fetch> | undefined;
 
   constructor(config: ProvenanceClientConfig = {}) {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
+    this.paymentMode = config.payment ?? 'free';
+  }
+
+  /**
+   * Get or create the x402-wrapped fetch (lazy singleton with dedup)
+   */
+  private getX402Fetch(): Promise<typeof fetch> {
+    if (this.x402Fetch) {
+      return Promise.resolve(this.x402Fetch);
+    }
+    if (!this.x402FetchPromise) {
+      this.x402FetchPromise = createX402Fetch(this.paymentMode as X402PaymentConfig).then(
+        (wrappedFetch) => {
+          this.x402Fetch = wrappedFetch;
+          return wrappedFetch;
+        }
+      );
+    }
+    return this.x402FetchPromise;
   }
 
   /**
@@ -275,20 +301,51 @@ export class ProvenanceClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
-    // Merge headers, adding X-Payment-Mode: free for x402 compatibility
     const headers = new Headers(init?.headers);
-    if (!headers.has('X-Payment-Mode')) {
-      headers.set('X-Payment-Mode', 'free');
+    const isX402 = typeof this.paymentMode === 'object';
+
+    // Set payment header based on mode
+    if (this.paymentMode === 'free') {
+      if (!headers.has('X-Payment-Mode')) {
+        headers.set('X-Payment-Mode', 'free');
+      }
+    }
+    // 'none' and x402: no X-Payment-Mode header
+
+    // Choose fetch implementation
+    let fetchFn: typeof fetch;
+    if (isX402) {
+      fetchFn = await this.getX402Fetch();
+    } else {
+      fetchFn = fetch;
     }
 
     try {
-      const response = await fetch(url, {
+      const response = await fetchFn(url, {
         ...init,
         headers,
         signal: controller.signal,
       });
+
+      // Detect free-tier rate limiting
+      if (response.status === 429 && this.paymentMode === 'free') {
+        const retryAfter = response.headers.get('Retry-After');
+        const rateLimit = response.headers.get('X-RateLimit-Limit');
+        const rateRemaining = response.headers.get('X-RateLimit-Remaining');
+
+        throw new PaymentRateLimitError(
+          'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
+          retryAfter ? parseInt(retryAfter, 10) : undefined,
+          rateLimit ? parseInt(rateLimit, 10) : undefined,
+          rateRemaining ? parseInt(rateRemaining, 10) : undefined
+        );
+      }
+
       return response;
     } catch (error) {
+      if (error instanceof PaymentRateLimitError) {
+        throw error;
+      }
       if (error instanceof Error && error.name === 'AbortError') {
         throw new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT');
       }
