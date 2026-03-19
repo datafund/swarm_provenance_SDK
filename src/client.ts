@@ -368,7 +368,15 @@ export class ProvenanceClient {
 
     try {
       const data = (await response.json()) as GatewayErrorResponse;
-      message = data.detail || message;
+      if (typeof data.detail === 'string') {
+        message = data.detail;
+      } else if (Array.isArray(data.detail)) {
+        // FastAPI validation errors: [{msg, loc, type}, ...]
+        message = data.detail.map((e) => e.msg).join('; ');
+      } else if (data.detail && typeof data.detail === 'object' && 'message' in data.detail) {
+        // Structured error: {message, suggestion?}
+        message = (data.detail as { message: string }).message;
+      }
       code = data.code;
     } catch {
       // Ignore JSON parse errors
