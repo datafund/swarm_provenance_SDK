@@ -69,6 +69,30 @@ export function encodeIsAuthorizedDelegate(owner: Address, delegate: Address): H
   });
 }
 
+export function encodeGetTransformationLinks(dataHash: Hex): Hex {
+  return encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getTransformationLinks',
+    args: [dataHash],
+  });
+}
+
+export function encodeGetChildHashes(dataHash: Hex): Hex {
+  return encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getChildHashes',
+    args: [dataHash],
+  });
+}
+
+export function encodeGetTransformationParents(dataHash: Hex): Hex {
+  return encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getTransformationParents',
+    args: [dataHash],
+  });
+}
+
 // ─── Write Encoders ──────────────────────────────────────────────
 
 export function encodeRegisterData(dataHash: Hex, dataType: string): Hex {
@@ -92,6 +116,19 @@ export function encodeRecordAccess(dataHash: Hex): Hex {
     abi: DATA_PROVENANCE_ABI,
     functionName: 'recordAccess',
     args: [dataHash],
+  });
+}
+
+export function encodeRecordMergeTransformation(
+  sourceDataHashes: Hex[],
+  newDataHash: Hex,
+  transformation: string,
+  newDataType: string,
+): Hex {
+  return encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'recordMergeTransformation',
+    args: [sourceDataHashes, newDataHash, transformation, newDataType],
   });
 }
 
@@ -201,6 +238,38 @@ export function decodeIsAuthorizedDelegate(data: Hex) {
   return decodeFunctionResult({
     abi: DATA_PROVENANCE_ABI,
     functionName: 'isAuthorizedDelegate',
+    data,
+  });
+}
+
+export function decodeGetTransformationLinks(data: Hex) {
+  return decodeFunctionResult({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getTransformationLinks',
+    data,
+  });
+}
+
+export function decodeGetChildHashes(data: Hex) {
+  return decodeFunctionResult({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getChildHashes',
+    data,
+  });
+}
+
+export function decodeGetTransformationParents(data: Hex) {
+  return decodeFunctionResult({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getTransformationParents',
+    data,
+  });
+}
+
+export function decodeGetUserDataRecordsPaginated(data: Hex) {
+  return decodeFunctionResult({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getUserDataRecordsPaginated',
     data,
   });
 }

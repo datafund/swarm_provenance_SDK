@@ -116,7 +116,7 @@ describe('ChainClient', () => {
         owner: MOCK_ADDRESS,
         timestamp: BigInt(1700000000),
         dataType: 'dataset',
-        transformations: ['transformed-v2'],
+        transformationLinks: [{ newDataHash: `0x${'cd'.repeat(32)}`, description: 'transformed-v2' }],
         accessors: [MOCK_ADDRESS],
         status: 0,
       });
@@ -130,7 +130,7 @@ describe('ChainClient', () => {
       expect(record.dataType).toBe('dataset');
       expect(record.status).toBe(DataStatus.ACTIVE);
       expect(record.accessors).toEqual([MOCK_ADDRESS]);
-      expect(record.transformations).toEqual(['transformed-v2']);
+      expect(record.transformationLinks).toEqual([{ newDataHash: `0x${'cd'.repeat(32)}`, description: 'transformed-v2' }]);
     });
 
     it('should throw DataNotRegisteredError for zero hash', async () => {
@@ -139,7 +139,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -162,7 +162,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -193,7 +193,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -215,7 +215,7 @@ describe('ChainClient', () => {
         owner: MOCK_ADDRESS,
         timestamp: BigInt(1700000000),
         dataType: 'dataset',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -232,7 +232,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -334,7 +334,7 @@ describe('ChainClient', () => {
         owner: MOCK_ADDRESS,
         timestamp: BigInt(1700000000),
         dataType: 'dataset',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -351,7 +351,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -373,6 +373,8 @@ describe('ChainClient', () => {
 
   describe('recordTransformation', () => {
     it('should record transformation', async () => {
+      // First call: getTransformationLinks check (no duplicates)
+      mockReadContract.mockResolvedValueOnce([]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
         blockNumber: BigInt(101),
@@ -387,6 +389,38 @@ describe('ChainClient', () => {
       expect(result.originalHash).toBe(SAMPLE_HASH_0X);
       expect(result.newHash).toBe(`0x${newHash}`);
       expect(result.description).toBe('filtered PII');
+    });
+
+    it('should throw on duplicate transformation', async () => {
+      const newHash = 'cd'.repeat(32);
+      // getTransformationLinks returns existing link
+      mockReadContract.mockResolvedValueOnce([
+        { newDataHash: `0x${newHash}`, description: 'already done' },
+      ]);
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+
+      await expect(
+        client.recordTransformation(SAMPLE_HASH, newHash, 'filtered PII')
+      ).rejects.toThrow('already recorded on-chain');
+    });
+
+    it('should proceed if duplicate check fails', async () => {
+      // getTransformationLinks fails (e.g. RPC error) — should still proceed
+      mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(101),
+        gasUsed: BigInt(55000),
+      });
+
+      const newHash = 'cd'.repeat(32);
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.recordTransformation(SAMPLE_HASH, newHash, 'filtered PII');
+
+      expect(result.originalHash).toBe(SAMPLE_HASH_0X);
     });
   });
 
@@ -511,7 +545,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -542,7 +576,7 @@ describe('ChainClient', () => {
         owner: '0x' + '00'.repeat(20),
         timestamp: BigInt(0),
         dataType: '',
-        transformations: [],
+        transformationLinks: [],
         accessors: [],
         status: 0,
       });
@@ -605,6 +639,447 @@ describe('ChainClient', () => {
       const client = new ChainClient({ chain: 'base-sepolia' });
       const url = client.getExplorerUrl('0xabc');
       expect(url).toBe('https://sepolia.basescan.org/tx/0xabc');
+    });
+  });
+
+  // ─── v2 Read Operations ──────────────────────────────────────
+
+  describe('getTransformationLinks', () => {
+    it('should return transformation links', async () => {
+      const childHash: Hex = `0x${'cd'.repeat(32)}`;
+      mockReadContract.mockResolvedValueOnce([
+        { newDataHash: childHash, description: 'filtered PII' },
+      ]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const links = await client.getTransformationLinks(SAMPLE_HASH);
+
+      expect(links).toEqual([{ newDataHash: childHash, description: 'filtered PII' }]);
+    });
+
+    it('should return empty array when no links', async () => {
+      mockReadContract.mockResolvedValueOnce([]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const links = await client.getTransformationLinks(SAMPLE_HASH);
+
+      expect(links).toEqual([]);
+    });
+  });
+
+  describe('getTransformationParents', () => {
+    it('should return parent hashes', async () => {
+      const parentHash: Hex = `0x${'ee'.repeat(32)}`;
+      mockReadContract.mockResolvedValueOnce([parentHash]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const parents = await client.getTransformationParents(SAMPLE_HASH);
+
+      expect(parents).toEqual([parentHash]);
+    });
+
+    it('should return empty array when no parents', async () => {
+      mockReadContract.mockResolvedValueOnce([]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const parents = await client.getTransformationParents(SAMPLE_HASH);
+
+      expect(parents).toEqual([]);
+    });
+  });
+
+  describe('getChildHashes', () => {
+    it('should return child hashes', async () => {
+      const childHash: Hex = `0x${'dd'.repeat(32)}`;
+      mockReadContract.mockResolvedValueOnce([childHash]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const children = await client.getChildHashes(SAMPLE_HASH);
+
+      expect(children).toEqual([childHash]);
+    });
+  });
+
+  describe('getProvenanceChain', () => {
+    it('should traverse the provenance DAG', async () => {
+      const hashA = SAMPLE_HASH_0X;
+      const hashB: Hex = `0x${'bb'.repeat(32)}`;
+      const hashC: Hex = `0x${'cc'.repeat(32)}`;
+
+      // getDataRecord for hashA
+      mockReadContract
+        .mockResolvedValueOnce({
+          dataHash: hashA,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(1000),
+          dataType: 'dataset',
+          transformationLinks: [{ newDataHash: hashB, description: 'step1' }],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashA → [hashB]
+        .mockResolvedValueOnce([hashB])
+        // getTransformationParents for hashA → []
+        .mockResolvedValueOnce([])
+        // getDataRecord for hashB
+        .mockResolvedValueOnce({
+          dataHash: hashB,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(2000),
+          dataType: 'filtered',
+          transformationLinks: [{ newDataHash: hashC, description: 'step2' }],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashB → [hashC]
+        .mockResolvedValueOnce([hashC])
+        // getTransformationParents for hashB → [hashA]
+        .mockResolvedValueOnce([hashA])
+        // getDataRecord for hashC
+        .mockResolvedValueOnce({
+          dataHash: hashC,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(3000),
+          dataType: 'final',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashC → []
+        .mockResolvedValueOnce([])
+        // getTransformationParents for hashC → [hashB]
+        .mockResolvedValueOnce([hashB]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(SAMPLE_HASH);
+
+      expect(chain).toHaveLength(3);
+      expect(chain[0]!.dataHash).toBe(hashA);
+      expect(chain[1]!.dataHash).toBe(hashB);
+      expect(chain[2]!.dataHash).toBe(hashC);
+    });
+
+    it('should respect maxDepth', async () => {
+      // With maxDepth=0, should only return the starting node (depth clamped to 1)
+      mockReadContract
+        .mockResolvedValueOnce({
+          dataHash: SAMPLE_HASH_0X,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(1000),
+          dataType: 'dataset',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes
+        .mockResolvedValueOnce([])
+        // getTransformationParents
+        .mockResolvedValueOnce([]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(SAMPLE_HASH, 1);
+
+      expect(chain).toHaveLength(1);
+    });
+
+    it('should handle cycles gracefully', async () => {
+      const hashA = SAMPLE_HASH_0X;
+      const hashB: Hex = `0x${'bb'.repeat(32)}`;
+
+      mockReadContract
+        // getDataRecord for hashA
+        .mockResolvedValueOnce({
+          dataHash: hashA,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(1000),
+          dataType: 'dataset',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashA → [hashB]
+        .mockResolvedValueOnce([hashB])
+        // getTransformationParents for hashA → []
+        .mockResolvedValueOnce([])
+        // getDataRecord for hashB
+        .mockResolvedValueOnce({
+          dataHash: hashB,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(2000),
+          dataType: 'filtered',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashB → [hashA] (cycle!)
+        .mockResolvedValueOnce([hashA])
+        // getTransformationParents for hashB → [hashA]
+        .mockResolvedValueOnce([hashA]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(SAMPLE_HASH);
+
+      // Should visit both A and B, but not revisit A
+      expect(chain).toHaveLength(2);
+    });
+
+    it('should skip unregistered nodes during traversal', async () => {
+      const hashA = SAMPLE_HASH_0X;
+      const hashB: Hex = `0x${'bb'.repeat(32)}`;
+      const hashC: Hex = `0x${'cc'.repeat(32)}`;
+
+      mockReadContract
+        // getDataRecord for hashA — exists
+        .mockResolvedValueOnce({
+          dataHash: hashA,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(1000),
+          dataType: 'dataset',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashA → [hashB, hashC]
+        .mockResolvedValueOnce([hashB, hashC])
+        // getTransformationParents for hashA → []
+        .mockResolvedValueOnce([])
+        // getDataRecord for hashB — NOT registered (zero hash)
+        .mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getDataRecord for hashC — exists
+        .mockResolvedValueOnce({
+          dataHash: hashC,
+          owner: MOCK_ADDRESS,
+          timestamp: BigInt(3000),
+          dataType: 'final',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        })
+        // getChildHashes for hashC → []
+        .mockResolvedValueOnce([])
+        // getTransformationParents for hashC → [hashA]
+        .mockResolvedValueOnce([hashA]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(SAMPLE_HASH);
+
+      // Should have A and C, skipping unregistered B
+      expect(chain).toHaveLength(2);
+      expect(chain[0]!.dataHash).toBe(hashA);
+      expect(chain[1]!.dataHash).toBe(hashC);
+    });
+  });
+
+  describe('getUserDataRecordsCount', () => {
+    it('should return count', async () => {
+      mockReadContract.mockResolvedValueOnce(BigInt(5));
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const count = await client.getUserDataRecordsCount(MOCK_ADDRESS);
+
+      expect(count).toBe(5);
+    });
+
+    it('should throw on invalid address', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getUserDataRecordsCount('bad')).rejects.toThrow('Invalid Ethereum address');
+    });
+  });
+
+  describe('getUserDataRecordsPaginated', () => {
+    it('should return paginated hashes', async () => {
+      mockReadContract.mockResolvedValueOnce([SAMPLE_HASH_0X]);
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const hashes = await client.getUserDataRecordsPaginated(MOCK_ADDRESS, 0, 10);
+
+      expect(hashes).toEqual([SAMPLE_HASH_0X]);
+    });
+
+    it('should throw on invalid address', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getUserDataRecordsPaginated('bad', 0, 10)).rejects.toThrow('Invalid Ethereum address');
+    });
+  });
+
+  describe('supportsTransformationLinks', () => {
+    it('should return true when contract supports v2', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      mockReadContract.mockResolvedValueOnce([]);
+
+      const result = await client.supportsTransformationLinks();
+      expect(result).toBe(true);
+    });
+
+    it('should return false when contract reverts (v1)', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      mockReadContract.mockRejectedValueOnce(new Error('execution reverted'));
+
+      const result = await client.supportsTransformationLinks();
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('healthCheck', () => {
+    it('should return true when connected', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
+      (client as any).publicClient.getChainId = vi.fn().mockResolvedValue(84532);
+
+      const result = await client.healthCheck();
+      expect(result).toBe(true);
+    });
+
+    it('should return false when disconnected', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
+      (client as any).publicClient.getChainId = vi.fn().mockRejectedValue(new Error('connection failed'));
+
+      const result = await client.healthCheck();
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('getBalance', () => {
+    it('should throw SignerRequiredError without signer', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getBalance()).rejects.toThrow(SignerRequiredError);
+    });
+
+    it('should return balance info', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
+      (client as any).publicClient.getBalance = vi.fn().mockResolvedValue(BigInt('1000000000000000000'));
+
+      const balance = await client.getBalance();
+
+      expect(balance.address).toBe(MOCK_ADDRESS);
+      expect(balance.balanceWei).toBe(BigInt('1000000000000000000'));
+      expect(balance.balanceEth).toBe('1');
+      expect(balance.chain).toBe('base-sepolia');
+    });
+  });
+
+  // ─── v2 Write Operations ─────────────────────────────────────
+
+  describe('mergeTransform', () => {
+    it('should throw SignerRequiredError without signer', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(
+        client.mergeTransform([SAMPLE_HASH, 'cd'.repeat(32)], 'ee'.repeat(32), 'merged')
+      ).rejects.toThrow(SignerRequiredError);
+    });
+
+    it('should throw on fewer than 2 source hashes', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(
+        client.mergeTransform([SAMPLE_HASH], 'ee'.repeat(32), 'merged')
+      ).rejects.toThrow(ChainValidationError);
+      await expect(
+        client.mergeTransform([SAMPLE_HASH], 'ee'.repeat(32), 'merged')
+      ).rejects.toThrow('at least 2');
+    });
+
+    it('should throw on more than 50 source hashes', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const sources = Array.from({ length: 51 }, (_, i) =>
+        `${i.toString(16).padStart(2, '0')}`.repeat(32)
+      );
+      await expect(
+        client.mergeTransform(sources, 'ee'.repeat(32), 'merged')
+      ).rejects.toThrow(ChainValidationError);
+      await expect(
+        client.mergeTransform(sources, 'ee'.repeat(32), 'merged')
+      ).rejects.toThrow('exceeds maximum of 50');
+    });
+
+    it('should merge transform and return result', async () => {
+      // getTransformationParents check (no duplicates)
+      mockReadContract.mockResolvedValueOnce([]);
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(200),
+        gasUsed: BigInt(100000),
+      });
+
+      const hashB = 'cd'.repeat(32);
+      const hashMerged = 'ee'.repeat(32);
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.mergeTransform(
+        [SAMPLE_HASH, hashB],
+        hashMerged,
+        'combined datasets',
+        'merged-dataset',
+      );
+
+      expect(result.txHash).toBe(MOCK_TX_HASH);
+      expect(result.sourceHashes).toEqual([SAMPLE_HASH_0X, `0x${hashB}`]);
+      expect(result.newHash).toBe(`0x${hashMerged}`);
+      expect(result.description).toBe('combined datasets');
+      expect(result.newDataType).toBe('merged-dataset');
+    });
+
+    it('should default newDataType to "merged"', async () => {
+      mockReadContract.mockResolvedValueOnce([]); // getTransformationParents check
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(201),
+        gasUsed: BigInt(100000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.mergeTransform(
+        [SAMPLE_HASH, 'cd'.repeat(32)],
+        'ee'.repeat(32),
+        'merged two files',
+      );
+
+      expect(result.newDataType).toBe('merged');
+    });
+
+    it('should throw on duplicate merge', async () => {
+      // getTransformationParents returns existing parents
+      mockReadContract.mockResolvedValueOnce([SAMPLE_HASH_0X, `0x${'cd'.repeat(32)}`]);
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+
+      await expect(
+        client.mergeTransform([SAMPLE_HASH, 'cd'.repeat(32)], 'ee'.repeat(32), 'merged')
+      ).rejects.toThrow('already has transformation parents');
+    });
+
+    it('should proceed if duplicate check fails', async () => {
+      // getTransformationParents fails — should proceed with transaction
+      mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(202),
+        gasUsed: BigInt(100000),
+      });
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      const result = await client.mergeTransform(
+        [SAMPLE_HASH, 'cd'.repeat(32)],
+        'ee'.repeat(32),
+        'merged',
+      );
+
+      expect(result.txHash).toBe(MOCK_TX_HASH);
     });
   });
 });
