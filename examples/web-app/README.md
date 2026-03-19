@@ -8,7 +8,11 @@ A simple React app demonstrating the `@datafund/swarm-provenance` SDK.
 - Upload text or files to Swarm
 - Optional notary signing with signature verification
 - Download by reference with metadata display
-- Blockchain anchoring (Base Sepolia) - connect wallet, anchor hashes, verify on-chain records
+- Blockchain anchoring (Base Sepolia) — connect wallet, anchor hashes, verify on-chain records
+- Merge transformations — combine multiple source hashes into a merged result (v2 contract)
+- Provenance chain traversal — trace full lineage of any data hash
+- Wallet balance display
+- User records browser — view all records owned by the connected wallet
 
 ## Quick Start
 
@@ -58,7 +62,29 @@ const readOnly = new ChainClient({ chain: 'base-sepolia' });
 const record = await readOnly.getDataRecord(contentHash);
 ```
 
-The demo app auto-populates the anchor hash after a successful upload. Verify On-Chain works without a wallet connection.
+### Merge Transform (v2)
+
+Combine multiple data sources into a single merged result:
+
+```typescript
+await chain.mergeTransform(
+  [sourceHash1, sourceHash2],
+  mergedHash,
+  'combined datasets A and B',
+);
+```
+
+### Provenance Chain
+
+Trace the full lineage of a data hash (ancestors + descendants):
+
+```typescript
+const readOnly = new ChainClient({ chain: 'base-sepolia' });
+const records = await readOnly.getProvenanceChain(dataHash);
+// Returns ChainProvenanceRecord[] via BFS traversal
+```
+
+The demo app auto-populates the anchor hash after a successful upload. Verify On-Chain and Provenance Chain work without a wallet connection.
 
 ## Testing
 
@@ -75,25 +101,39 @@ pnpm test:headed
 pnpm test:ui
 ```
 
-### Test Coverage
+### Test Coverage (57 tests)
 
-**Core (app.spec.ts):**
+**Core — app.spec.ts (15 tests):**
 - Page loads correctly, no console/CORS errors
 - Gateway health check displays status
 - Upload/download UI elements and validation
 - Full upload and download cycle
 - Notary signing and signature verification
 
-**Chain (chain.spec.ts):**
+**Chain — chain.spec.ts (34 tests):**
 - Chain section layout and description
+- Provenance Chain section visibility and button states
 - "No wallet detected" state without provider
+- Merge Transform and My Records hidden without wallet
 - Verify On-Chain button states and validation
 - Verify shows "not registered" for unknown hashes
 - Wallet connection with injected mock provider
-- Connect wallet reveals anchor form
+- Connect wallet reveals anchor, merge, and records sections
 - Connection error handling (user rejection)
 - Anchor form defaults and validation
+- Merge Transform form: add/remove sources, validation, defaults
+- My Records section visibility
 - Upload auto-populates anchor hash field
+
+**Chain Integration — chain-debug.spec.ts (8 tests):**
+- Full anchor and verify flow via Hardhat
+- Duplicate anchor error handling
+- Verify unknown hash on Hardhat
+- Merge transform: anchor sources, merge, verify result
+- Verify shows transformation links after merge
+- Provenance chain traversal after merge
+- User records after anchoring
+- Wallet balance displayed after connect
 
 ## Development
 
@@ -107,7 +147,7 @@ pnpm test         # Run e2e tests
 ## Prerequisites
 
 - **Node.js** 18+ and **pnpm**
-- **MetaMask** (or compatible wallet) for chain anchoring
+- **MetaMask** (or compatible wallet) for chain features
 - Wallet must be connected to **Base Sepolia** testnet
 - Get testnet ETH from [Base Sepolia Faucet](https://www.coinbase.com/faucets/base-ethereum-goerli-faucet)
 
@@ -132,12 +172,30 @@ pnpm test         # Run e2e tests
 │  [Download]                             │
 ├─────────────────────────────────────────┤
 │  Blockchain Anchoring                   │
-│  [Connect Wallet]                       │
+│  Connected: 0x1234...5678 (0.05 ETH)   │
+│                                         │
 │  Anchor Data:                           │
 │    [Data hash]  [Data type]             │
 │    [Anchor On-Chain]                    │
+│                                         │
+│  Merge Transform:                       │
+│    [Source 1] [Source 2] [+ Add Source]  │
+│    [New hash] [Description] [Type]      │
+│    [Merge Transform]                    │
+│                                         │
 │  Verify On-Chain:                       │
 │    [Hash to verify]                     │
 │    [Verify On-Chain]                    │
+│    → Record details + transformation    │
+│      links with descriptions            │
+│                                         │
+│  Provenance Chain:                      │
+│    [Hash to trace]                      │
+│    [Trace Provenance]                   │
+│    → Chain of records (BFS traversal)   │
+│                                         │
+│  My Records:                            │
+│    [Load My Records]                    │
+│    → List with Verify/Trace buttons     │
 └─────────────────────────────────────────┘
 ```

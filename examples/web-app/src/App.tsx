@@ -12,6 +12,8 @@ import {
   type ChainSigner,
   type ChainProvenanceRecord,
   type AnchorResult,
+  type MergeTransformResult,
+  type TransformationLink,
 } from '@datafund/swarm-provenance/chain';
 
 const client = new ProvenanceClient();
@@ -64,6 +66,29 @@ function App() {
   const [verifyRecord, setVerifyRecord] = useState<ChainProvenanceRecord | null>(null);
   const [verifyNotFound, setVerifyNotFound] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  // Wallet balance
+  const [walletBalance, setWalletBalance] = useState<string | null>(null);
+
+  // Merge transform state
+  const [mergeSourceHashes, setMergeSourceHashes] = useState<string[]>(['', '']);
+  const [mergeNewHash, setMergeNewHash] = useState('');
+  const [mergeDescription, setMergeDescription] = useState('');
+  const [mergeDataType, setMergeDataType] = useState('merged');
+  const [merging, setMerging] = useState(false);
+  const [mergeResult, setMergeResult] = useState<MergeTransformResult | null>(null);
+  const [mergeError, setMergeError] = useState<string | null>(null);
+
+  // Provenance chain state
+  const [chainTraceHash, setChainTraceHash] = useState('');
+  const [loadingChain, setLoadingChain] = useState(false);
+  const [provenanceChain, setProvenanceChain] = useState<ChainProvenanceRecord[] | null>(null);
+  const [chainTraceError, setChainTraceError] = useState<string | null>(null);
+
+  // User records state
+  const [userRecords, setUserRecords] = useState<string[] | null>(null);
+  const [loadingRecords, setLoadingRecords] = useState(false);
+  const [recordsError, setRecordsError] = useState<string | null>(null);
 
   const hasWallet = typeof window !== 'undefined' && !!window.ethereum;
 
@@ -132,7 +157,10 @@ function App() {
       setChainPreset(preset);
       setChainName(CHAIN_NAMES[chainId] || `Chain ${chainId}`);
       setWrongChain(false);
-      setChainClient(new ChainClient({ chain: preset, signer, txTimeout: 120_000 }));
+      const newClient = new ChainClient({ chain: preset, signer, txTimeout: 120_000 });
+      setChainClient(newClient);
+      // Fetch balance
+      newClient.getBalance().then((b) => setWalletBalance(b.balanceEth)).catch(() => {});
     } else {
       setChainName(CHAIN_NAMES[chainId] || `Unknown (${chainId})`);
       setWrongChain(true);
@@ -278,6 +306,74 @@ function App() {
     }
   };
 
+  const handleMergeTransform = async () => {
+    if (!chainClient) return;
+    setMerging(true);
+    setMergeError(null);
+    setMergeResult(null);
+
+    try {
+      const sources = mergeSourceHashes.filter((h) => h.trim());
+      if (sources.length < 2) {
+        throw new Error('At least 2 source hashes are required');
+      }
+      if (!mergeNewHash.trim()) {
+        throw new Error('Please enter the resulting merged hash');
+      }
+      if (!mergeDescription.trim()) {
+        throw new Error('Please enter a description');
+      }
+
+      const result = await chainClient.mergeTransform(
+        sources,
+        mergeNewHash.trim(),
+        mergeDescription.trim(),
+        mergeDataType.trim() || 'merged',
+      );
+      setMergeResult(result);
+    } catch (err) {
+      setMergeError(err instanceof Error ? err.message : 'Merge transform failed');
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const handleGetProvenanceChain = async () => {
+    setLoadingChain(true);
+    setChainTraceError(null);
+    setProvenanceChain(null);
+
+    try {
+      if (!chainTraceHash.trim()) {
+        throw new Error('Please enter a hash to trace');
+      }
+      const readClient = new ChainClient({ chain: chainPreset });
+      const chain = await readClient.getProvenanceChain(chainTraceHash.trim());
+      setProvenanceChain(chain);
+    } catch (err) {
+      setChainTraceError(err instanceof Error ? err.message : 'Failed to trace provenance');
+    } finally {
+      setLoadingChain(false);
+    }
+  };
+
+  const handleGetUserRecords = async () => {
+    if (!walletAddress) return;
+    setLoadingRecords(true);
+    setRecordsError(null);
+    setUserRecords(null);
+
+    try {
+      const readClient = new ChainClient({ chain: chainPreset });
+      const records = await readClient.getUserDataRecords(walletAddress);
+      setUserRecords(records);
+    } catch (err) {
+      setRecordsError(err instanceof Error ? err.message : 'Failed to load records');
+    } finally {
+      setLoadingRecords(false);
+    }
+  };
+
   const statusLabel = (status: DataStatus) => {
     switch (status) {
       case DataStatus.ACTIVE: return 'Active';
@@ -374,10 +470,8 @@ function App() {
               <strong>Content Hash:</strong>
               <code>{uploadResult.metadata.content_hash}</code>
             </p>
-            {uploadResult.signedDocument && (
-              <p className="success">
-                Signed by notary: {uploadResult.signedDocument.signatures[0]?.signer}
-              </p>
+            {useNotary && (
+              <p className="success">Signed by notary</p>
             )}
           </div>
         )}
@@ -501,6 +595,11 @@ function App() {
               <span style={{ marginLeft: 12 }}>
                 on <strong>{chainName}</strong>
                 {wrongChain && <span className="error" style={{ marginLeft: 8 }}>Unsupported chain</span>}
+              </span>
+            )}
+            {walletBalance && (
+              <span style={{ marginLeft: 12, color: '#666' }}>
+                ({parseFloat(walletBalance).toFixed(4)} ETH)
               </span>
             )}
           </div>
@@ -628,13 +727,227 @@ function App() {
                 <span className="value">{verifyRecord.accessors.length}</span>
               </div>
             )}
-            {verifyRecord.transformations.length > 0 && (
-              <div className="detail-row">
-                <span className="label">Transforms:</span>
-                <span className="value">{verifyRecord.transformations.length}</span>
-              </div>
+            {verifyRecord.transformationLinks.length > 0 && (
+              <>
+                <div className="detail-row">
+                  <span className="label">Transforms:</span>
+                  <span className="value">{verifyRecord.transformationLinks.length}</span>
+                </div>
+                <div className="transformation-links">
+                  {verifyRecord.transformationLinks.map((link: TransformationLink, i: number) => (
+                    <div key={i} className="transform-link-item">
+                      <code className="value small">{link.newDataHash.slice(0, 10)}...{link.newDataHash.slice(-8)}</code>
+                      <span className="transform-desc">{link.description}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
+        )}
+
+        {/* Merge Transform */}
+        {walletAddress && !wrongChain && (
+          <>
+            <h3>Merge Transform</h3>
+            <p className="section-description">
+              Combine multiple source data hashes into a single merged result (v2 contract feature).
+            </p>
+
+            {mergeSourceHashes.map((hash, i) => (
+              <div key={i} className="input-group" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ flex: 1 }}>
+                  <label>Source Hash {i + 1}:</label>
+                  <input
+                    type="text"
+                    value={hash}
+                    onChange={(e) => {
+                      const updated = [...mergeSourceHashes];
+                      updated[i] = e.target.value;
+                      setMergeSourceHashes(updated);
+                    }}
+                    placeholder="Source data hash (hex)"
+                  />
+                </div>
+                {mergeSourceHashes.length > 2 && (
+                  <button
+                    className="small"
+                    style={{ marginTop: 20 }}
+                    onClick={() => setMergeSourceHashes(mergeSourceHashes.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {mergeSourceHashes.length < 10 && (
+              <button
+                className="small"
+                style={{ marginBottom: 12, marginLeft: 0 }}
+                onClick={() => setMergeSourceHashes([...mergeSourceHashes, ''])}
+              >
+                + Add Source
+              </button>
+            )}
+
+            <div className="input-group">
+              <label>New Merged Hash:</label>
+              <input
+                type="text"
+                value={mergeNewHash}
+                onChange={(e) => setMergeNewHash(e.target.value)}
+                placeholder="Merged result hash (hex)"
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Description:</label>
+              <input
+                type="text"
+                value={mergeDescription}
+                onChange={(e) => setMergeDescription(e.target.value)}
+                placeholder="e.g. Merged datasets A and B"
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Data Type:</label>
+              <input
+                type="text"
+                value={mergeDataType}
+                onChange={(e) => setMergeDataType(e.target.value)}
+                placeholder="e.g. merged, dataset"
+              />
+            </div>
+
+            <button
+              onClick={handleMergeTransform}
+              disabled={merging || mergeSourceHashes.filter((h) => h.trim()).length < 2 || !mergeNewHash.trim() || !mergeDescription.trim()}
+            >
+              {merging ? 'Merging...' : 'Merge Transform'}
+            </button>
+          </>
+        )}
+
+        {mergeError && <p className="error">{mergeError}</p>}
+
+        {mergeResult && (
+          <div className="result">
+            <h3>Merge Successful</h3>
+            <div className="detail-row">
+              <span className="label">Tx Hash:</span>
+              <a href={mergeResult.explorerUrl} target="_blank" rel="noopener noreferrer">
+                <code className="value">{mergeResult.txHash.slice(0, 10)}...{mergeResult.txHash.slice(-8)}</code>
+              </a>
+            </div>
+            <div className="detail-row">
+              <span className="label">Sources:</span>
+              <span className="value">{mergeResult.sourceHashes.length} hashes merged</span>
+            </div>
+            <div className="detail-row">
+              <span className="label">Result:</span>
+              <code className="value small">{mergeResult.newHash}</code>
+            </div>
+            <div className="detail-row">
+              <span className="label">Gas Used:</span>
+              <span className="value">{mergeResult.gasUsed.toString()}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Provenance Chain Traversal */}
+        <h3>Provenance Chain</h3>
+        <p className="section-description">
+          Trace the full lineage of a data hash — ancestors and descendants.
+        </p>
+
+        <div className="input-group">
+          <label>Data Hash to trace:</label>
+          <input
+            type="text"
+            value={chainTraceHash}
+            onChange={(e) => setChainTraceHash(e.target.value)}
+            placeholder="Hash to trace lineage"
+          />
+        </div>
+
+        <button onClick={handleGetProvenanceChain} disabled={loadingChain || !chainTraceHash.trim()}>
+          {loadingChain ? 'Tracing...' : 'Trace Provenance'}
+        </button>
+
+        {chainTraceError && <p className="error">{chainTraceError}</p>}
+
+        {provenanceChain && (
+          <div className="result">
+            <h3>Provenance Chain ({provenanceChain.length} record{provenanceChain.length !== 1 ? 's' : ''})</h3>
+            {provenanceChain.length === 0 && <p>No records found in the chain.</p>}
+            {provenanceChain.map((record, i) => (
+              <div key={i} className="chain-record">
+                <div className="detail-row">
+                  <span className="label">Hash:</span>
+                  <code className="value small">{record.dataHash}</code>
+                </div>
+                <div className="detail-row">
+                  <span className="label">Type:</span>
+                  <span className="value">{record.dataType}</span>
+                </div>
+                <div className="detail-row">
+                  <span className="label">Owner:</span>
+                  <code className="value">{record.owner.slice(0, 6)}...{record.owner.slice(-4)}</code>
+                </div>
+                <div className="detail-row">
+                  <span className="label">Status:</span>
+                  <span className={`badge ${record.status === DataStatus.ACTIVE ? 'success' : 'warning'}`}>
+                    {statusLabel(record.status)}
+                  </span>
+                </div>
+                {record.transformationLinks.length > 0 && (
+                  <div className="detail-row">
+                    <span className="label">Children:</span>
+                    <span className="value">{record.transformationLinks.length} transformation(s)</span>
+                  </div>
+                )}
+                {i < provenanceChain.length - 1 && <div className="chain-arrow">|</div>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* My Records */}
+        {walletAddress && !wrongChain && (
+          <>
+            <h3>My Records</h3>
+            <button onClick={handleGetUserRecords} disabled={loadingRecords}>
+              {loadingRecords ? 'Loading...' : 'Load My Records'}
+            </button>
+
+            {recordsError && <p className="error">{recordsError}</p>}
+
+            {userRecords && (
+              <div className="result">
+                <h3>{userRecords.length} Record{userRecords.length !== 1 ? 's' : ''}</h3>
+                {userRecords.length === 0 && <p>No records found for this wallet.</p>}
+                {userRecords.map((hash, i) => (
+                  <div key={i} className="detail-row">
+                    <code className="value small">{hash}</code>
+                    <button
+                      className="small"
+                      onClick={() => { setVerifyHash(hash); handleVerify(); }}
+                    >
+                      Verify
+                    </button>
+                    <button
+                      className="small"
+                      onClick={() => setChainTraceHash(hash)}
+                    >
+                      Trace
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>
