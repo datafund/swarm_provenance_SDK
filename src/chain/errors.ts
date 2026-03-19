@@ -40,6 +40,7 @@ export class ChainTransactionError extends ChainError {
   constructor(
     message: string,
     public readonly txHash?: string,
+    public readonly originalError?: Error,
   ) {
     super(message, 'CHAIN_TRANSACTION');
     this.name = 'ChainTransactionError';

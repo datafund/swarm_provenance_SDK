@@ -39,6 +39,14 @@ export interface X402PaymentConfig {
  */
 export type PaymentMode = 'free' | 'none' | X402PaymentConfig;
 
+/** Retry configuration for transient gateway failures */
+export interface GatewayRetryConfig {
+  /** Max retry attempts (default: 2) */
+  maxRetries?: number;
+  /** Base delay in ms, doubled each retry (default: 1000) */
+  baseDelayMs?: number;
+}
+
 /**
  * Configuration options for ProvenanceClient
  */
@@ -49,6 +57,8 @@ export interface ProvenanceClientConfig {
   timeout?: number;
   /** Payment mode for gateway access (default: 'free') */
   payment?: PaymentMode;
+  /** Retry config for transient gateway failures (default: 2 retries, 1s delay) */
+  retry?: GatewayRetryConfig;
 }
 
 /**

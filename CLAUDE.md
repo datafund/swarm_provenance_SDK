@@ -243,16 +243,20 @@ The `PaymentWallet` interface requires `address`, `signTypedData`, and `readCont
 | `TIMEOUT` | GatewayConnectionError | Request timed out |
 | `CONNECTION_FAILED` | GatewayConnectionError | Network error |
 | `CONTENT_HASH_MISMATCH` | ProvenanceError | Downloaded content doesn't match hash |
+| `POOL_EXHAUSTED` | StampError | Stamp pool is empty, no stamps available |
 | `NOTARY_NOT_ENABLED` | NotaryError | Notary service disabled |
 | `NOT_IMPLEMENTED` | VerificationError | Feature not yet implemented |
 | `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config |
 | `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable |
-| `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas |
+| `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas (`.originalError` has full details) |
 | `CHAIN_VALIDATION` | ChainValidationError | Bad hash format, invalid input |
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
 | `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
+
+Note: `GatewayConnectionError` may include a `.suggestion` field with recovery hints from the gateway.
+Both `ProvenanceClient` and `ChainClient` accept a `retry` config (default: 2 retries, 1s exponential backoff) for transient failures (502/503/nonce errors).
 
 ## Blockchain Anchoring
 

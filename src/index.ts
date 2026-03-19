@@ -7,6 +7,7 @@ export type {
   PaymentWallet,
   X402PaymentConfig,
   PaymentMode,
+  GatewayRetryConfig,
   UploadOptions,
   DownloadOptions,
   UploadResult,

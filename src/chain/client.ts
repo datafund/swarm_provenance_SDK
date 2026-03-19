@@ -37,6 +37,7 @@ import type {
   ChainPreset,
   ChainProvenanceRecord,
   ChainSigner,
+  RetryConfig,
   TransformationLink,
   AnchorResult,
   AccessResult,
@@ -75,6 +76,7 @@ export class ChainClient {
   private readonly signer: ChainSigner | undefined;
   private readonly txTimeout: number;
   private readonly gasLimit: bigint | undefined;
+  private readonly retryConfig: Required<RetryConfig>;
 
   constructor(config: ChainClientConfig) {
     // Resolve chain preset
@@ -95,6 +97,10 @@ export class ChainClient {
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
     this.gasLimit = config.gasLimit != null ? BigInt(config.gasLimit) : undefined;
+    this.retryConfig = {
+      maxRetries: config.retry?.maxRetries ?? 2,
+      baseDelayMs: config.retry?.baseDelayMs ?? 1000,
+    };
 
     if (this.contractAddress === ZERO_ADDRESS) {
       throw new ChainConfigurationError(
@@ -866,19 +872,53 @@ export class ChainClient {
     }
   }
 
-  private async sendAndWait(data: Hex): Promise<TransactionResult> {
-    let txHash: Hex;
-    try {
-      txHash = await this.signer!.sendTransaction({
-        to: this.contractAddress,
-        data,
-        ...(this.gasLimit ? { gas: this.gasLimit } : {}),
-      });
-    } catch (error) {
-      throw new ChainTransactionError(
-        `Transaction failed: ${error instanceof Error ? error.message : String(error)}`
-      );
+  private cleanTransactionError(error: unknown): string {
+    const raw = error instanceof Error ? error.message : String(error);
+    // Extract the first meaningful section before viem's verbose details
+    const match = raw.match(/^(.*?)(?:\n\n|\nContract Call:|\nRequest Arguments:|\nDocs:)/s);
+    const cleaned = match ? match[1]!.trim() : raw;
+    if (cleaned.length > 200) {
+      return cleaned.slice(0, 197) + '...';
     }
+    return cleaned;
+  }
+
+  private isTransientError(error: unknown): boolean {
+    const msg = error instanceof Error ? error.message : String(error);
+    return /nonce too (low|high)|replacement underpriced/i.test(msg);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async sendWithRetry(data: Hex): Promise<Hex> {
+    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        return await this.signer!.sendTransaction({
+          to: this.contractAddress,
+          data,
+          ...(this.gasLimit ? { gas: this.gasLimit } : {}),
+        });
+      } catch (error) {
+        if (attempt < this.retryConfig.maxRetries && this.isTransientError(error)) {
+          await this.delay(this.retryConfig.baseDelayMs * Math.pow(2, attempt));
+          continue;
+        }
+        const originalError = error instanceof Error ? error : undefined;
+        throw new ChainTransactionError(
+          `Transaction failed: ${this.cleanTransactionError(error)}`,
+          undefined,
+          originalError,
+        );
+      }
+    }
+    // Unreachable — the last iteration always throws in the catch block
+    throw new ChainTransactionError('Transaction failed after retries');
+  }
+
+  private async sendAndWait(data: Hex): Promise<TransactionResult> {
+    const txHash = await this.sendWithRetry(data);
 
     try {
       const receipt = await this.publicClient.waitForTransactionReceipt({

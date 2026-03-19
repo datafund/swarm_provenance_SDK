@@ -19,7 +19,8 @@ export class GatewayConnectionError extends ProvenanceError {
   constructor(
     message: string,
     public readonly statusCode?: number,
-    code?: string
+    code?: string,
+    public readonly suggestion?: string,
   ) {
     super(message, code);
     this.name = 'GatewayConnectionError';

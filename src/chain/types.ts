@@ -119,6 +119,14 @@ export interface ChainPreset {
   explorerUrl: string;
 }
 
+/** Retry configuration for transient failures */
+export interface RetryConfig {
+  /** Max retry attempts (default: 2) */
+  maxRetries?: number;
+  /** Base delay in ms, doubled each retry (default: 1000) */
+  baseDelayMs?: number;
+}
+
 /** Configuration for ChainClient */
 export interface ChainClientConfig {
   /** Chain preset name or custom config */
@@ -133,6 +141,8 @@ export interface ChainClientConfig {
   txTimeout?: number;
   /** Explicit gas limit for transactions. Skips provider estimation when set. */
   gasLimit?: bigint | number;
+  /** Retry config for transient failures (default: 2 retries, 1s base delay) */
+  retry?: RetryConfig;
 }
 
 /** Minimal signer interface for transaction signing */
