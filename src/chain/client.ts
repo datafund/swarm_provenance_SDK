@@ -1,5 +1,6 @@
 import {
   createPublicClient,
+  formatEther,
   http,
   type PublicClient,
   type Hex,
@@ -21,6 +22,7 @@ import {
   encodeRegisterDataFor,
   encodeRecordAccess,
   encodeRecordTransformation,
+  encodeRecordMergeTransformation,
   encodeSetDataStatus,
   encodeSetDelegate,
   encodeTransferDataOwnership,
@@ -30,13 +32,16 @@ import {
 } from './contract.js';
 import type {
   Address,
+  BalanceInfo,
   ChainClientConfig,
   ChainPreset,
   ChainProvenanceRecord,
   ChainSigner,
+  TransformationLink,
   AnchorResult,
   AccessResult,
   TransformResult,
+  MergeTransformResult,
   StatusResult,
   TransferResult,
   DelegateResult,
@@ -149,7 +154,7 @@ export class ChainClient {
         owner: Address;
         timestamp: bigint;
         dataType: string;
-        transformations: readonly string[];
+        transformationLinks: readonly { newDataHash: Hex; description: string }[];
         accessors: readonly Address[];
         status: number;
       };
@@ -165,7 +170,10 @@ export class ChainClient {
         dataType: record.dataType,
         status: record.status as DataStatus,
         accessors: [...record.accessors],
-        transformations: [...record.transformations],
+        transformationLinks: record.transformationLinks.map((link) => ({
+          newDataHash: link.newDataHash,
+          description: link.description,
+        })),
       };
     } catch (error) {
       if (error instanceof DataNotRegisteredError) {
@@ -241,6 +249,242 @@ export class ChainClient {
     } catch (error) {
       throw new ChainConnectionError(
         `Failed to check delegate: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Get the transformation links (children) for a data hash.
+   * Returns an array of TransformationLink with newDataHash and description.
+   */
+  async getTransformationLinks(dataHash: string): Promise<TransformationLink[]> {
+    const hash = normalizeHash(dataHash);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getTransformationLinks',
+        args: [hash],
+      });
+
+      return (result as readonly { newDataHash: Hex; description: string }[]).map((link) => ({
+        newDataHash: link.newDataHash,
+        description: link.description,
+      }));
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get transformation links: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Get the parent hashes for a data hash (reverse traversal).
+   * Returns hashes that were transformed to produce this hash.
+   */
+  async getTransformationParents(dataHash: string): Promise<string[]> {
+    const hash = normalizeHash(dataHash);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getTransformationParents',
+        args: [hash],
+      });
+
+      return [...(result as readonly Hex[])];
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get transformation parents: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Get child hashes for a data hash (lightweight, no descriptions).
+   */
+  async getChildHashes(dataHash: string): Promise<string[]> {
+    const hash = normalizeHash(dataHash);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getChildHashes',
+        args: [hash],
+      });
+
+      return [...(result as readonly Hex[])];
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get child hashes: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Traverse the full provenance chain (DAG) from any node.
+   * Performs BFS in both directions (ancestors via parents, descendants via children).
+   *
+   * @param dataHash - Starting hash
+   * @param maxDepth - Maximum traversal depth (default 10, max 50)
+   * @returns Array of ChainProvenanceRecord for each node in the DAG
+   */
+  async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
+    const effectiveMaxDepth = Math.min(Math.max(maxDepth, 1), 50);
+    const startHash = normalizeHash(dataHash);
+
+    const visited = new Set<string>();
+    const records: ChainProvenanceRecord[] = [];
+    // Queue: [hash, currentDepth]
+    const queue: Array<[Hex, number]> = [[startHash, 0]];
+
+    while (queue.length > 0) {
+      const [hash, depth] = queue.shift()!;
+      const hashLower = hash.toLowerCase();
+
+      if (visited.has(hashLower)) continue;
+      visited.add(hashLower);
+
+      let record: ChainProvenanceRecord;
+      try {
+        record = await this.getDataRecord(hash);
+      } catch (error) {
+        if (error instanceof DataNotRegisteredError) continue;
+        throw error;
+      }
+      records.push(record);
+
+      if (depth >= effectiveMaxDepth) continue;
+
+      // Forward: child hashes
+      try {
+        const children = await this.getChildHashes(hash);
+        for (const child of children) {
+          if (!visited.has(child.toLowerCase())) {
+            queue.push([child as Hex, depth + 1]);
+          }
+        }
+      } catch {
+        // Ignore errors in traversal — node may not have children
+      }
+
+      // Backward: parent hashes
+      try {
+        const parents = await this.getTransformationParents(hash);
+        for (const parent of parents) {
+          if (!visited.has(parent.toLowerCase())) {
+            queue.push([parent as Hex, depth + 1]);
+          }
+        }
+      } catch {
+        // Ignore errors in traversal — node may not have parents
+      }
+    }
+
+    return records;
+  }
+
+  /**
+   * Get the count of data records owned by a user.
+   */
+  async getUserDataRecordsCount(user: string): Promise<number> {
+    validateAddress(user);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getUserDataRecordsCount',
+        args: [user as Address],
+      });
+
+      return Number(result);
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get user data records count: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Get paginated data record hashes owned by a user.
+   */
+  async getUserDataRecordsPaginated(user: string, offset: number, limit: number): Promise<string[]> {
+    validateAddress(user);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getUserDataRecordsPaginated',
+        args: [user as Address, BigInt(offset), BigInt(limit)],
+      });
+
+      return [...(result as readonly Hex[])];
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get paginated data records: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Detect whether the connected contract supports v2 features (TransformationLinks).
+   * Returns true for v2 contracts, false for v1 (does not throw).
+   */
+  async supportsTransformationLinks(): Promise<boolean> {
+    try {
+      await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getTransformationLinks',
+        args: [ZERO_BYTES32],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if the RPC connection is healthy.
+   * Returns true if connected, false on error (does not throw).
+   */
+  async healthCheck(): Promise<boolean> {
+    try {
+      await this.publicClient.getChainId();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get the ETH balance of the signer's address.
+   * Requires a signer.
+   */
+  async getBalance(): Promise<BalanceInfo> {
+    this.requireSigner();
+
+    const address = await this.signer!.getAddress();
+
+    try {
+      const balanceWei = await this.publicClient.getBalance({ address });
+      const balanceEth = formatEther(balanceWei);
+
+      return {
+        address,
+        balanceWei,
+        balanceEth,
+        chain: this.preset.name,
+        contractAddress: this.contractAddress,
+      };
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get balance: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -345,6 +589,20 @@ export class ChainClient {
 
     const origHash = normalizeHash(originalHash);
     const nHash = normalizeHash(newHash);
+
+    // Check for duplicate transformation (saves gas)
+    try {
+      const existingLinks = await this.getTransformationLinks(origHash);
+      if (existingLinks.some((link) => link.newDataHash.toLowerCase() === nHash.toLowerCase())) {
+        throw new ChainValidationError(
+          `Transformation from ${originalHash} to ${newHash} is already recorded on-chain`
+        );
+      }
+    } catch (error) {
+      if (error instanceof ChainValidationError) throw error;
+      // Ignore read errors — proceed with the transaction
+    }
+
     const data = encodeRecordTransformation(origHash, nHash, description);
 
     const receipt = await this.sendAndWait(data);
@@ -354,6 +612,68 @@ export class ChainClient {
       originalHash: origHash,
       newHash: nHash,
       description,
+    };
+  }
+
+  /**
+   * Record a merge transformation (N-to-1) on-chain.
+   * Combines multiple source hashes into a single new hash.
+   * The contract automatically registers the new hash.
+   * Requires a signer.
+   *
+   * @param sourceHashes - Array of 2–50 source data hashes
+   * @param newHash - The resulting merged data hash
+   * @param description - Description of the merge transformation
+   * @param newDataType - Data type for the merged result (default: 'merged')
+   */
+  async mergeTransform(
+    sourceHashes: string[],
+    newHash: string,
+    description: string,
+    newDataType = 'merged',
+  ): Promise<MergeTransformResult> {
+    this.requireSigner();
+
+    if (sourceHashes.length < 2) {
+      throw new ChainValidationError('Merge transformation requires at least 2 source hashes');
+    }
+    if (sourceHashes.length > 50) {
+      throw new ChainValidationError(
+        `Merge transformation source count ${sourceHashes.length} exceeds maximum of 50`
+      );
+    }
+
+    const normalizedSources = sourceHashes.map((h) => normalizeHash(h));
+    const normalizedNew = normalizeHash(newHash);
+
+    // Check for duplicate merge (saves gas)
+    try {
+      const existingParents = await this.getTransformationParents(normalizedNew);
+      if (existingParents.length > 0) {
+        throw new ChainValidationError(
+          `Hash ${newHash} already has transformation parents recorded on-chain`
+        );
+      }
+    } catch (error) {
+      if (error instanceof ChainValidationError) throw error;
+      // Ignore read errors — proceed with the transaction
+    }
+
+    const data = encodeRecordMergeTransformation(
+      normalizedSources,
+      normalizedNew,
+      description,
+      newDataType,
+    );
+
+    const receipt = await this.sendAndWait(data);
+
+    return {
+      ...receipt,
+      sourceHashes: normalizedSources,
+      newHash: normalizedNew,
+      description,
+      newDataType,
     };
   }
 

@@ -7,7 +7,7 @@ describe('chain constants', () => {
   });
 
   it('BASE_SEPOLIA has contract address', () => {
-    expect(BASE_SEPOLIA.contractAddress).toBe('0x9a3c6F47B69211F05891CCb7aD33596290b9fE64');
+    expect(BASE_SEPOLIA.contractAddress).toBe('0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a');
   });
 
   it('BASE_MAINNET has correct chainId', () => {

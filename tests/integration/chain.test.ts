@@ -21,7 +21,7 @@ import type { ChainSigner, Hex } from '../../src/chain/types.js';
  *
  * For local Hardhat:
  *   CHAIN_RPC_URL=http://127.0.0.1:8545
- *   CHAIN_CONTRACT=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
+ *   CHAIN_CONTRACT=0xD42912755319665397FF090fBB63B1a31aE87Cee
  *   CHAIN_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
  */
 
@@ -230,6 +230,131 @@ describe('Chain Integration', () => {
       expect(result.gasUsed).toBeLessThan(500_000n);
     });
 
+    it('should merge transform and verify', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Anchor two source hashes
+      const ts = Date.now().toString(16).padStart(16, '0');
+      const sourceA = `${ts}${'a'.repeat(48)}`;
+      const sourceB = `${ts}${'b'.repeat(48)}`;
+      const mergedHash = `${ts}${'c'.repeat(48)}`;
+
+      await writeClient.anchor(sourceA, 'merge-source-a');
+      await writeClient.anchor(sourceB, 'merge-source-b');
+
+      // Wait for sources to be confirmed on-chain before merging
+      // (contract validates source hashes are registered)
+      await waitFor(async () => {
+        const existsA = await readClient.verifyOnChain(sourceA);
+        const existsB = await readClient.verifyOnChain(sourceB);
+        expect(existsA).toBe(true);
+        expect(existsB).toBe(true);
+      });
+
+      // Merge transform: sourceA + sourceB → mergedHash
+      const result = await writeClient.mergeTransform(
+        [sourceA, sourceB],
+        mergedHash,
+        'combined two sources',
+        'merged-dataset',
+      );
+
+      expect(result.txHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
+      expect(result.sourceHashes).toHaveLength(2);
+      expect(result.newHash).toMatch(/^0x/);
+      expect(result.description).toBe('combined two sources');
+      expect(result.newDataType).toBe('merged-dataset');
+
+      // Verify merged hash is registered on-chain
+      await waitFor(async () => {
+        const exists = await readClient.verifyOnChain(mergedHash);
+        expect(exists).toBe(true);
+      });
+
+      // Verify merged record metadata
+      const record = await readClient.getDataRecord(mergedHash);
+      expect(record.dataType).toBe('merged-dataset');
+      expect(record.owner).toBe(await signer.getAddress());
+
+      // Verify transformation parents (merged hash should have sourceA and sourceB as parents)
+      await waitFor(async () => {
+        const parents = await readClient.getTransformationParents(mergedHash);
+        expect(parents.length).toBeGreaterThanOrEqual(2);
+      });
+
+      // Verify child hashes (sourceA should have mergedHash as child)
+      await waitFor(async () => {
+        const children = await readClient.getChildHashes(sourceA);
+        const childrenLower = children.map((c) => c.toLowerCase());
+        expect(childrenLower).toContain(`0x${mergedHash}`.toLowerCase());
+      });
+
+      // Verify transformation links on sourceA
+      const links = await readClient.getTransformationLinks(sourceA);
+      const linkHashes = links.map((l) => l.newDataHash.toLowerCase());
+      expect(linkHashes).toContain(`0x${mergedHash}`.toLowerCase());
+    });
+
+    it('should traverse provenance chain', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      // Create a small chain: A → transform → B
+      const ts = Date.now().toString(16).padStart(16, '0');
+      const hashA = `${ts}${'2'.repeat(48)}`;
+      const hashB = `${ts}${'3'.repeat(48)}`;
+
+      await writeClient.anchor(hashA, 'chain-source');
+
+      // Wait for A to be confirmed before transforming
+      await waitFor(async () => {
+        const exists = await readClient.verifyOnChain(hashA);
+        expect(exists).toBe(true);
+      });
+
+      const txResult = await writeClient.recordTransformation(hashA, hashB, 'filtered PII');
+      expect(txResult.txHash).toMatch(/^0x/);
+
+      // Wait for B to be on-chain
+      await waitFor(async () => {
+        const existsB = await readClient.verifyOnChain(hashB);
+        expect(existsB).toBe(true);
+      });
+
+      // Verify transformation links on source (A should link to B)
+      await waitFor(async () => {
+        const links = await readClient.getTransformationLinks(hashA);
+        const linkHashes = links.map((l) => l.newDataHash.toLowerCase());
+        expect(linkHashes).toContain(`0x${hashB}`.toLowerCase());
+      });
+
+      // Verify parents on target (B should have A as parent)
+      await waitFor(async () => {
+        const parents = await readClient.getTransformationParents(hashB);
+        const parentLower = parents.map((p) => p.toLowerCase());
+        expect(parentLower).toContain(`0x${hashA}`.toLowerCase());
+      });
+
+      // Traverse from A — should find A and B
+      const chain = await readClient.getProvenanceChain(hashA, 5);
+      expect(chain.length).toBeGreaterThanOrEqual(2);
+      const chainHashes = chain.map((r) => r.dataHash.toLowerCase());
+      expect(chainHashes).toContain(`0x${hashA}`.toLowerCase());
+      expect(chainHashes).toContain(`0x${hashB}`.toLowerCase());
+
+      // Traverse from B — should also find both A and B
+      const chainFromB = await readClient.getProvenanceChain(hashB, 5);
+      expect(chainFromB.length).toBeGreaterThanOrEqual(2);
+      const chainFromBHashes = chainFromB.map((r) => r.dataHash.toLowerCase());
+      expect(chainFromBHashes).toContain(`0x${hashA}`.toLowerCase());
+      expect(chainFromBHashes).toContain(`0x${hashB}`.toLowerCase());
+    });
+
     it('should record access', async () => {
       if (!writeClient || !signer) {
         console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
@@ -254,6 +379,60 @@ describe('Chain Integration', () => {
         );
         expect(accessed).toBe(true);
       });
+    });
+  });
+
+  // ─── Convenience Methods ──────────────────────────────────────
+
+  describe('convenience methods', () => {
+    it('should pass health check', async () => {
+      const healthy = await readClient.healthCheck();
+      expect(healthy).toBe(true);
+    });
+
+    it('should get balance with signer', async () => {
+      if (!writeClient || !signer) {
+        console.log('Skipping write test - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      const balance = await writeClient.getBalance();
+      expect(balance.address).toMatch(/^0x[a-fA-F0-9]{40}$/);
+      expect(balance.balanceWei).toBeGreaterThanOrEqual(0n);
+      expect(balance.balanceEth).toBeDefined();
+      expect(balance.chain).toBeDefined();
+      expect(balance.contractAddress).toMatch(/^0x[a-fA-F0-9]{40}$/);
+    });
+
+    it('should get user data records count', async () => {
+      if (!signer) {
+        console.log('Skipping - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      const address = await signer.getAddress();
+      const count = await readClient.getUserDataRecordsCount(address);
+      expect(count).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should get paginated user data records', async () => {
+      if (!signer) {
+        console.log('Skipping - set CHAIN_PRIVATE_KEY env var');
+        return;
+      }
+
+      const address = await signer.getAddress();
+      const count = await readClient.getUserDataRecordsCount(address);
+
+      if (count > 0) {
+        const hashes = await readClient.getUserDataRecordsPaginated(address, 0, 10);
+        expect(hashes.length).toBeGreaterThan(0);
+        expect(hashes.length).toBeLessThanOrEqual(10);
+        // Each hash should be a bytes32
+        for (const h of hashes) {
+          expect(h).toMatch(/^0x[a-fA-F0-9]{64}$/);
+        }
+      }
     });
   });
 });

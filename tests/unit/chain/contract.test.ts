@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   encodeRegisterData,
   encodeRecordAccess,
+  encodeRecordMergeTransformation,
   encodeGetDataRecord,
+  encodeGetTransformationLinks,
+  encodeGetChildHashes,
+  encodeGetTransformationParents,
   encodeDataRecords,
   encodeSetDataStatus,
   encodeTransferDataOwnership,
@@ -41,6 +45,34 @@ describe('contract encoders', () => {
 
   it('encodeTransferDataOwnership returns hex-encoded calldata', () => {
     const result = encodeTransferDataOwnership(SAMPLE_HASH, SAMPLE_ADDRESS);
+    expect(result).toMatch(/^0x/);
+  });
+
+  it('encodeRecordMergeTransformation returns hex-encoded calldata', () => {
+    const hashB: Hex = `0x${'cd'.repeat(32)}`;
+    const hashMerged: Hex = `0x${'ee'.repeat(32)}`;
+    const result = encodeRecordMergeTransformation(
+      [SAMPLE_HASH, hashB],
+      hashMerged,
+      'merged',
+      'merged-dataset',
+    );
+    expect(result).toMatch(/^0x/);
+    expect(result.length).toBeGreaterThan(10);
+  });
+
+  it('encodeGetTransformationLinks returns hex-encoded calldata', () => {
+    const result = encodeGetTransformationLinks(SAMPLE_HASH);
+    expect(result).toMatch(/^0x/);
+  });
+
+  it('encodeGetChildHashes returns hex-encoded calldata', () => {
+    const result = encodeGetChildHashes(SAMPLE_HASH);
+    expect(result).toMatch(/^0x/);
+  });
+
+  it('encodeGetTransformationParents returns hex-encoded calldata', () => {
+    const result = encodeGetTransformationParents(SAMPLE_HASH);
     expect(result).toMatch(/^0x/);
   });
 
