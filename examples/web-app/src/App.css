@@ -333,3 +333,38 @@ p.error {
   border-top: none;
   padding-top: 0;
 }
+
+/* Transformation Links */
+.transformation-links {
+  margin-top: 8px;
+  padding-left: 90px;
+}
+
+.transform-link-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.transform-desc {
+  color: #666;
+  font-style: italic;
+}
+
+/* Provenance Chain */
+.chain-record {
+  background: #f8f9fa;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+.chain-arrow {
+  text-align: center;
+  color: #999;
+  font-size: 18px;
+  line-height: 1;
+  margin: 2px 0;
+}

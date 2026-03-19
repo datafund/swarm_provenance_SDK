@@ -265,16 +265,35 @@ await chain.verifyOnChain(dataHash);  // => boolean
 
 // Get full provenance record
 await chain.getDataRecord(dataHash);
-// => { dataHash, owner, timestamp, dataType, status, accessors, transformations }
+// => { dataHash, owner, timestamp, dataType, status, accessors, transformationLinks }
 
 // Get all records owned by an address
 await chain.getUserDataRecords('0x...');  // => string[]
+await chain.getUserDataRecordsCount('0x...');  // => number
+await chain.getUserDataRecordsPaginated('0x...', 0, 10);  // => string[]
 
 // Check if an address has accessed a hash
 await chain.hasAddressAccessed(dataHash, '0x...');  // => boolean
 
 // Check delegate authorization
 await chain.isAuthorizedDelegate(owner, delegate);  // => boolean
+
+// Transformation links and parents (v2 contract)
+await chain.getTransformationLinks(dataHash);
+// => TransformationLink[] ({ newDataHash, description })
+await chain.getTransformationParents(dataHash);  // => string[]
+await chain.getChildHashes(dataHash);  // => string[]
+
+// Traverse full provenance chain (BFS, bidirectional)
+await chain.getProvenanceChain(dataHash, 10);
+// => ChainProvenanceRecord[] — ancestors + descendants up to maxDepth
+
+// Detect v2 contract support
+await chain.supportsTransformationLinks();  // => boolean
+
+// Health check and balance
+await chain.healthCheck();  // => boolean (never throws)
+await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 ```
 
 ### Write Operations (signer required)
@@ -291,8 +310,16 @@ await chain.anchorFor(dataHash, 'dataset', ownerAddress);
 await chain.recordAccess(dataHash);
 // => { txHash, blockNumber, gasUsed, explorerUrl, dataHash, accessor }
 
-// Record transformation
+// Record 1-to-1 transformation
 await chain.recordTransformation(originalHash, newHash, 'filtered PII');
+
+// Record N-to-1 merge transformation (v2 contract)
+await chain.mergeTransform(
+  [sourceHash1, sourceHash2],
+  mergedHash,
+  'combined datasets',
+  'merged',  // data type (default: 'merged')
+);
 
 // Set data status (ACTIVE=0, RESTRICTED=1, DELETED=2)
 import { DataStatus } from '@datafund/swarm-provenance/chain';
@@ -360,12 +387,26 @@ try {
 
 | Network | Preset | Contract |
 |---------|--------|----------|
-| Base Sepolia (testnet) | `base-sepolia` | `0x9a3c6F47B69211F05891CCb7aD33596290b9fE64` |
+| Base Sepolia (testnet) | `base-sepolia` | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
 | Base (mainnet) | `base` | Not yet deployed |
+
+### Breaking Changes in v0.5.0
+
+The v2 contract update changes the `ChainProvenanceRecord` type:
+
+```typescript
+// Before (v0.4.x)
+record.transformations  // string[]
+
+// After (v0.5.0)
+record.transformationLinks  // TransformationLink[] ({ newDataHash, description })
+```
+
+The `ChainTransformation` type is deprecated — use `TransformationLink` instead.
 
 ## Demo App
 
-A reference React app is available at `examples/web-app/` with upload, download, notary signing, and blockchain anchoring:
+A reference React app is available at `examples/web-app/` with upload, download, notary signing, blockchain anchoring, merge transformations, and provenance chain traversal:
 
 ```bash
 cd examples/web-app

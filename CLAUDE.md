@@ -101,7 +101,7 @@ src/
 
 ## Testing Strategy
 
-- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (155 tests)
+- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (211 tests)
 - **Integration tests** (`tests/integration/`): Real gateway, full round-trips
 - **E2E tests** (`examples/web-app/e2e/`): Playwright browser tests (11 tests)
 
@@ -288,8 +288,8 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 ### Contract
 
 - **Contract**: DataProvenance on Base Sepolia
-- **Address**: `0x9a3c6F47B69211F05891CCb7aD33596290b9fE64`
-- **Explorer**: https://sepolia.basescan.org/address/0x9a3c6F47B69211F05891CCb7aD33596290b9fE64
+- **Address**: `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a`
+- **Explorer**: https://sepolia.basescan.org/address/0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a
 
 ### Methods
 
@@ -298,12 +298,22 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 | `verifyOnChain(hash)` | Read | No | Check if hash is registered |
 | `getDataRecord(hash)` | Read | No | Get full provenance record |
 | `getUserDataRecords(address)` | Read | No | Get all hashes owned by address |
+| `getUserDataRecordsCount(address)` | Read | No | Get count of records owned by address |
+| `getUserDataRecordsPaginated(address, offset, limit)` | Read | No | Get paginated record hashes |
 | `hasAddressAccessed(hash, address)` | Read | No | Check if address accessed hash |
 | `isAuthorizedDelegate(owner, delegate)` | Read | No | Check delegate authorization |
+| `getTransformationLinks(hash)` | Read | No | Get child transformation links (v2) |
+| `getTransformationParents(hash)` | Read | No | Get parent hashes (reverse traversal) |
+| `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
+| `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG |
+| `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
+| `healthCheck()` | Read | No | Check RPC connectivity |
+| `getBalance()` | Read | Yes | Get signer's ETH balance |
 | `anchor(hash, type)` | Write | Yes | Register hash on-chain |
 | `anchorFor(hash, type, owner)` | Write | Yes | Register on behalf of owner (operator) |
 | `recordAccess(hash)` | Write | Yes | Record access event |
-| `recordTransformation(orig, new, desc)` | Write | Yes | Record data transformation |
+| `recordTransformation(orig, new, desc)` | Write | Yes | Record 1-to-1 data transformation |
+| `mergeTransform(sources, new, desc, type?)` | Write | Yes | Record N-to-1 merge transformation (v2) |
 | `setDataStatus(hash, status)` | Write | Yes | Set record status |
 | `transferOwnership(hash, newOwner)` | Write | Yes | Transfer data ownership |
 | `setDelegate(delegate, authorized)` | Write | Yes | Authorize/revoke delegate |

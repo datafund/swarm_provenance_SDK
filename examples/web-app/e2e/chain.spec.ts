@@ -49,6 +49,27 @@ test.describe('Chain Section - Layout', () => {
   });
 });
 
+test.describe('Chain Section - Layout (always visible)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+  });
+
+  test('provenance chain section is always visible', async ({ page }) => {
+    await expect(page.locator('h3').filter({ hasText: 'Provenance Chain' })).toBeVisible();
+    await expect(page.getByPlaceholder('Hash to trace lineage')).toBeVisible();
+    await expect(page.locator('button').filter({ hasText: 'Trace Provenance' })).toBeVisible();
+  });
+
+  test('trace button is disabled when input is empty', async ({ page }) => {
+    await expect(page.locator('button').filter({ hasText: 'Trace Provenance' })).toBeDisabled();
+  });
+
+  test('trace button enables when hash is entered', async ({ page }) => {
+    await page.getByPlaceholder('Hash to trace lineage').fill('ab'.repeat(32));
+    await expect(page.locator('button').filter({ hasText: 'Trace Provenance' })).toBeEnabled();
+  });
+});
+
 // ─── No Wallet State ───────────────────────────────────────────
 
 test.describe('Chain Section - No Wallet', () => {
@@ -71,6 +92,14 @@ test.describe('Chain Section - No Wallet', () => {
 
   test('anchor on-chain button is not visible', async ({ page }) => {
     await expect(page.locator('button').filter({ hasText: 'Anchor On-Chain' })).not.toBeVisible();
+  });
+
+  test('merge transform section is hidden without wallet', async ({ page }) => {
+    await expect(page.locator('h3').filter({ hasText: 'Merge Transform' })).not.toBeVisible();
+  });
+
+  test('my records section is hidden without wallet', async ({ page }) => {
+    await expect(page.locator('h3').filter({ hasText: 'My Records' })).not.toBeVisible();
   });
 });
 
@@ -265,6 +294,81 @@ test.describe('Chain Section - Anchor Form', () => {
 
     // Button should still be enabled (type validation happens on submit)
     await expect(page.locator('button').filter({ hasText: 'Anchor On-Chain' })).toBeEnabled();
+  });
+});
+
+// ─── Merge Transform Form ────────────────────────────────────
+
+test.describe('Chain Section - Merge Transform', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(injectMockProvider());
+    await page.goto('/');
+
+    // Connect wallet
+    await page.locator('button').filter({ hasText: 'Connect Wallet' }).click();
+    await expect(page.getByText('Connected:')).toBeVisible({ timeout: 5000 });
+  });
+
+  test('merge transform section visible after wallet connect', async ({ page }) => {
+    await expect(page.locator('h3').filter({ hasText: 'Merge Transform' })).toBeVisible();
+    await expect(page.getByText('v2 contract feature')).toBeVisible();
+  });
+
+  test('starts with 2 source hash inputs', async ({ page }) => {
+    const sourceInputs = page.getByPlaceholder('Source data hash (hex)');
+    await expect(sourceInputs).toHaveCount(2);
+  });
+
+  test('can add more source hash inputs', async ({ page }) => {
+    await page.locator('button').filter({ hasText: '+ Add Source' }).click();
+    const sourceInputs = page.getByPlaceholder('Source data hash (hex)');
+    await expect(sourceInputs).toHaveCount(3);
+  });
+
+  test('can remove added source hash inputs', async ({ page }) => {
+    // Add one more
+    await page.locator('button').filter({ hasText: '+ Add Source' }).click();
+    await expect(page.getByPlaceholder('Source data hash (hex)')).toHaveCount(3);
+
+    // Remove it
+    await page.locator('button').filter({ hasText: 'Remove' }).first().click();
+    await expect(page.getByPlaceholder('Source data hash (hex)')).toHaveCount(2);
+  });
+
+  test('merge button disabled until form is filled', async ({ page }) => {
+    await expect(page.locator('button').filter({ hasText: 'Merge Transform' })).toBeDisabled();
+
+    // Fill only 1 source — still disabled
+    await page.getByPlaceholder('Source data hash (hex)').first().fill('aa'.repeat(32));
+    await expect(page.locator('button').filter({ hasText: 'Merge Transform' })).toBeDisabled();
+
+    // Fill 2nd source + new hash + description
+    await page.getByPlaceholder('Source data hash (hex)').nth(1).fill('bb'.repeat(32));
+    await page.getByPlaceholder('Merged result hash (hex)').fill('cc'.repeat(32));
+    await page.getByPlaceholder('e.g. Merged datasets A and B').fill('test merge');
+
+    await expect(page.locator('button').filter({ hasText: 'Merge Transform' })).toBeEnabled();
+  });
+
+  test('data type defaults to "merged"', async ({ page }) => {
+    await expect(page.getByPlaceholder('e.g. merged, dataset')).toHaveValue('merged');
+  });
+});
+
+// ─── My Records Section ──────────────────────────────────────
+
+test.describe('Chain Section - My Records', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(injectMockProvider());
+    await page.goto('/');
+
+    await page.locator('button').filter({ hasText: 'Connect Wallet' }).click();
+    await expect(page.getByText('Connected:')).toBeVisible({ timeout: 5000 });
+  });
+
+  test('my records section visible after wallet connect', async ({ page }) => {
+    await expect(page.locator('h3').filter({ hasText: 'My Records' })).toBeVisible();
+    await expect(page.locator('button').filter({ hasText: 'Load My Records' })).toBeVisible();
   });
 });
 

@@ -15,7 +15,16 @@ export enum DataStatus {
   DELETED = 2,
 }
 
-/** On-chain transformation record */
+/** On-chain transformation link (v2 struct) */
+export interface TransformationLink {
+  newDataHash: string;
+  description: string;
+}
+
+/**
+ * On-chain transformation record.
+ * @deprecated Use TransformationLink instead — kept for backward compatibility.
+ */
 export interface ChainTransformation {
   originalHash: string;
   newHash: string;
@@ -30,7 +39,7 @@ export interface ChainProvenanceRecord {
   dataType: string;
   status: DataStatus;
   accessors: Address[];
-  transformations: string[];
+  transformationLinks: TransformationLink[];
 }
 
 /** Base result for all write transactions */
@@ -61,6 +70,14 @@ export interface TransformResult extends TransactionResult {
   description: string;
 }
 
+/** Result of a merge transformation (N-to-1) operation */
+export interface MergeTransformResult extends TransactionResult {
+  sourceHashes: string[];
+  newHash: string;
+  description: string;
+  newDataType: string;
+}
+
 /** Result of a setDataStatus operation */
 export interface StatusResult extends TransactionResult {
   dataHash: string;
@@ -82,6 +99,15 @@ export interface DelegateResult extends TransactionResult {
 /** Result of a batch operation */
 export interface BatchResult extends TransactionResult {
   count: number;
+}
+
+/** Wallet balance information */
+export interface BalanceInfo {
+  address: Address;
+  balanceWei: bigint;
+  balanceEth: string;
+  chain: string;
+  contractAddress: Address;
 }
 
 /** Chain preset configuration */

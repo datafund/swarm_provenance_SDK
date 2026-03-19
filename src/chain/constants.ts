@@ -1,11 +1,11 @@
 import type { ChainPreset } from './types.js';
 
-/** Base Sepolia testnet preset */
+/** Base Sepolia testnet preset (v2 contract) */
 export const BASE_SEPOLIA: ChainPreset = {
   chainId: 84532,
   name: 'base-sepolia',
   rpcUrl: 'https://sepolia.base.org',
-  contractAddress: '0x9a3c6F47B69211F05891CCb7aD33596290b9fE64',
+  contractAddress: '0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a',
   explorerUrl: 'https://sepolia.basescan.org',
 };
 
@@ -18,12 +18,12 @@ export const BASE_MAINNET: ChainPreset = {
   explorerUrl: 'https://basescan.org',
 };
 
-/** Local Hardhat preset for development */
+/** Local Hardhat preset for development (address from ConsentsBasedDataProvenance deploy script) */
 export const HARDHAT_LOCAL: ChainPreset = {
   chainId: 31337,
   name: 'hardhat',
   rpcUrl: 'http://127.0.0.1:8545',
-  contractAddress: '0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9',
+  contractAddress: '0xD42912755319665397FF090fBB63B1a31aE87Cee',
   explorerUrl: 'http://localhost',
 };
 

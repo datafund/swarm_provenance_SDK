@@ -51,6 +51,16 @@ export const DATA_PROVENANCE_ABI = [
   {
     anonymous: false,
     inputs: [
+      { indexed: true, internalType: 'bytes32', name: 'newDataHash', type: 'bytes32' },
+      { indexed: false, internalType: 'bytes32[]', name: 'sourceDataHashes', type: 'bytes32[]' },
+      { indexed: false, internalType: 'string', name: 'transformation', type: 'string' },
+    ],
+    name: 'DataMerged',
+    type: 'event',
+  },
+  {
+    anonymous: false,
+    inputs: [
       { indexed: true, internalType: 'bytes32', name: 'originalDataHash', type: 'bytes32' },
       { indexed: true, internalType: 'bytes32', name: 'newDataHash', type: 'bytes32' },
       { indexed: false, internalType: 'string', name: 'transformation', type: 'string' },
@@ -106,6 +116,13 @@ export const DATA_PROVENANCE_ABI = [
   {
     inputs: [],
     name: 'MAX_ACCESSORS',
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'MAX_MERGE_SOURCES',
     outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
     stateMutability: 'view',
     type: 'function',
@@ -184,6 +201,13 @@ export const DATA_PROVENANCE_ABI = [
   },
   {
     inputs: [{ internalType: 'bytes32', name: '_dataHash', type: 'bytes32' }],
+    name: 'getChildHashes',
+    outputs: [{ internalType: 'bytes32[]', name: '', type: 'bytes32[]' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ internalType: 'bytes32', name: '_dataHash', type: 'bytes32' }],
     name: 'getDataRecord',
     outputs: [
       {
@@ -192,7 +216,15 @@ export const DATA_PROVENANCE_ABI = [
           { internalType: 'address', name: 'owner', type: 'address' },
           { internalType: 'uint256', name: 'timestamp', type: 'uint256' },
           { internalType: 'string', name: 'dataType', type: 'string' },
-          { internalType: 'string[]', name: 'transformations', type: 'string[]' },
+          {
+            components: [
+              { internalType: 'bytes32', name: 'newDataHash', type: 'bytes32' },
+              { internalType: 'string', name: 'description', type: 'string' },
+            ],
+            internalType: 'struct DataProvenance.TransformationLink[]',
+            name: 'transformationLinks',
+            type: 'tuple[]',
+          },
           { internalType: 'address[]', name: 'accessors', type: 'address[]' },
           { internalType: 'enum DataProvenance.DataStatus', name: 'status', type: 'uint8' },
         ],
@@ -201,6 +233,30 @@ export const DATA_PROVENANCE_ABI = [
         type: 'tuple',
       },
     ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ internalType: 'bytes32', name: '_dataHash', type: 'bytes32' }],
+    name: 'getTransformationLinks',
+    outputs: [
+      {
+        components: [
+          { internalType: 'bytes32', name: 'newDataHash', type: 'bytes32' },
+          { internalType: 'string', name: 'description', type: 'string' },
+        ],
+        internalType: 'struct DataProvenance.TransformationLink[]',
+        name: '',
+        type: 'tuple[]',
+      },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ internalType: 'bytes32', name: '_dataHash', type: 'bytes32' }],
+    name: 'getTransformationParents',
+    outputs: [{ internalType: 'bytes32[]', name: '', type: 'bytes32[]' }],
     stateMutability: 'view',
     type: 'function',
   },
@@ -299,6 +355,18 @@ export const DATA_PROVENANCE_ABI = [
   {
     inputs: [{ internalType: 'bytes32', name: '_dataHash', type: 'bytes32' }],
     name: 'recordAccess',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'bytes32[]', name: '_sourceDataHashes', type: 'bytes32[]' },
+      { internalType: 'bytes32', name: '_newDataHash', type: 'bytes32' },
+      { internalType: 'string', name: '_transformation', type: 'string' },
+      { internalType: 'string', name: '_newDataType', type: 'string' },
+    ],
+    name: 'recordMergeTransformation',
     outputs: [],
     stateMutability: 'nonpayable',
     type: 'function',
