@@ -196,6 +196,63 @@ describe('ProvenanceClient', () => {
       const client = new ProvenanceClient();
       await expect(client.acquireStamp()).rejects.toThrow(StampError);
     });
+
+    it('should parse structured detail object (pool exhausted)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: () => Promise.resolve({
+          detail: {
+            message: 'No stamp available for depth 17 (size: small). Pool is exhausted.',
+            suggestion: 'Purchase a stamp directly via POST /api/v1/stamps/',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.acquireStamp()).rejects.toThrow('Pool is exhausted');
+    });
+
+    it('should parse FastAPI validation error array', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({
+          detail: [
+            { type: 'literal_error', loc: ['body', 'size'], msg: "Input should be 'small', 'medium' or 'large'" },
+          ],
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.acquireStamp()).rejects.toThrow("Input should be 'small', 'medium' or 'large'");
+    });
+
+    it('should fall back to status text when detail is missing', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve({}),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.acquireStamp()).rejects.toThrow('Gateway error: 500 Internal Server Error');
+    });
+
+    it('should handle non-JSON error responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: () => Promise.reject(new Error('not JSON')),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.acquireStamp()).rejects.toThrow('Gateway error: 502 Bad Gateway');
+    });
   });
 
   describe('upload', () => {
