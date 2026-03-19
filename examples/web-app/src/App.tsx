@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import {
   ProvenanceClient,
+  GatewayConnectionError,
+  StampError,
   type UploadResult,
   type DownloadResult,
   type NotaryInfo,
@@ -119,7 +121,13 @@ function App() {
       // Auto-populate anchor hash with the content hash
       setAnchorHash(result.metadata.content_hash);
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+      if (err instanceof GatewayConnectionError && err.suggestion) {
+        setUploadError(`${err.message}. ${err.suggestion}`);
+      } else if (err instanceof StampError && err.code === 'POOL_EXHAUSTED') {
+        setUploadError('Stamp pool is empty. Please try again in a moment.');
+      } else {
+        setUploadError(err instanceof Error ? err.message : 'Upload failed');
+      }
     } finally {
       setUploading(false);
     }

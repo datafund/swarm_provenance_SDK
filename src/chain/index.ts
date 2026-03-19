@@ -14,6 +14,7 @@ export type {
   ChainPreset,
   ChainProvenanceRecord,
   ChainTransformation,
+  RetryConfig,
   TransformationLink,
   TransactionResult,
   AnchorResult,
