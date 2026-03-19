@@ -116,9 +116,10 @@ await chain.anchor(contentHash, 'dataset');
 
 ```typescript
 const client = new ProvenanceClient({
-  gatewayUrl?: string,      // default: https://provenance-gateway.datafund.io
-  timeout?: number,         // default: 30000ms
-  payment?: PaymentMode,    // default: 'free' (see x402 Payment Mode)
+  gatewayUrl?: string,          // default: https://provenance-gateway.datafund.io
+  timeout?: number,             // default: 30000ms
+  payment?: PaymentMode,        // default: 'free' (see x402 Payment Mode)
+  retry?: GatewayRetryConfig,   // auto-retry on 502/503/429 (default: 2 retries, 1s backoff)
 });
 ```
 
@@ -197,9 +198,13 @@ try {
   } else if (error instanceof PaymentConfigurationError) {
     console.error('Missing @x402 packages:', error.message);
   } else if (error instanceof StampError) {
+    // error.code may be 'POOL_EXHAUSTED' when pool is empty
     console.error('Stamp acquisition failed:', error.message);
   } else if (error instanceof GatewayConnectionError) {
     console.error('Gateway error:', error.statusCode, error.message);
+    if (error.suggestion) {
+      console.error('Suggestion:', error.suggestion);
+    }
   }
 }
 ```
@@ -254,6 +259,7 @@ const chain = new ChainClient({
   chain: 'base-sepolia',     // or 'base' for mainnet, or a custom ChainPreset
   rpcUrl?: string,            // override RPC endpoint
   signer?: ChainSigner,       // required for write operations
+  retry?: RetryConfig,        // auto-retry on nonce errors (default: 2 retries, 1s backoff)
 });
 ```
 
@@ -378,7 +384,8 @@ try {
   if (error instanceof SignerRequiredError) {
     console.error('Connect a wallet first');
   } else if (error instanceof ChainTransactionError) {
-    console.error('Transaction failed:', error.txHash);
+    console.error('Transaction failed:', error.message);
+    // error.originalError has the full viem error for debugging
   }
 }
 ```

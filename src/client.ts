@@ -2,6 +2,7 @@ import type {
   ProvenanceClientConfig,
   PaymentMode,
   X402PaymentConfig,
+  GatewayRetryConfig,
   UploadOptions,
   DownloadOptions,
   UploadResult,
@@ -39,6 +40,7 @@ export class ProvenanceClient {
   private readonly gatewayUrl: string;
   private readonly timeout: number;
   private readonly paymentMode: PaymentMode;
+  private readonly retryConfig: Required<GatewayRetryConfig>;
   private x402Fetch: typeof fetch | undefined;
   private x402FetchPromise: Promise<typeof fetch> | undefined;
 
@@ -46,6 +48,10 @@ export class ProvenanceClient {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
     this.paymentMode = config.payment ?? 'free';
+    this.retryConfig = {
+      maxRetries: config.retry?.maxRetries ?? 2,
+      baseDelayMs: config.retry?.baseDelayMs ?? 1000,
+    };
   }
 
   /**
@@ -142,7 +148,10 @@ export class ProvenanceClient {
 
     if (!response.ok) {
       const error = await this.handleError(response);
-      throw new StampError(error.message, error.code);
+      throw new StampError(
+        error.suggestion ? `${error.message}. ${error.suggestion}` : error.message,
+        error.code,
+      );
     }
 
     const data = (await response.json()) as GatewayAcquireStampResponse;
@@ -164,6 +173,20 @@ export class ProvenanceClient {
     // Get stamp - either from options or acquire from pool
     let stampId = options.stampId;
     if (!stampId) {
+      // Pre-check pool availability to fail fast
+      try {
+        const status = await this.poolStatus();
+        if (status.enabled && status.totalStamps === 0) {
+          throw new StampError(
+            'Stamp pool is empty — no stamps available for any size',
+            'POOL_EXHAUSTED',
+          );
+        }
+      } catch (error) {
+        if (error instanceof StampError) throw error;
+        // Pool status check failed — proceed with acquire anyway
+      }
+
       const stamp = await this.acquireStamp(options.poolSize ?? 'small');
       stampId = stamp.batchId;
     }
@@ -293,24 +316,27 @@ export class ProvenanceClient {
     return result;
   }
 
+  private isRetryableStatus(status: number): boolean {
+    // 429 is only retryable for non-free modes (free mode throws PaymentRateLimitError)
+    if (status === 429 && this.paymentMode !== 'free') return true;
+    return status === 502 || status === 503;
+  }
+
+  private getRetryDelay(response: Response, attempt: number): number {
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('Retry-After');
+      if (retryAfter) return parseInt(retryAfter, 10) * 1000;
+    }
+    return this.retryConfig.baseDelayMs * Math.pow(2, attempt);
+  }
+
   /**
    * Make a fetch request to the gateway
    */
   private async fetch(path: string, init?: RequestInit): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
-    const headers = new Headers(init?.headers);
     const isX402 = typeof this.paymentMode === 'object';
-
-    // Set payment header based on mode
-    if (this.paymentMode === 'free') {
-      if (!headers.has('X-Payment-Mode')) {
-        headers.set('X-Payment-Mode', 'free');
-      }
-    }
-    // 'none' and x402: no X-Payment-Mode header
 
     // Choose fetch implementation
     let fetchFn: typeof fetch;
@@ -320,43 +346,68 @@ export class ProvenanceClient {
       fetchFn = fetch;
     }
 
-    try {
-      const response = await fetchFn(url, {
-        ...init,
-        headers,
-        signal: controller.signal,
-      });
+    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
-      // Detect free-tier rate limiting
-      if (response.status === 429 && this.paymentMode === 'free') {
-        const retryAfter = response.headers.get('Retry-After');
-        const rateLimit = response.headers.get('X-RateLimit-Limit');
-        const rateRemaining = response.headers.get('X-RateLimit-Remaining');
+      const headers = new Headers(init?.headers);
 
-        throw new PaymentRateLimitError(
-          'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
-          retryAfter ? parseInt(retryAfter, 10) : undefined,
-          rateLimit ? parseInt(rateLimit, 10) : undefined,
-          rateRemaining ? parseInt(rateRemaining, 10) : undefined
+      // Set payment header based on mode
+      if (this.paymentMode === 'free') {
+        if (!headers.has('X-Payment-Mode')) {
+          headers.set('X-Payment-Mode', 'free');
+        }
+      }
+      // 'none' and x402: no X-Payment-Mode header
+
+      try {
+        const response = await fetchFn(url, {
+          ...init,
+          headers,
+          signal: controller.signal,
+        });
+
+        // Detect free-tier rate limiting
+        if (response.status === 429 && this.paymentMode === 'free') {
+          const retryAfter = response.headers.get('Retry-After');
+          const rateLimit = response.headers.get('X-RateLimit-Limit');
+          const rateRemaining = response.headers.get('X-RateLimit-Remaining');
+
+          throw new PaymentRateLimitError(
+            'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
+            retryAfter ? parseInt(retryAfter, 10) : undefined,
+            rateLimit ? parseInt(rateLimit, 10) : undefined,
+            rateRemaining ? parseInt(rateRemaining, 10) : undefined
+          );
+        }
+
+        // Retry on transient HTTP errors
+        if (attempt < this.retryConfig.maxRetries && this.isRetryableStatus(response.status)) {
+          const delay = this.getRetryDelay(response, attempt);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+
+        return response;
+      } catch (error) {
+        if (error instanceof PaymentRateLimitError) {
+          throw error;
+        }
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT');
+        }
+        throw new GatewayConnectionError(
+          error instanceof Error ? error.message : 'Failed to connect to gateway',
+          undefined,
+          'CONNECTION_FAILED'
         );
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      return response;
-    } catch (error) {
-      if (error instanceof PaymentRateLimitError) {
-        throw error;
-      }
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT');
-      }
-      throw new GatewayConnectionError(
-        error instanceof Error ? error.message : 'Failed to connect to gateway',
-        undefined,
-        'CONNECTION_FAILED'
-      );
-    } finally {
-      clearTimeout(timeoutId);
     }
+
+    // This should be unreachable, but TypeScript needs it
+    throw new GatewayConnectionError('Request failed after retries', undefined, 'CONNECTION_FAILED');
   }
 
   /**
@@ -365,15 +416,26 @@ export class ProvenanceClient {
   private async handleError(response: Response): Promise<GatewayConnectionError> {
     let message = `Gateway error: ${response.status} ${response.statusText}`;
     let code: string | undefined;
+    let suggestion: string | undefined;
 
     try {
       const data = (await response.json()) as GatewayErrorResponse;
-      message = data.detail || message;
+      if (typeof data.detail === 'string') {
+        message = data.detail;
+      } else if (Array.isArray(data.detail)) {
+        // FastAPI validation errors: [{msg, loc, type}, ...]
+        message = data.detail.map((e) => e.msg).join('; ');
+      } else if (data.detail && typeof data.detail === 'object' && 'message' in data.detail) {
+        // Structured error: {message, suggestion?}
+        const structured = data.detail as { message: string; suggestion?: string };
+        message = structured.message;
+        suggestion = structured.suggestion;
+      }
       code = data.code;
     } catch {
       // Ignore JSON parse errors
     }
 
-    return new GatewayConnectionError(message, response.status, code);
+    return new GatewayConnectionError(message, response.status, code, suggestion);
   }
 }

@@ -25,8 +25,10 @@ export interface PaymentWallet {
 export interface X402PaymentConfig {
   /** Wallet that signs x402 payment authorizations */
   wallet: PaymentWallet;
-  /** CAIP-2 network identifier (default: 'eip155:84532' for Base Sepolia) */
+  /** CAIP-2 network identifier for x402 v2 (default: 'eip155:84532' for Base Sepolia) */
   network?: `${string}:${string}`;
+  /** Simple network name for x402 v1 (default: 'base-sepolia') */
+  v1Network?: string;
 }
 
 /**
@@ -36,6 +38,14 @@ export interface X402PaymentConfig {
  * - X402PaymentConfig: Automatic x402 USDC payments
  */
 export type PaymentMode = 'free' | 'none' | X402PaymentConfig;
+
+/** Retry configuration for transient gateway failures */
+export interface GatewayRetryConfig {
+  /** Max retry attempts (default: 2) */
+  maxRetries?: number;
+  /** Base delay in ms, doubled each retry (default: 1000) */
+  baseDelayMs?: number;
+}
 
 /**
  * Configuration options for ProvenanceClient
@@ -47,6 +57,8 @@ export interface ProvenanceClientConfig {
   timeout?: number;
   /** Payment mode for gateway access (default: 'free') */
   payment?: PaymentMode;
+  /** Retry config for transient gateway failures (default: 2 retries, 1s delay) */
+  retry?: GatewayRetryConfig;
 }
 
 /**
@@ -231,5 +243,6 @@ export interface GatewayAcquireStampResponse {
 
 export interface GatewayErrorResponse {
   code?: string;
-  detail: string;
+  /** FastAPI detail — string, object with message, or validation error array */
+  detail: string | { message: string; suggestion?: string } | Array<{ msg: string; loc?: unknown[] }>;
 }

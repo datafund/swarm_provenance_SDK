@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ChainClient } from '../../../src/chain/client.js';
 import {
   ChainConfigurationError,
+  ChainTransactionError,
   ChainValidationError,
   DataAlreadyRegisteredError,
   SignerRequiredError,
@@ -1080,6 +1081,278 @@ describe('ChainClient', () => {
       );
 
       expect(result.txHash).toBe(MOCK_TX_HASH);
+    });
+  });
+
+  describe('cleanTransactionError (#79)', () => {
+    it('should clean verbose viem error messages', async () => {
+      const verboseError = new Error(
+        'The contract function "registerData" reverted with the following reason:\nExecution reverted\n\n' +
+        'Contract Call:\n  address: 0x1234...\n  function: registerData(bytes32,string)\n  args: (0xab...)\n\n' +
+        'Docs: https://viem.sh/docs/...\n\nVersion: viem@1.0.0'
+      );
+
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn().mockRejectedValue(verboseError);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
+
+      try {
+        await client.anchor(SAMPLE_HASH, 'dataset');
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        const txError = error as ChainTransactionError;
+        // Should contain the first meaningful line, not the verbose details
+        expect(txError.message).toContain('Execution reverted');
+        expect(txError.message).not.toContain('Contract Call:');
+        expect(txError.message).not.toContain('Docs:');
+        expect(txError.originalError).toBe(verboseError);
+      }
+    });
+
+    it('should preserve short error messages as-is', async () => {
+      const shortError = new Error('insufficient funds for gas');
+
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn().mockRejectedValue(shortError);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
+
+      try {
+        await client.anchor(SAMPLE_HASH, 'dataset');
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        const txError = error as ChainTransactionError;
+        expect(txError.message).toBe('Transaction failed: insufficient funds for gas');
+        expect(txError.originalError).toBe(shortError);
+      }
+    });
+
+    it('should truncate very long cleaned messages', async () => {
+      const longError = new Error('A'.repeat(300));
+
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn().mockRejectedValue(longError);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
+
+      try {
+        await client.anchor(SAMPLE_HASH, 'dataset');
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        const txError = error as ChainTransactionError;
+        // "Transaction failed: " (20) + 200 (truncated) = ~220
+        expect(txError.message.length).toBeLessThan(250);
+        expect(txError.message).toContain('...');
+      }
+    });
+  });
+
+  describe('chain retry (#77)', () => {
+    it('should retry on nonce-too-low and succeed', async () => {
+      // Pre-check: hash not registered
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValueOnce(new Error('nonce too low'))
+        .mockResolvedValueOnce(MOCK_TX_HASH);
+
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(300),
+        gasUsed: BigInt(50000),
+      });
+
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await client.anchor(SAMPLE_HASH, 'dataset');
+      expect(result.txHash).toBe(MOCK_TX_HASH);
+      expect(sendTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it('should retry on nonce-too-high and succeed', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValueOnce(new Error('nonce too high'))
+        .mockResolvedValueOnce(MOCK_TX_HASH);
+
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(301),
+        gasUsed: BigInt(50000),
+      });
+
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await client.anchor(SAMPLE_HASH, 'dataset');
+      expect(result.txHash).toBe(MOCK_TX_HASH);
+      expect(sendTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it('should retry on replacement-underpriced and succeed', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValueOnce(new Error('replacement underpriced'))
+        .mockResolvedValueOnce(MOCK_TX_HASH);
+
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        blockNumber: BigInt(302),
+        gasUsed: BigInt(50000),
+      });
+
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      const result = await client.anchor(SAMPLE_HASH, 'dataset');
+      expect(result.txHash).toBe(MOCK_TX_HASH);
+      expect(sendTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it('should not retry on non-transient errors', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValue(new Error('insufficient funds for gas'));
+
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow('insufficient funds');
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('should throw after exhausting retries', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValue(new Error('nonce too low'));
+
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+      });
+
+      await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow(ChainTransactionError);
+      // 1 initial + 2 retries = 3 calls
+      expect(sendTransaction).toHaveBeenCalledTimes(3);
     });
   });
 });

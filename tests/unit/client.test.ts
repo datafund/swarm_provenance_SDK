@@ -196,10 +196,111 @@ describe('ProvenanceClient', () => {
       const client = new ProvenanceClient();
       await expect(client.acquireStamp()).rejects.toThrow(StampError);
     });
+
+    it('should parse structured detail object (pool exhausted)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers({}),
+        json: () => Promise.resolve({
+          detail: {
+            message: 'No stamp available for depth 17 (size: small). Pool is exhausted.',
+            suggestion: 'Purchase a stamp directly via POST /api/v1/stamps/',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
+      await expect(client.acquireStamp()).rejects.toThrow('Pool is exhausted');
+    });
+
+    it('should include suggestion in StampError message', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers({}),
+        json: () => Promise.resolve({
+          detail: {
+            message: 'No stamps available for size: small',
+            suggestion: 'Try a larger size or wait for stamps to be replenished',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
+      try {
+        await client.acquireStamp();
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(StampError);
+        const stampError = error as StampError;
+        expect(stampError.message).toContain('No stamps available for size: small');
+        expect(stampError.message).toContain('Try a larger size or wait');
+      }
+    });
+
+    it('should parse FastAPI validation error array', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({
+          detail: [
+            { type: 'literal_error', loc: ['body', 'size'], msg: "Input should be 'small', 'medium' or 'large'" },
+          ],
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.acquireStamp()).rejects.toThrow("Input should be 'small', 'medium' or 'large'");
+    });
+
+    it('should fall back to status text when detail is missing', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve({}),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.acquireStamp()).rejects.toThrow('Gateway error: 500 Internal Server Error');
+    });
+
+    it('should handle non-JSON error responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        headers: new Headers({}),
+        json: () => Promise.reject(new Error('not JSON')),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
+      await expect(client.acquireStamp()).rejects.toThrow('Gateway error: 502 Bad Gateway');
+    });
   });
 
   describe('upload', () => {
     it('should upload content and return reference', async () => {
+      // Mock pool status pre-check
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          reserve_config: { '17': 1 },
+          current_levels: { '17': 5 },
+          available_stamps: {},
+          total_stamps: 5,
+          low_reserve_warning: false,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
+        }),
+      });
+
       // Mock stamp acquisition
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -224,7 +325,7 @@ describe('ProvenanceClient', () => {
 
       expect(result.reference).toBe('abcd1234'.repeat(8));
       expect(result.metadata.stamp_id).toBe('stamp123');
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
     });
 
     it('should use provided stampId and skip pool', async () => {
@@ -243,6 +344,22 @@ describe('ProvenanceClient', () => {
     });
 
     it('should upload with notary signing (signatures available on download)', async () => {
+      // Mock pool status pre-check
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          reserve_config: { '17': 1 },
+          current_levels: { '17': 5 },
+          available_stamps: {},
+          total_stamps: 5,
+          low_reserve_warning: false,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
+        }),
+      });
+
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
@@ -268,6 +385,22 @@ describe('ProvenanceClient', () => {
     });
 
     it('should throw NotaryError when notary signing fails', async () => {
+      // Mock pool status pre-check
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          reserve_config: { '17': 1 },
+          current_levels: { '17': 5 },
+          available_stamps: {},
+          total_stamps: 5,
+          low_reserve_warning: false,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
+        }),
+      });
+
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
@@ -505,6 +638,274 @@ describe('ProvenanceClient', () => {
       // Should throw regular GatewayConnectionError, not PaymentRateLimitError
       await expect(client.notaryInfo()).rejects.toThrow(GatewayConnectionError);
       await expect(client.notaryInfo()).rejects.not.toThrow(PaymentRateLimitError);
+    });
+  });
+
+  describe('suggestion surfacing (#76)', () => {
+    it('should surface suggestion on GatewayConnectionError', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve({
+          detail: {
+            message: 'Pool exhausted',
+            suggestion: 'Wait for replenishment',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      try {
+        await client.notaryInfo();
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        const gError = error as GatewayConnectionError;
+        expect(gError.message).toBe('Pool exhausted');
+        expect(gError.suggestion).toBe('Wait for replenishment');
+        expect(gError.statusCode).toBe(500);
+      }
+    });
+
+    it('should set suggestion to undefined when not present', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: () => Promise.resolve({ detail: 'Server error' }),
+      });
+
+      const client = new ProvenanceClient();
+      try {
+        await client.notaryInfo();
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect((error as GatewayConnectionError).suggestion).toBeUndefined();
+      }
+    });
+  });
+
+  describe('gateway retry (#77)', () => {
+    it('should retry on 503 and succeed', async () => {
+      // First call: 503
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers({}),
+      });
+      // Second call: success
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok' }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
+      const result = await client.health();
+
+      expect(result).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should retry on 502 and succeed', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        headers: new Headers({}),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok' }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 1, baseDelayMs: 1 } });
+      const result = await client.health();
+
+      expect(result).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should not retry on 429 in free mode (throws PaymentRateLimitError)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({ 'Retry-After': '60' }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
+      // health() swallows errors, use notaryInfo() instead
+      await expect(client.notaryInfo()).rejects.toThrow(PaymentRateLimitError);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should retry on 429 in none mode', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({}),
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok' }),
+      });
+
+      const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+      const result = await client.health();
+
+      expect(result).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should return error response after exhausting retries', async () => {
+      // All calls return 503
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: new Headers({}),
+        json: () => Promise.resolve({ detail: 'Service down' }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
+      await expect(client.notaryInfo()).rejects.toThrow(GatewayConnectionError);
+      // 1 initial + 2 retries = 3 calls
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('should not retry by default on non-retryable errors (e.g. 400)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        json: () => Promise.resolve({ detail: 'Invalid input' }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
+      await expect(client.notaryInfo()).rejects.toThrow(GatewayConnectionError);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('pool pre-check (#78)', () => {
+    it('should throw StampError early when pool is empty', async () => {
+      // Pool status: empty
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          reserve_config: {},
+          current_levels: {},
+          available_stamps: {},
+          total_stamps: 0,
+          low_reserve_warning: true,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      try {
+        await client.upload('Hello');
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(StampError);
+        expect((error as StampError).message).toContain('Stamp pool is empty');
+        expect((error as StampError).code).toBe('POOL_EXHAUSTED');
+      }
+      // Only 1 call (pool status), no acquire
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should proceed when pool has stamps', async () => {
+      // Pool status: has stamps
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          reserve_config: { '17': 1 },
+          current_levels: { '17': 5 },
+          available_stamps: { '17': ['s1'] },
+          total_stamps: 5,
+          low_reserve_warning: false,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
+        }),
+      });
+      // Acquire stamp
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          batch_id: 'stamp123',
+          depth: 17,
+          size_name: 'small',
+          fallback_used: false,
+        }),
+      });
+      // Upload
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          reference: 'abcd1234'.repeat(8),
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.upload('Hello');
+
+      expect(result.reference).toBe('abcd1234'.repeat(8));
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('should proceed when pool status check fails', async () => {
+      // Pool status: network error
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+      // Acquire stamp (this is the retry after pool pre-check failure, handled by fetch's catch)
+      // Actually, the pool status call will throw GatewayConnectionError which is caught
+      // Then acquireStamp is called:
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          batch_id: 'stamp123',
+          depth: 17,
+          size_name: 'small',
+          fallback_used: false,
+        }),
+      });
+      // Upload
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          reference: 'abcd1234'.repeat(8),
+        }),
+      });
+
+      const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
+      const result = await client.upload('Hello');
+
+      expect(result.reference).toBe('abcd1234'.repeat(8));
+    });
+
+    it('should skip pool pre-check when stampId is provided', async () => {
+      // Upload directly with stampId
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          reference: 'abcd1234'.repeat(8),
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.upload('Hello', { stampId: 'myStamp' });
+
+      expect(result.reference).toBe('abcd1234'.repeat(8));
+      expect(mockFetch).toHaveBeenCalledTimes(1); // Only upload, no pool check
     });
   });
 });
