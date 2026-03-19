@@ -25,8 +25,10 @@ export interface PaymentWallet {
 export interface X402PaymentConfig {
   /** Wallet that signs x402 payment authorizations */
   wallet: PaymentWallet;
-  /** CAIP-2 network identifier (default: 'eip155:84532' for Base Sepolia) */
+  /** CAIP-2 network identifier for x402 v2 (default: 'eip155:84532' for Base Sepolia) */
   network?: `${string}:${string}`;
+  /** Simple network name for x402 v1 (default: 'base-sepolia') */
+  v1Network?: string;
 }
 
 /**
