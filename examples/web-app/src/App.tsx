@@ -60,6 +60,7 @@ function App() {
   const [connecting, setConnecting] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [anchorHash, setAnchorHash] = useState('');
+  const [anchorHashSource, setAnchorHashSource] = useState<'content' | 'swarm'>('content');
   const [anchorType, setAnchorType] = useState('dataset');
   const [anchoring, setAnchoring] = useState(false);
   const [anchorResult, setAnchorResult] = useState<AnchorResult | null>(null);
@@ -119,8 +120,8 @@ function App() {
 
       setUploadResult(result);
       setDownloadRef(result.reference);
-      // Auto-populate anchor hash with the content hash
-      setAnchorHash(result.metadata.content_hash);
+      // Auto-populate anchor hash based on selected source
+      setAnchorHash(anchorHashSource === 'swarm' ? result.reference : result.metadata.content_hash);
     } catch (err) {
       if (err instanceof GatewayConnectionError && err.suggestion) {
         setUploadError(`${err.message}. ${err.suggestion}`);
@@ -649,7 +650,36 @@ function App() {
           <>
             <h3>Anchor Data</h3>
             <div className="input-group">
-              <label>Content SHA256:</label>
+              <label>What to anchor:</label>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <label>
+                  <input
+                    type="radio"
+                    name="anchorSource"
+                    checked={anchorHashSource === 'content'}
+                    onChange={() => {
+                      setAnchorHashSource('content');
+                      if (uploadResult) setAnchorHash(uploadResult.metadata.content_hash);
+                    }}
+                  />{' '}
+                  Content SHA256
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="anchorSource"
+                    checked={anchorHashSource === 'swarm'}
+                    onChange={() => {
+                      setAnchorHashSource('swarm');
+                      if (uploadResult) setAnchorHash(uploadResult.reference);
+                    }}
+                  />{' '}
+                  Swarm reference
+                </label>
+              </div>
+            </div>
+            <div className="input-group">
+              <label>{anchorHashSource === 'swarm' ? 'Swarm reference' : 'Content SHA256'}:</label>
               <input
                 type="text"
                 value={anchorHash}
