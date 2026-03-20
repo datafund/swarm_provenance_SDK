@@ -468,7 +468,7 @@ function App() {
                 checked={useNotary}
                 onChange={(e) => setUseNotary(e.target.checked)}
               />
-              Sign with Notary
+              Sign with gateway notary
             </label>
           </div>
         )}
