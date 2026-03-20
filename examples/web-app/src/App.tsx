@@ -15,6 +15,7 @@ import {
   type ChainProvenanceRecord,
   type AnchorResult,
   type MergeTransformResult,
+  type TransformResult,
   type TransformationLink,
 } from '@datafund/swarm-provenance/chain';
 
@@ -72,14 +73,14 @@ function App() {
   // Wallet balance
   const [walletBalance, setWalletBalance] = useState<string | null>(null);
 
-  // Merge transform state
-  const [mergeSourceHashes, setMergeSourceHashes] = useState<string[]>(['', '']);
-  const [mergeNewHash, setMergeNewHash] = useState('');
-  const [mergeDescription, setMergeDescription] = useState('');
-  const [mergeDataType, setMergeDataType] = useState('merged');
-  const [merging, setMerging] = useState(false);
-  const [mergeResult, setMergeResult] = useState<MergeTransformResult | null>(null);
-  const [mergeError, setMergeError] = useState<string | null>(null);
+  // Transform state
+  const [transformSourceHashes, setTransformSourceHashes] = useState<string[]>(['']);
+  const [transformNewHash, setTransformNewHash] = useState('');
+  const [transformDescription, setTransformDescription] = useState('');
+  const [transformDataType, setTransformDataType] = useState('dataset');
+  const [transforming, setTransforming] = useState(false);
+  const [transformResult, setTransformResult] = useState<TransformResult | MergeTransformResult | null>(null);
+  const [transformError, setTransformError] = useState<string | null>(null);
 
   // Provenance chain state
   const [chainTraceHash, setChainTraceHash] = useState('');
@@ -272,7 +273,7 @@ function App() {
 
     try {
       if (!anchorHash.trim()) {
-        throw new Error('Please enter a data hash to anchor');
+        throw new Error('Please enter a Content SHA256 to anchor');
       }
       console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType);
       console.log('[anchor] Chain preset:', chainPreset);
@@ -297,7 +298,7 @@ function App() {
 
     try {
       if (!verifyHash.trim()) {
-        throw new Error('Please enter a hash to verify');
+        throw new Error('Please enter a Content SHA256 to verify');
       }
       // Read-only client - uses same chain as connected wallet (or base-sepolia default)
       const readClient = new ChainClient({ chain: chainPreset });
@@ -314,35 +315,46 @@ function App() {
     }
   };
 
-  const handleMergeTransform = async () => {
+  const handleTransform = async () => {
     if (!chainClient) return;
-    setMerging(true);
-    setMergeError(null);
-    setMergeResult(null);
+    setTransforming(true);
+    setTransformError(null);
+    setTransformResult(null);
 
     try {
-      const sources = mergeSourceHashes.filter((h) => h.trim());
-      if (sources.length < 2) {
-        throw new Error('At least 2 source hashes are required');
+      const sources = transformSourceHashes.filter((h) => h.trim());
+      if (sources.length < 1) {
+        throw new Error('At least 1 source hash is required');
       }
-      if (!mergeNewHash.trim()) {
-        throw new Error('Please enter the resulting merged hash');
+      if (!transformNewHash.trim()) {
+        throw new Error('Please enter the resulting hash');
       }
-      if (!mergeDescription.trim()) {
+      if (!transformDescription.trim()) {
         throw new Error('Please enter a description');
       }
 
-      const result = await chainClient.mergeTransform(
-        sources,
-        mergeNewHash.trim(),
-        mergeDescription.trim(),
-        mergeDataType.trim() || 'merged',
-      );
-      setMergeResult(result);
+      if (sources.length === 1) {
+        // 1-to-1 transformation
+        const result = await chainClient.recordTransformation(
+          sources[0],
+          transformNewHash.trim(),
+          transformDescription.trim(),
+        );
+        setTransformResult(result);
+      } else {
+        // N-to-1 merge transformation
+        const result = await chainClient.mergeTransform(
+          sources,
+          transformNewHash.trim(),
+          transformDescription.trim(),
+          transformDataType.trim() || 'dataset',
+        );
+        setTransformResult(result);
+      }
     } catch (err) {
-      setMergeError(err instanceof Error ? err.message : 'Merge transform failed');
+      setTransformError(err instanceof Error ? err.message : 'Transform failed');
     } finally {
-      setMerging(false);
+      setTransforming(false);
     }
   };
 
@@ -353,7 +365,7 @@ function App() {
 
     try {
       if (!chainTraceHash.trim()) {
-        throw new Error('Please enter a hash to trace');
+        throw new Error('Please enter a Content SHA256 to trace');
       }
       const readClient = new ChainClient({ chain: chainPreset });
       const chain = await readClient.getProvenanceChain(chainTraceHash.trim());
@@ -471,15 +483,19 @@ function App() {
           <div className="result">
             <h3>Upload Successful</h3>
             <p>
-              <strong>Reference:</strong>
+              <strong>Swarm reference:</strong>
               <code>{uploadResult.reference}</code>
             </p>
             <p>
-              <strong>Content Hash:</strong>
+              <strong>Content SHA256:</strong>
               <code>{uploadResult.metadata.content_hash}</code>
             </p>
+            <p>
+              <strong>Swarm stamp ID:</strong>
+              <code>{uploadResult.metadata.stamp_id}</code>
+            </p>
             {useNotary && (
-              <p className="success">Signed by notary</p>
+              <p className="success">Signed by gateway notary</p>
             )}
           </div>
         )}
@@ -490,7 +506,7 @@ function App() {
         <h2>Download</h2>
 
         <div className="input-group">
-          <label>Reference:</label>
+          <label>Swarm reference:</label>
           <input
             type="text"
             value={downloadRef}
@@ -509,11 +525,11 @@ function App() {
           <div className="result">
             <h3>Download Successful</h3>
             <p>
-              <strong>Content Hash:</strong>
+              <strong>Content SHA256:</strong>
               <code>{downloadResult.metadata.content_hash}</code>
             </p>
             <p>
-              <strong>Stamp ID:</strong>
+              <strong>Swarm stamp ID:</strong>
               <code>{downloadResult.metadata.stamp_id}</code>
             </p>
             {downloadResult.metadata.provenance_standard && (
@@ -562,11 +578,11 @@ function App() {
                       <span className="value">{sig.type}</span>
                     </div>
                     <div className="detail-row">
-                      <span className="label">Timestamp:</span>
+                      <span className="label">Gateway notary timestamp:</span>
                       <span className="value">{new Date(sig.timestamp).toLocaleString()}</span>
                     </div>
                     <div className="detail-row">
-                      <span className="label">Data Hash:</span>
+                      <span className="label">Signed fields hash (SHA256):</span>
                       <code className="value small">{sig.data_hash}</code>
                     </div>
                   </div>
@@ -585,7 +601,7 @@ function App() {
       <section className="chain">
         <h2>Blockchain Anchoring</h2>
         <p className="section-description">
-          Anchor data hashes on the DataProvenance contract for immutable on-chain provenance.
+          Anchor content hashes on the blockchain for immutable on-chain provenance.
         </p>
 
         {/* Wallet Connection */}
@@ -633,7 +649,7 @@ function App() {
           <>
             <h3>Anchor Data</h3>
             <div className="input-group">
-              <label>Data Hash (SHA256):</label>
+              <label>Content SHA256:</label>
               <input
                 type="text"
                 value={anchorHash}
@@ -643,7 +659,7 @@ function App() {
             </div>
 
             <div className="input-group">
-              <label>Data Type:</label>
+              <label>Data type:</label>
               <input
                 type="text"
                 value={anchorType}
@@ -664,21 +680,21 @@ function App() {
           <div className="result">
             <h3>Anchored Successfully</h3>
             <div className="detail-row">
-              <span className="label">Tx Hash:</span>
+              <span className="label">Blockchain tx hash:</span>
               <a href={anchorResult.explorerUrl} target="_blank" rel="noopener noreferrer">
                 <code className="value">{anchorResult.txHash.slice(0, 10)}...{anchorResult.txHash.slice(-8)}</code>
               </a>
             </div>
             <div className="detail-row">
-              <span className="label">Block:</span>
+              <span className="label">Blockchain block:</span>
               <span className="value">{anchorResult.blockNumber}</span>
             </div>
             <div className="detail-row">
-              <span className="label">Gas Used:</span>
+              <span className="label">Gas used:</span>
               <span className="value">{anchorResult.gasUsed.toString()}</span>
             </div>
             <div className="detail-row">
-              <span className="label">Owner:</span>
+              <span className="label">Owner address:</span>
               <code className="value">{anchorResult.owner}</code>
             </div>
           </div>
@@ -687,7 +703,7 @@ function App() {
         {/* Verify On-Chain */}
         <h3>Verify On-Chain</h3>
         <div className="input-group">
-          <label>Data Hash to verify:</label>
+          <label>Content SHA256 to verify:</label>
           <input
             type="text"
             value={verifyHash}
@@ -712,11 +728,11 @@ function App() {
           <div className="result">
             <h3>On-Chain Record</h3>
             <div className="detail-row">
-              <span className="label">Owner:</span>
+              <span className="label">Owner address:</span>
               <code className="value">{verifyRecord.owner}</code>
             </div>
             <div className="detail-row">
-              <span className="label">Data Type:</span>
+              <span className="label">Data type:</span>
               <span className="value">{verifyRecord.dataType}</span>
             </div>
             <div className="detail-row">
@@ -726,7 +742,7 @@ function App() {
               </span>
             </div>
             <div className="detail-row">
-              <span className="label">Registered:</span>
+              <span className="label">Blockchain timestamp:</span>
               <span className="value">{new Date(verifyRecord.timestamp * 1000).toLocaleString()}</span>
             </div>
             {verifyRecord.accessors.length > 0 && (
@@ -754,34 +770,35 @@ function App() {
           </div>
         )}
 
-        {/* Merge Transform */}
+        {/* Record Transformation */}
         {walletAddress && !wrongChain && (
           <>
-            <h3>Merge Transform</h3>
+            <h3>Record Transformation</h3>
             <p className="section-description">
-              Combine multiple source data hashes into a single merged result (v2 contract feature).
+              Record how data was derived from existing data. Use one source for a simple transformation
+              (e.g. filtering, anonymizing) or multiple sources for a merge (e.g. combining datasets).
             </p>
 
-            {mergeSourceHashes.map((hash, i) => (
+            {transformSourceHashes.map((hash, i) => (
               <div key={i} className="input-group" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <div style={{ flex: 1 }}>
-                  <label>Source Hash {i + 1}:</label>
+                  <label>Source Content SHA256 {transformSourceHashes.length > 1 ? `#${i + 1}` : ''}:</label>
                   <input
                     type="text"
                     value={hash}
                     onChange={(e) => {
-                      const updated = [...mergeSourceHashes];
+                      const updated = [...transformSourceHashes];
                       updated[i] = e.target.value;
-                      setMergeSourceHashes(updated);
+                      setTransformSourceHashes(updated);
                     }}
-                    placeholder="Source data hash (hex)"
+                    placeholder="Content SHA256 of source data (hex)"
                   />
                 </div>
-                {mergeSourceHashes.length > 2 && (
+                {transformSourceHashes.length > 1 && (
                   <button
                     className="small"
                     style={{ marginTop: 20 }}
-                    onClick={() => setMergeSourceHashes(mergeSourceHashes.filter((_, j) => j !== i))}
+                    onClick={() => setTransformSourceHashes(transformSourceHashes.filter((_, j) => j !== i))}
                   >
                     Remove
                   </button>
@@ -789,23 +806,23 @@ function App() {
               </div>
             ))}
 
-            {mergeSourceHashes.length < 10 && (
+            {transformSourceHashes.length < 10 && (
               <button
                 className="small"
                 style={{ marginBottom: 12, marginLeft: 0 }}
-                onClick={() => setMergeSourceHashes([...mergeSourceHashes, ''])}
+                onClick={() => setTransformSourceHashes([...transformSourceHashes, ''])}
               >
-                + Add Source
+                + Add source (merge)
               </button>
             )}
 
             <div className="input-group">
-              <label>New Merged Hash:</label>
+              <label>Result Content SHA256:</label>
               <input
                 type="text"
-                value={mergeNewHash}
-                onChange={(e) => setMergeNewHash(e.target.value)}
-                placeholder="Merged result hash (hex)"
+                value={transformNewHash}
+                onChange={(e) => setTransformNewHash(e.target.value)}
+                placeholder="Content SHA256 of resulting data (hex)"
               />
             </div>
 
@@ -813,53 +830,57 @@ function App() {
               <label>Description:</label>
               <input
                 type="text"
-                value={mergeDescription}
-                onChange={(e) => setMergeDescription(e.target.value)}
-                placeholder="e.g. Merged datasets A and B"
+                value={transformDescription}
+                onChange={(e) => setTransformDescription(e.target.value)}
+                placeholder="e.g. Filtered PII from dataset"
               />
             </div>
 
-            <div className="input-group">
-              <label>Data Type:</label>
-              <input
-                type="text"
-                value={mergeDataType}
-                onChange={(e) => setMergeDataType(e.target.value)}
-                placeholder="e.g. merged, dataset"
-              />
-            </div>
+            {transformSourceHashes.filter((h) => h.trim()).length > 1 && (
+              <div className="input-group">
+                <label>Data type:</label>
+                <input
+                  type="text"
+                  value={transformDataType}
+                  onChange={(e) => setTransformDataType(e.target.value)}
+                  placeholder="e.g. dataset, model"
+                />
+              </div>
+            )}
 
             <button
-              onClick={handleMergeTransform}
-              disabled={merging || mergeSourceHashes.filter((h) => h.trim()).length < 2 || !mergeNewHash.trim() || !mergeDescription.trim()}
+              onClick={handleTransform}
+              disabled={transforming || transformSourceHashes.filter((h) => h.trim()).length < 1 || !transformNewHash.trim() || !transformDescription.trim()}
             >
-              {merging ? 'Merging...' : 'Merge Transform'}
+              {transforming ? 'Recording...' : transformSourceHashes.filter((h) => h.trim()).length > 1 ? 'Record Merge Transform' : 'Record Transformation'}
             </button>
           </>
         )}
 
-        {mergeError && <p className="error">{mergeError}</p>}
+        {transformError && <p className="error">{transformError}</p>}
 
-        {mergeResult && (
+        {transformResult && (
           <div className="result">
-            <h3>Merge Successful</h3>
+            <h3>Transformation Recorded</h3>
             <div className="detail-row">
-              <span className="label">Tx Hash:</span>
-              <a href={mergeResult.explorerUrl} target="_blank" rel="noopener noreferrer">
-                <code className="value">{mergeResult.txHash.slice(0, 10)}...{mergeResult.txHash.slice(-8)}</code>
+              <span className="label">Blockchain tx hash:</span>
+              <a href={transformResult.explorerUrl} target="_blank" rel="noopener noreferrer">
+                <code className="value">{transformResult.txHash.slice(0, 10)}...{transformResult.txHash.slice(-8)}</code>
               </a>
             </div>
+            {'sourceHashes' in transformResult && (
+              <div className="detail-row">
+                <span className="label">Sources:</span>
+                <span className="value">{(transformResult as MergeTransformResult).sourceHashes.length} hashes merged</span>
+              </div>
+            )}
             <div className="detail-row">
-              <span className="label">Sources:</span>
-              <span className="value">{mergeResult.sourceHashes.length} hashes merged</span>
+              <span className="label">Result Content SHA256:</span>
+              <code className="value small">{transformResult.newHash}</code>
             </div>
             <div className="detail-row">
-              <span className="label">Result:</span>
-              <code className="value small">{mergeResult.newHash}</code>
-            </div>
-            <div className="detail-row">
-              <span className="label">Gas Used:</span>
-              <span className="value">{mergeResult.gasUsed.toString()}</span>
+              <span className="label">Gas used:</span>
+              <span className="value">{transformResult.gasUsed.toString()}</span>
             </div>
           </div>
         )}
@@ -867,16 +888,16 @@ function App() {
         {/* Provenance Chain Traversal */}
         <h3>Provenance Chain</h3>
         <p className="section-description">
-          Trace the full lineage of a data hash — ancestors and descendants.
+          Trace the full lineage of a content hash — ancestors and descendants.
         </p>
 
         <div className="input-group">
-          <label>Data Hash to trace:</label>
+          <label>Content SHA256 to trace:</label>
           <input
             type="text"
             value={chainTraceHash}
             onChange={(e) => setChainTraceHash(e.target.value)}
-            placeholder="Hash to trace lineage"
+            placeholder="Content SHA256 to trace lineage"
           />
         </div>
 
@@ -893,15 +914,15 @@ function App() {
             {provenanceChain.map((record, i) => (
               <div key={i} className="chain-record">
                 <div className="detail-row">
-                  <span className="label">Hash:</span>
+                  <span className="label">Content SHA256:</span>
                   <code className="value small">{record.dataHash}</code>
                 </div>
                 <div className="detail-row">
-                  <span className="label">Type:</span>
+                  <span className="label">Data type:</span>
                   <span className="value">{record.dataType}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="label">Owner:</span>
+                  <span className="label">Owner address:</span>
                   <code className="value">{record.owner.slice(0, 6)}...{record.owner.slice(-4)}</code>
                 </div>
                 <div className="detail-row">
