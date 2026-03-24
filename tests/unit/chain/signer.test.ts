@@ -31,7 +31,7 @@ describe('fromViemWalletClient', () => {
     const mockWalletClient = {
       account: { address: MOCK_ADDRESS },
       sendTransaction: (args: { to: Address; data: Hex }) => {
-        expect(args.to).toBe('0x9a3c6F47B69211F05891CCb7aD33596290b9fE64');
+        expect(args.to).toBe('0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a');
         expect(args.data).toMatch(/^0x/);
         return Promise.resolve(MOCK_TX_HASH);
       },
@@ -39,7 +39,7 @@ describe('fromViemWalletClient', () => {
 
     const signer = fromViemWalletClient(mockWalletClient);
     const result = await signer.sendTransaction({
-      to: '0x9a3c6F47B69211F05891CCb7aD33596290b9fE64',
+      to: '0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a',
       data: '0xabcdef',
     });
     expect(result).toBe(MOCK_TX_HASH);
@@ -54,7 +54,7 @@ describe('fromViemWalletClient', () => {
 
     const signer = fromViemWalletClient(mockWalletClient);
     await signer.sendTransaction({
-      to: '0x9a3c6F47B69211F05891CCb7aD33596290b9fE64',
+      to: '0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a',
       data: '0xabcdef',
       gas: BigInt(500_000),
     });
@@ -73,7 +73,7 @@ describe('fromViemWalletClient', () => {
 
     const signer = fromViemWalletClient(mockWalletClient);
     await signer.sendTransaction({
-      to: '0x9a3c6F47B69211F05891CCb7aD33596290b9fE64',
+      to: '0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a',
       data: '0xabcdef',
     });
 
