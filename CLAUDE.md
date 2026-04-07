@@ -317,8 +317,8 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 ### Contract
 
 - **Contract**: DataProvenance on Base Sepolia
-- **Address**: `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a`
-- **Explorer**: https://sepolia.basescan.org/address/0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a
+- **Address**: `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`
+- **Explorer**: https://sepolia.basescan.org/address/0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322
 
 ### Methods
 
