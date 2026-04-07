@@ -75,6 +75,14 @@ export interface UploadOptions {
   poolSize?: 'small' | 'medium' | 'large';
   /** Content type of the file */
   contentType?: string;
+  /**
+   * Upload raw JSON document without base64 metadata wrapping.
+   * When true, the content is embedded directly in the `data` field as a JSON object
+   * instead of being base64-encoded. Useful for storing structured records (e.g. file proofs)
+   * that should be human-readable on Swarm without decoding.
+   * Content must be a JSON string or a plain object.
+   */
+  raw?: boolean;
 }
 
 /**
@@ -92,6 +100,23 @@ export interface ProvenanceMetadata {
   /** Base64 encoded file content */
   data: string;
   /** SHA256 hash of original file content */
+  content_hash: string;
+  /** Postage stamp ID used for upload */
+  stamp_id: string;
+  /** Optional provenance standard identifier */
+  provenance_standard?: string;
+  /** Optional encryption method */
+  encryption?: string;
+}
+
+/**
+ * Document metadata for raw JSON uploads (no base64 wrapping).
+ * The `data` field contains structured JSON directly instead of base64-encoded content.
+ */
+export interface DocumentMetadata {
+  /** Structured JSON document data (not base64-encoded) */
+  data: Record<string, unknown>;
+  /** SHA256 hash of JSON.stringify(data) */
   content_hash: string;
   /** Postage stamp ID used for upload */
   stamp_id: string;
@@ -139,6 +164,30 @@ export interface UploadResult {
   reference: string;
   /** The provenance metadata that was uploaded */
   metadata: ProvenanceMetadata;
+}
+
+/**
+ * Result of a raw document upload operation
+ */
+export interface DocumentUploadResult {
+  /** Swarm reference hash */
+  reference: string;
+  /** The document metadata that was uploaded (data is raw JSON, not base64) */
+  metadata: DocumentMetadata;
+}
+
+/**
+ * Result of downloading a raw JSON document
+ */
+export interface DocumentDownloadResult {
+  /** The structured JSON document data */
+  document: Record<string, unknown>;
+  /** The document metadata from the gateway */
+  metadata: DocumentMetadata;
+  /** Whether the notary signature was verified (if present) */
+  verified?: boolean;
+  /** Notary signatures if present */
+  signatures?: NotarySignature[];
 }
 
 /**

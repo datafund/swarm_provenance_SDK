@@ -37,6 +37,8 @@ export interface ChainProvenanceRecord {
   owner: Address;
   timestamp: number;
   dataType: string;
+  /** Storage reference (e.g. Swarm reference) linked on-chain, if set */
+  storageRef?: string;
   status: DataStatus;
   accessors: Address[];
   transformationLinks: TransformationLink[];
@@ -55,6 +57,8 @@ export interface AnchorResult extends TransactionResult {
   dataHash: string;
   dataType: string;
   owner: Address;
+  /** Storage reference (e.g. Swarm reference) linked on-chain, if provided */
+  storageRef?: string;
 }
 
 /** Result of a recordAccess operation */

@@ -131,7 +131,7 @@ export class ChainClient {
 
       // dataRecords returns a tuple; first element is the stored dataHash
       // If it's zero, the record doesn't exist
-      const [storedHash] = result as [Hex, Address, bigint, string, number];
+      const [storedHash] = result as [Hex, Address, bigint, string, Hex, number];
       return storedHash !== ZERO_BYTES32;
     } catch (error) {
       throw new ChainConnectionError(
@@ -160,6 +160,7 @@ export class ChainClient {
         owner: Address;
         timestamp: bigint;
         dataType: string;
+        storageRef: Hex;
         transformationLinks: readonly { newDataHash: Hex; description: string }[];
         accessors: readonly Address[];
         status: number;
@@ -169,7 +170,7 @@ export class ChainClient {
         throw new DataNotRegisteredError(dataHash);
       }
 
-      return {
+      const parsed: ChainProvenanceRecord = {
         dataHash: record.dataHash,
         owner: record.owner,
         timestamp: Number(record.timestamp),
@@ -181,6 +182,10 @@ export class ChainClient {
           description: link.description,
         })),
       };
+      if (record.storageRef && record.storageRef !== ZERO_BYTES32) {
+        parsed.storageRef = record.storageRef;
+      }
+      return parsed;
     } catch (error) {
       if (error instanceof DataNotRegisteredError) {
         throw error;
@@ -499,16 +504,18 @@ export class ChainClient {
 
   /**
    * Anchor a data hash on-chain by registering it in the DataProvenance contract.
+   * Optionally link a storage reference (e.g. Swarm reference) for bidirectional lookup.
    * Requires a signer.
    */
-  async anchor(dataHash: string, dataType: string): Promise<AnchorResult> {
+  async anchor(dataHash: string, dataType: string, storageRef?: string): Promise<AnchorResult> {
     this.requireSigner();
     validateDataType(dataType);
 
     const hash = normalizeHash(dataHash);
+    const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
     await this.checkNotRegistered(hash, dataHash);
 
-    const data = encodeRegisterData(hash, dataType);
+    const data = encodeRegisterData(hash, dataType, normalizedStorageRef);
     const owner = await this.signer!.getAddress();
 
     let receipt: TransactionResult;
@@ -522,12 +529,16 @@ export class ChainClient {
       throw error;
     }
 
-    return {
+    const result: AnchorResult = {
       ...receipt,
       dataHash: hash,
       dataType,
       owner,
     };
+    if (normalizedStorageRef) {
+      result.storageRef = normalizedStorageRef;
+    }
+    return result;
   }
 
   /**
@@ -552,17 +563,19 @@ export class ChainClient {
 
   /**
    * Anchor a data hash on-chain on behalf of another owner (operator only).
+   * Optionally link a storage reference for bidirectional lookup.
    * Requires a signer with operator role.
    */
-  async anchorFor(dataHash: string, dataType: string, actualOwner: string): Promise<AnchorResult> {
+  async anchorFor(dataHash: string, dataType: string, actualOwner: string, storageRef?: string): Promise<AnchorResult> {
     this.requireSigner();
     validateDataType(dataType);
     validateAddress(actualOwner);
 
     const hash = normalizeHash(dataHash);
+    const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
     await this.checkNotRegistered(hash, dataHash);
 
-    const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address);
+    const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address, normalizedStorageRef);
 
     let receipt: TransactionResult;
     try {
@@ -574,12 +587,41 @@ export class ChainClient {
       throw error;
     }
 
-    return {
+    const result: AnchorResult = {
       ...receipt,
       dataHash: hash,
       dataType,
       owner: actualOwner as Address,
     };
+    if (normalizedStorageRef) {
+      result.storageRef = normalizedStorageRef;
+    }
+    return result;
+  }
+
+  /**
+   * Look up a data hash by its storage reference (reverse lookup).
+   * Returns the data hash associated with the given storage reference,
+   * or null if no mapping exists.
+   */
+  async getDataHashByStorageRef(storageRef: string): Promise<string | null> {
+    const normalizedRef = normalizeHash(storageRef);
+
+    try {
+      const result = await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getDataHashByStorageRef',
+        args: [normalizedRef],
+      });
+
+      const dataHash = result;
+      return dataHash === ZERO_BYTES32 ? null : (dataHash as string);
+    } catch (error) {
+      throw new ChainConnectionError(
+        `Failed to get data hash by storage ref: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /**
@@ -602,6 +644,19 @@ export class ChainClient {
       if (existingLinks.some((link) => link.newDataHash.toLowerCase() === nHash.toLowerCase())) {
         throw new ChainValidationError(
           `Transformation from ${originalHash} to ${newHash} is already recorded on-chain`
+        );
+      }
+    } catch (error) {
+      if (error instanceof ChainValidationError) throw error;
+      // Ignore read errors — proceed with the transaction
+    }
+
+    // Check that the new hash is not already registered (contract will revert otherwise)
+    try {
+      const exists = await this.verifyOnChain(nHash);
+      if (exists) {
+        throw new ChainValidationError(
+          `New hash ${newHash} is already registered on-chain. The contract auto-registers the new hash during transformation — do not anchor it beforehand.`
         );
       }
     } catch (error) {
@@ -658,6 +713,19 @@ export class ChainClient {
       if (existingParents.length > 0) {
         throw new ChainValidationError(
           `Hash ${newHash} already has transformation parents recorded on-chain`
+        );
+      }
+    } catch (error) {
+      if (error instanceof ChainValidationError) throw error;
+      // Ignore read errors — proceed with the transaction
+    }
+
+    // Check that the new hash is not already registered (contract will revert otherwise)
+    try {
+      const exists = await this.verifyOnChain(normalizedNew);
+      if (exists) {
+        throw new ChainValidationError(
+          `New hash ${newHash} is already registered on-chain. The contract auto-registers the new hash during merge — do not anchor it beforehand.`
         );
       }
     } catch (error) {
@@ -743,9 +811,10 @@ export class ChainClient {
 
   /**
    * Anchor multiple data hashes in a single transaction.
+   * Items may optionally include a storageRef for bidirectional lookup.
    * Requires a signer.
    */
-  async batchAnchor(items: Array<{ dataHash: string; dataType: string }>): Promise<BatchResult> {
+  async batchAnchor(items: Array<{ dataHash: string; dataType: string; storageRef?: string }>): Promise<BatchResult> {
     this.requireSigner();
     this.validateBatchSize(items.length);
 
@@ -755,7 +824,15 @@ export class ChainClient {
       return item.dataType;
     });
 
-    const data = encodeBatchRegisterData(hashes, types);
+    const hasAnyStorageRef = items.some((item) => item.storageRef);
+    let storageRefs: Hex[] | undefined;
+    if (hasAnyStorageRef) {
+      storageRefs = items.map((item) =>
+        item.storageRef ? normalizeHash(item.storageRef) : ZERO_BYTES32
+      );
+    }
+
+    const data = encodeBatchRegisterData(hashes, types, storageRefs);
     const receipt = await this.sendAndWait(data);
 
     return {
@@ -873,7 +950,23 @@ export class ChainClient {
   }
 
   private cleanTransactionError(error: unknown): string {
-    const raw = error instanceof Error ? error.message : String(error);
+    let raw: string;
+    if (error instanceof Error) {
+      raw = error.message;
+    } else if (typeof error === 'object' && error !== null) {
+      // Handle raw RPC error objects from EIP-1193 providers (e.g. MetaMask)
+      const obj = error as Record<string, unknown>;
+      raw = (obj['message'] as string) ?? (obj['reason'] as string) ?? JSON.stringify(error);
+    } else {
+      raw = String(error);
+    }
+
+    // Extract revert reason from Hardhat/EVM error messages
+    const revertMatch = raw.match(/reverted with reason string '([^']+)'/);
+    if (revertMatch) {
+      return revertMatch[1]!;
+    }
+
     // Extract the first meaningful section before viem's verbose details
     const match = raw.match(/^(.*?)(?:\n\n|\nContract Call:|\nRequest Arguments:|\nDocs:)/s);
     const cleaned = match ? match[1]!.trim() : raw;
@@ -884,7 +977,14 @@ export class ChainClient {
   }
 
   private isTransientError(error: unknown): boolean {
-    const msg = error instanceof Error ? error.message : String(error);
+    let msg: string;
+    if (error instanceof Error) {
+      msg = error.message;
+    } else if (typeof error === 'object' && error !== null && 'message' in error) {
+      msg = String((error as Record<string, unknown>)['message']);
+    } else {
+      msg = String(error);
+    }
     return /nonce too (low|high)|replacement underpriced/i.test(msg);
   }
 

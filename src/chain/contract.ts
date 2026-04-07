@@ -95,7 +95,14 @@ export function encodeGetTransformationParents(dataHash: Hex): Hex {
 
 // ─── Write Encoders ──────────────────────────────────────────────
 
-export function encodeRegisterData(dataHash: Hex, dataType: string): Hex {
+export function encodeRegisterData(dataHash: Hex, dataType: string, storageRef?: Hex): Hex {
+  if (storageRef) {
+    return encodeFunctionData({
+      abi: DATA_PROVENANCE_ABI,
+      functionName: 'registerData',
+      args: [dataHash, dataType, storageRef],
+    });
+  }
   return encodeFunctionData({
     abi: DATA_PROVENANCE_ABI,
     functionName: 'registerData',
@@ -103,11 +110,26 @@ export function encodeRegisterData(dataHash: Hex, dataType: string): Hex {
   });
 }
 
-export function encodeRegisterDataFor(dataHash: Hex, dataType: string, actualOwner: Address): Hex {
+export function encodeRegisterDataFor(dataHash: Hex, dataType: string, actualOwner: Address, storageRef?: Hex): Hex {
+  if (storageRef) {
+    return encodeFunctionData({
+      abi: DATA_PROVENANCE_ABI,
+      functionName: 'registerDataFor',
+      args: [dataHash, dataType, actualOwner, storageRef],
+    });
+  }
   return encodeFunctionData({
     abi: DATA_PROVENANCE_ABI,
     functionName: 'registerDataFor',
     args: [dataHash, dataType, actualOwner],
+  });
+}
+
+export function encodeGetDataHashByStorageRef(storageRef: Hex): Hex {
+  return encodeFunctionData({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getDataHashByStorageRef',
+    args: [storageRef],
   });
 }
 
@@ -168,7 +190,14 @@ export function encodeTransferDataOwnership(dataHash: Hex, newOwner: Address): H
   });
 }
 
-export function encodeBatchRegisterData(dataHashes: Hex[], dataTypes: string[]): Hex {
+export function encodeBatchRegisterData(dataHashes: Hex[], dataTypes: string[], storageRefs?: Hex[]): Hex {
+  if (storageRefs) {
+    return encodeFunctionData({
+      abi: DATA_PROVENANCE_ABI,
+      functionName: 'batchRegisterData',
+      args: [dataHashes, dataTypes, storageRefs],
+    });
+  }
   return encodeFunctionData({
     abi: DATA_PROVENANCE_ABI,
     functionName: 'batchRegisterData',
@@ -262,6 +291,14 @@ export function decodeGetTransformationParents(data: Hex) {
   return decodeFunctionResult({
     abi: DATA_PROVENANCE_ABI,
     functionName: 'getTransformationParents',
+    data,
+  });
+}
+
+export function decodeGetDataHashByStorageRef(data: Hex) {
+  return decodeFunctionResult({
+    abi: DATA_PROVENANCE_ABI,
+    functionName: 'getDataHashByStorageRef',
     data,
   });
 }

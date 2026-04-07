@@ -5,6 +5,8 @@ import {
   StampError,
   type UploadResult,
   type DownloadResult,
+  type DocumentUploadResult,
+  type DocumentDownloadResult,
   type NotaryInfo,
 } from '@datafund/swarm-provenance';
 import {
@@ -40,15 +42,19 @@ function App() {
   // Upload state
   const [uploadText, setUploadText] = useState('');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadMode, setUploadMode] = useState<'content' | 'raw'>('content');
+  const [rawJsonText, setRawJsonText] = useState('');
   const [useNotary, setUseNotary] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadResult, setUploadResult] = useState<UploadResult | DocumentUploadResult | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Download state
   const [downloadRef, setDownloadRef] = useState('');
+  const [downloadMode, setDownloadMode] = useState<'auto' | 'document'>('auto');
   const [downloading, setDownloading] = useState(false);
   const [downloadResult, setDownloadResult] = useState<DownloadResult | null>(null);
+  const [docDownloadResult, setDocDownloadResult] = useState<DocumentDownloadResult | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Chain state
@@ -62,6 +68,7 @@ function App() {
   const [anchorHash, setAnchorHash] = useState('');
   const [anchorHashSource, setAnchorHashSource] = useState<'content' | 'swarm'>('content');
   const [anchorType, setAnchorType] = useState('dataset');
+  const [anchorStorageRef, setAnchorStorageRef] = useState('');
   const [anchoring, setAnchoring] = useState(false);
   const [anchorResult, setAnchorResult] = useState<AnchorResult | null>(null);
   const [anchorError, setAnchorError] = useState<string | null>(null);
@@ -108,20 +115,41 @@ function App() {
     setUploadResult(null);
 
     try {
-      const content = uploadFile || uploadText;
-      if (!content) {
-        throw new Error('Please enter text or select a file');
+      if (uploadMode === 'raw') {
+        if (!rawJsonText.trim()) {
+          throw new Error('Please enter JSON to upload');
+        }
+        const result = await client.upload(rawJsonText, {
+          raw: true,
+          sign: useNotary ? 'notary' : undefined,
+          standard: 'demo-v1',
+        });
+        setUploadResult(result);
+        setDownloadRef(result.reference);
+        setDownloadMode('document');
+        setAnchorHash(anchorHashSource === 'swarm' ? result.reference : result.metadata.content_hash);
+        // Auto-populate storageRef with the Swarm reference when anchoring content hash
+        if (anchorHashSource === 'content') {
+          setAnchorStorageRef(result.reference);
+        }
+      } else {
+        const content = uploadFile || uploadText;
+        if (!content) {
+          throw new Error('Please enter text or select a file');
+        }
+        const result = await client.upload(content, {
+          sign: useNotary ? 'notary' : undefined,
+          standard: 'demo-v1',
+        });
+        setUploadResult(result);
+        setDownloadRef(result.reference);
+        setDownloadMode('auto');
+        setAnchorHash(anchorHashSource === 'swarm' ? result.reference : result.metadata.content_hash);
+        // Auto-populate storageRef with the Swarm reference when anchoring content hash
+        if (anchorHashSource === 'content') {
+          setAnchorStorageRef(result.reference);
+        }
       }
-
-      const result = await client.upload(content, {
-        sign: useNotary ? 'notary' : undefined,
-        standard: 'demo-v1',
-      });
-
-      setUploadResult(result);
-      setDownloadRef(result.reference);
-      // Auto-populate anchor hash based on selected source
-      setAnchorHash(anchorHashSource === 'swarm' ? result.reference : result.metadata.content_hash);
     } catch (err) {
       if (err instanceof GatewayConnectionError && err.suggestion) {
         setUploadError(`${err.message}. ${err.suggestion}`);
@@ -139,14 +167,31 @@ function App() {
     setDownloading(true);
     setDownloadError(null);
     setDownloadResult(null);
+    setDocDownloadResult(null);
 
     try {
       if (!downloadRef.trim()) {
         throw new Error('Please enter a reference');
       }
 
-      const result = await client.download(downloadRef.trim());
-      setDownloadResult(result);
+      if (downloadMode === 'document') {
+        const result = await client.downloadDocument(downloadRef.trim());
+        setDocDownloadResult(result);
+      } else {
+        // Auto mode: try standard download first, fall back to document
+        try {
+          const result = await client.download(downloadRef.trim());
+          setDownloadResult(result);
+        } catch (downloadErr) {
+          // If content hash mismatch (likely raw JSON), try document download
+          if (downloadErr instanceof Error && downloadErr.message.includes('Content hash')) {
+            const result = await client.downloadDocument(downloadRef.trim());
+            setDocDownloadResult(result);
+          } else {
+            throw downloadErr;
+          }
+        }
+      }
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : 'Download failed');
     } finally {
@@ -276,9 +321,13 @@ function App() {
       if (!anchorHash.trim()) {
         throw new Error('Please enter a Content SHA256 to anchor');
       }
-      console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType);
+      console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType, anchorStorageRef || '(no storageRef)');
       console.log('[anchor] Chain preset:', chainPreset);
-      const result = await chainClient.anchor(anchorHash.trim(), anchorType);
+      const result = await chainClient.anchor(
+        anchorHash.trim(),
+        anchorType,
+        anchorStorageRef.trim() || undefined,
+      );
       console.log('[anchor] Success:', result);
       setAnchorResult(result);
       // Auto-populate verify hash
@@ -438,28 +487,67 @@ function App() {
         <h2>Upload</h2>
 
         <div className="input-group">
-          <label>Text content:</label>
-          <textarea
-            value={uploadText}
-            onChange={(e) => setUploadText(e.target.value)}
-            placeholder="Enter text to upload..."
-            rows={4}
-            disabled={!!uploadFile}
-          />
+          <label>Upload mode:</label>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <label>
+              <input
+                type="radio"
+                name="uploadMode"
+                checked={uploadMode === 'content'}
+                onChange={() => setUploadMode('content')}
+              />{' '}
+              Content (base64 wrapped)
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="uploadMode"
+                checked={uploadMode === 'raw'}
+                onChange={() => setUploadMode('raw')}
+              />{' '}
+              Raw JSON (no wrapping)
+            </label>
+          </div>
         </div>
 
-        <div className="input-group">
-          <label>Or select a file:</label>
-          <input
-            type="file"
-            onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-          />
-          {uploadFile && (
-            <button className="small" onClick={() => setUploadFile(null)}>
-              Clear
-            </button>
-          )}
-        </div>
+        {uploadMode === 'content' ? (
+          <>
+            <div className="input-group">
+              <label>Text content:</label>
+              <textarea
+                value={uploadText}
+                onChange={(e) => setUploadText(e.target.value)}
+                placeholder="Enter text to upload..."
+                rows={4}
+                disabled={!!uploadFile}
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Or select a file:</label>
+              <input
+                type="file"
+                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+              />
+              {uploadFile && (
+                <button className="small" onClick={() => setUploadFile(null)}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="input-group">
+            <label>JSON document:</label>
+            <textarea
+              value={rawJsonText}
+              onChange={(e) => setRawJsonText(e.target.value)}
+              placeholder={'{\n  "file_hash": "abc123...",\n  "filename": "report.pdf"\n}'}
+              rows={6}
+              style={{ fontFamily: 'monospace' }}
+            />
+          </div>
+        )}
 
         {notaryInfo?.available && (
           <div className="input-group checkbox">
@@ -474,7 +562,10 @@ function App() {
           </div>
         )}
 
-        <button onClick={handleUpload} disabled={uploading || (!uploadText && !uploadFile)}>
+        <button
+          onClick={handleUpload}
+          disabled={uploading || (uploadMode === 'content' ? (!uploadText && !uploadFile) : !rawJsonText.trim())}
+        >
           {uploading ? 'Uploading...' : 'Upload'}
         </button>
 
@@ -495,6 +586,9 @@ function App() {
               <strong>Swarm stamp ID:</strong>
               <code>{uploadResult.metadata.stamp_id}</code>
             </p>
+            {uploadMode === 'raw' && (
+              <p><strong>Mode:</strong> Raw JSON (no base64 wrapping)</p>
+            )}
             {useNotary && (
               <p className="success">Signed by gateway notary</p>
             )}
@@ -514,6 +608,30 @@ function App() {
             onChange={(e) => setDownloadRef(e.target.value)}
             placeholder="Enter Swarm reference (64 hex chars)..."
           />
+        </div>
+
+        <div className="input-group">
+          <label>Download mode:</label>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <label>
+              <input
+                type="radio"
+                name="downloadMode"
+                checked={downloadMode === 'auto'}
+                onChange={() => setDownloadMode('auto')}
+              />{' '}
+              Auto-detect
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="downloadMode"
+                checked={downloadMode === 'document'}
+                onChange={() => setDownloadMode('document')}
+              />{' '}
+              Raw JSON document
+            </label>
+          </div>
         </div>
 
         <button onClick={handleDownload} disabled={downloading || !downloadRef.trim()}>
@@ -596,6 +714,60 @@ function App() {
             </div>
           </div>
         )}
+
+        {docDownloadResult && (
+          <div className="result">
+            <h3>Document Download Successful</h3>
+            <p>
+              <strong>Content SHA256:</strong>
+              <code>{docDownloadResult.metadata.content_hash}</code>
+            </p>
+            <p>
+              <strong>Swarm stamp ID:</strong>
+              <code>{docDownloadResult.metadata.stamp_id}</code>
+            </p>
+            <p><strong>Mode:</strong> Raw JSON document</p>
+            {docDownloadResult.metadata.provenance_standard && (
+              <p>
+                <strong>Standard:</strong> {docDownloadResult.metadata.provenance_standard}
+              </p>
+            )}
+            {docDownloadResult.signatures && docDownloadResult.signatures.length > 0 && (
+              <div className={`signature-section ${docDownloadResult.verified ? 'verified' : 'failed'}`}>
+                <h4>Notary Signature</h4>
+                <div className="verification-status">
+                  {docDownloadResult.verified ? (
+                    <div className="status-badge success">
+                      <span className="icon">✓</span>
+                      <span>Signature Verified</span>
+                    </div>
+                  ) : (
+                    <div className="status-badge error">
+                      <span className="icon">✗</span>
+                      <span>Verification Failed</span>
+                    </div>
+                  )}
+                </div>
+                {docDownloadResult.signatures.map((sig, index) => (
+                  <div key={index} className="signature-details">
+                    <div className="detail-row">
+                      <span className="label">Signer:</span>
+                      <code className="value">{sig.signer}</code>
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Timestamp:</span>
+                      <span className="value">{new Date(sig.timestamp).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="content-preview">
+              <strong>Document:</strong>
+              <pre>{JSON.stringify(docDownloadResult.document, null, 2)}</pre>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Chain Anchoring Section */}
@@ -627,21 +799,42 @@ function App() {
                 ({parseFloat(walletBalance).toFixed(4)} ETH)
               </span>
             )}
+            <button
+              className="small"
+              style={{ marginLeft: 12 }}
+              onClick={() => {
+                setWalletAddress(null);
+                setChainClient(null);
+                setChainName(null);
+                setWrongChain(false);
+                setWalletBalance(null);
+                setAnchorResult(null);
+                setAnchorError(null);
+                setVerifyRecord(null);
+                setVerifyError(null);
+              }}
+            >
+              Disconnect
+            </button>
           </div>
         )}
 
-        {/* Wrong chain warning */}
-        {walletAddress && wrongChain && (
-          <div className="chain-switch">
-            <p className="warning">
-              Please switch to a supported network:
-            </p>
-            <button className="small" onClick={() => handleSwitchChain(31337)} disabled={switching}>
-              {switching ? 'Switching...' : 'Switch to Hardhat (local)'}
-            </button>
-            <button className="small" onClick={() => handleSwitchChain(84532)} disabled={switching}>
-              {switching ? 'Switching...' : 'Switch to Base Sepolia'}
-            </button>
+        {/* Chain switch buttons */}
+        {walletAddress && (
+          <div className="chain-switch" style={{ marginTop: 8 }}>
+            {wrongChain && (
+              <p className="warning">
+                Please switch to a supported network:
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="small" onClick={() => handleSwitchChain(31337)} disabled={switching}>
+                {switching ? 'Switching...' : 'Hardhat (local)'}
+              </button>
+              <button className="small" onClick={() => handleSwitchChain(84532)} disabled={switching}>
+                {switching ? 'Switching...' : 'Base Sepolia'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -698,6 +891,16 @@ function App() {
               />
             </div>
 
+            <div className="input-group">
+              <label>Storage reference (optional):</label>
+              <input
+                type="text"
+                value={anchorStorageRef}
+                onChange={(e) => setAnchorStorageRef(e.target.value)}
+                placeholder="Swarm reference for bidirectional lookup (auto-populated after upload)"
+              />
+            </div>
+
             <button onClick={handleAnchor} disabled={anchoring || !anchorHash.trim()}>
               {anchoring ? 'Anchoring...' : 'Anchor On-Chain'}
             </button>
@@ -727,6 +930,12 @@ function App() {
               <span className="label">Owner address:</span>
               <code className="value">{anchorResult.owner}</code>
             </div>
+            {anchorResult.storageRef && (
+              <div className="detail-row">
+                <span className="label">Storage reference:</span>
+                <code className="value">{anchorResult.storageRef}</code>
+              </div>
+            )}
           </div>
         )}
 

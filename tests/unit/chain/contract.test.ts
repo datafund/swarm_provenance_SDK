@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   encodeRegisterData,
+  encodeRegisterDataFor,
   encodeRecordAccess,
   encodeRecordMergeTransformation,
   encodeGetDataRecord,
@@ -10,6 +11,8 @@ import {
   encodeDataRecords,
   encodeSetDataStatus,
   encodeTransferDataOwnership,
+  encodeBatchRegisterData,
+  encodeGetDataHashByStorageRef,
 } from '../../../src/chain/contract.js';
 import type { Hex, Address } from '../../../src/chain/types.js';
 
@@ -74,6 +77,48 @@ describe('contract encoders', () => {
   it('encodeGetTransformationParents returns hex-encoded calldata', () => {
     const result = encodeGetTransformationParents(SAMPLE_HASH);
     expect(result).toMatch(/^0x/);
+  });
+
+  describe('storageRef overloads (#90)', () => {
+    const STORAGE_REF: Hex = `0x${'ef'.repeat(32)}`;
+
+    it('encodeRegisterData with storageRef produces different calldata', () => {
+      const withoutRef = encodeRegisterData(SAMPLE_HASH, 'dataset');
+      const withRef = encodeRegisterData(SAMPLE_HASH, 'dataset', STORAGE_REF);
+
+      expect(withRef).toMatch(/^0x/);
+      expect(withRef.length).toBeGreaterThan(withoutRef.length);
+      // Different function selectors (overloaded)
+      expect(withRef.slice(0, 10)).not.toBe(withoutRef.slice(0, 10));
+    });
+
+    it('encodeRegisterDataFor with storageRef produces different calldata', () => {
+      const withoutRef = encodeRegisterDataFor(SAMPLE_HASH, 'dataset', SAMPLE_ADDRESS);
+      const withRef = encodeRegisterDataFor(SAMPLE_HASH, 'dataset', SAMPLE_ADDRESS, STORAGE_REF);
+
+      expect(withRef).toMatch(/^0x/);
+      expect(withRef.length).toBeGreaterThan(withoutRef.length);
+      expect(withRef.slice(0, 10)).not.toBe(withoutRef.slice(0, 10));
+    });
+
+    it('encodeBatchRegisterData with storageRefs produces different calldata', () => {
+      const hashes: Hex[] = [SAMPLE_HASH];
+      const types = ['dataset'];
+      const refs: Hex[] = [STORAGE_REF];
+
+      const withoutRefs = encodeBatchRegisterData(hashes, types);
+      const withRefs = encodeBatchRegisterData(hashes, types, refs);
+
+      expect(withRefs).toMatch(/^0x/);
+      expect(withRefs.length).toBeGreaterThan(withoutRefs.length);
+      expect(withRefs.slice(0, 10)).not.toBe(withoutRefs.slice(0, 10));
+    });
+
+    it('encodeGetDataHashByStorageRef returns hex-encoded calldata', () => {
+      const result = encodeGetDataHashByStorageRef(STORAGE_REF);
+      expect(result).toMatch(/^0x/);
+      expect(result.length).toBeGreaterThan(10);
+    });
   });
 
   it('different functions produce different selectors', () => {

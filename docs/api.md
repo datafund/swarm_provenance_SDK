@@ -62,7 +62,7 @@ Upload provenance data to Swarm.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `content` | `Uint8Array \| ArrayBuffer \| string \| File \| Blob` | Content to upload |
+| `content` | `Uint8Array \| ArrayBuffer \| string \| File \| Blob \| Record<string, unknown>` | Content to upload |
 | `options` | `UploadOptions` | Upload options |
 
 **UploadOptions:**
@@ -74,15 +74,37 @@ Upload provenance data to Swarm.
 | `stampId` | `string` | - | Use existing stamp (skip pool) |
 | `poolSize` | `'small' \| 'medium' \| 'large'` | `'small'` | Pool size preset |
 | `contentType` | `string` | - | Content type |
+| `raw` | `boolean` | `false` | Upload raw JSON without base64 wrapping |
 
-**Returns:** `UploadResult`
+**Returns:** `UploadResult` (default) or `DocumentUploadResult` (when `raw: true`)
 
 ```typescript
 interface UploadResult {
   reference: string;           // Swarm hash (64 hex chars)
   metadata: ProvenanceMetadata;
-  signedDocument?: SignedDocument;
 }
+
+interface DocumentUploadResult {
+  reference: string;           // Swarm hash (64 hex chars)
+  metadata: DocumentMetadata;  // data is raw JSON, not base64
+}
+```
+
+**Raw mode example:**
+
+```typescript
+// Upload structured JSON without base64 wrapping
+const result = await client.upload(
+  { file_hash: 'abc123', filename: 'report.pdf' },
+  { raw: true, sign: 'notary' }
+);
+// result.metadata.data is the original object, not base64
+
+// Also accepts JSON strings
+const result2 = await client.upload(
+  '{"file_hash": "abc123"}',
+  { raw: true, stampId: 'myStamp' }
+);
 ```
 
 #### `download(reference, options?): Promise<DownloadResult>`
@@ -113,6 +135,28 @@ interface DownloadResult {
 }
 ```
 
+#### `downloadDocument(reference, options?): Promise<DocumentDownloadResult>`
+
+Download a raw JSON document from Swarm. Use for documents uploaded with `raw: true`.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `reference` | `string` | Swarm reference hash |
+| `options` | `DownloadOptions` | Download options |
+
+**Returns:** `DocumentDownloadResult`
+
+```typescript
+interface DocumentDownloadResult {
+  document: Record<string, unknown>;  // The raw JSON document
+  metadata: DocumentMetadata;
+  verified?: boolean;
+  signatures?: NotarySignature[];
+}
+```
+
 ---
 
 ## Types
@@ -124,6 +168,18 @@ interface ProvenanceMetadata {
   data: string;              // Base64 encoded file content
   content_hash: string;      // SHA256 of original file
   stamp_id: string;          // Postage stamp ID
+  provenance_standard?: string;
+  encryption?: string;
+}
+```
+
+### DocumentMetadata
+
+```typescript
+interface DocumentMetadata {
+  data: Record<string, unknown>; // Raw JSON (not base64)
+  content_hash: string;          // SHA256 of JSON.stringify(data)
+  stamp_id: string;
   provenance_standard?: string;
   encryption?: string;
 }
@@ -244,6 +300,15 @@ function verifyContentHash(metadata: ProvenanceMetadata): boolean;
 // Serialize/parse metadata
 function serializeMetadata(metadata: ProvenanceMetadata): string;
 function parseMetadata(json: string): ProvenanceMetadata;
+
+// Build document metadata (raw JSON, no base64)
+function buildDocumentMetadata(
+  document: Record<string, unknown>,
+  options: DocumentMetadataOptions
+): DocumentMetadata;
+
+// Verify document content hash
+function verifyDocumentHash(metadata: DocumentMetadata): boolean;
 ```
 
 ### Signature Verification

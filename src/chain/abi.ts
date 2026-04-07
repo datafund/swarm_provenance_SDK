@@ -81,6 +81,15 @@ export const DATA_PROVENANCE_ABI = [
   {
     anonymous: false,
     inputs: [
+      { indexed: true, internalType: 'bytes32', name: 'dataHash', type: 'bytes32' },
+      { indexed: true, internalType: 'bytes32', name: 'storageRef', type: 'bytes32' },
+    ],
+    name: 'StorageRefLinked',
+    type: 'event',
+  },
+  {
+    anonymous: false,
+    inputs: [
       { indexed: true, internalType: 'bytes32', name: 'role', type: 'bytes32' },
       { indexed: true, internalType: 'address', name: 'account', type: 'address' },
       { indexed: true, internalType: 'address', name: 'sender', type: 'address' },
@@ -172,6 +181,17 @@ export const DATA_PROVENANCE_ABI = [
   {
     inputs: [
       { internalType: 'bytes32[]', name: '_dataHashes', type: 'bytes32[]' },
+      { internalType: 'string[]', name: '_dataTypes', type: 'string[]' },
+      { internalType: 'bytes32[]', name: '_storageRefs', type: 'bytes32[]' },
+    ],
+    name: 'batchRegisterData',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'bytes32[]', name: '_dataHashes', type: 'bytes32[]' },
       { internalType: 'enum DataProvenance.DataStatus[]', name: '_statuses', type: 'uint8[]' },
     ],
     name: 'batchSetDataStatus',
@@ -194,6 +214,7 @@ export const DATA_PROVENANCE_ABI = [
       { internalType: 'address', name: 'owner', type: 'address' },
       { internalType: 'uint256', name: 'timestamp', type: 'uint256' },
       { internalType: 'string', name: 'dataType', type: 'string' },
+      { internalType: 'bytes32', name: 'storageRef', type: 'bytes32' },
       { internalType: 'enum DataProvenance.DataStatus', name: 'status', type: 'uint8' },
     ],
     stateMutability: 'view',
@@ -216,6 +237,7 @@ export const DATA_PROVENANCE_ABI = [
           { internalType: 'address', name: 'owner', type: 'address' },
           { internalType: 'uint256', name: 'timestamp', type: 'uint256' },
           { internalType: 'string', name: 'dataType', type: 'string' },
+          { internalType: 'bytes32', name: 'storageRef', type: 'bytes32' },
           {
             components: [
               { internalType: 'bytes32', name: 'newDataHash', type: 'bytes32' },
@@ -396,11 +418,41 @@ export const DATA_PROVENANCE_ABI = [
     inputs: [
       { internalType: 'bytes32', name: '_dataHash', type: 'bytes32' },
       { internalType: 'string', name: '_dataType', type: 'string' },
+      { internalType: 'bytes32', name: '_storageRef', type: 'bytes32' },
+    ],
+    name: 'registerData',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'bytes32', name: '_dataHash', type: 'bytes32' },
+      { internalType: 'string', name: '_dataType', type: 'string' },
       { internalType: 'address', name: '_actualOwner', type: 'address' },
     ],
     name: 'registerDataFor',
     outputs: [],
     stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'bytes32', name: '_dataHash', type: 'bytes32' },
+      { internalType: 'string', name: '_dataType', type: 'string' },
+      { internalType: 'address', name: '_actualOwner', type: 'address' },
+      { internalType: 'bytes32', name: '_storageRef', type: 'bytes32' },
+    ],
+    name: 'registerDataFor',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [{ internalType: 'bytes32', name: '_storageRef', type: 'bytes32' }],
+    name: 'getDataHashByStorageRef',
+    outputs: [{ internalType: 'bytes32', name: '', type: 'bytes32' }],
+    stateMutability: 'view',
     type: 'function',
   },
   {

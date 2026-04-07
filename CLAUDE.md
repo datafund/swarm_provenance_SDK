@@ -37,13 +37,21 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 
 ## Data Flow
 
-### Upload
+### Upload (default)
 1. Content → `toBytes()` conversion
 2. Build `ProvenanceMetadata` (base64 data + SHA256 hash + stamp_id)
 3. Acquire stamp from pool (or use provided stampId)
 4. POST metadata as JSON to gateway
 5. Gateway uploads to Swarm, returns reference
 6. Optionally: notary signs the document
+
+### Upload (raw mode)
+1. Content is a JSON object or JSON string — no base64 wrapping
+2. Build `DocumentMetadata` (raw JSON data + SHA256 of JSON.stringify(data) + stamp_id)
+3. Acquire stamp from pool (or use provided stampId)
+4. POST metadata as JSON to gateway
+5. Gateway uploads to Swarm, returns reference
+6. Use `client.upload(jsonObj, { raw: true })` or `client.upload(jsonStr, { raw: true })`
 
 ### Download
 1. GET reference from gateway
@@ -58,6 +66,13 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 ProvenanceMetadata
 ├── data: string (base64)
 ├── content_hash: string (SHA256 hex)
+├── stamp_id: string
+├── provenance_standard?: string
+└── encryption?: string
+
+DocumentMetadata (raw JSON uploads)
+├── data: Record<string, unknown> (raw JSON, not base64)
+├── content_hash: string (SHA256 of JSON.stringify(data))
 ├── stamp_id: string
 ├── provenance_standard?: string
 └── encryption?: string
@@ -101,7 +116,7 @@ src/
 
 ## Testing Strategy
 
-- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (211 tests)
+- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (272 tests)
 - **Integration tests** (`tests/integration/`): Real gateway, full round-trips
 - **E2E tests** (`examples/web-app/e2e/`): Playwright browser tests (11 tests)
 
@@ -313,8 +328,9 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC connectivity |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
-| `anchor(hash, type)` | Write | Yes | Register hash on-chain |
-| `anchorFor(hash, type, owner)` | Write | Yes | Register on behalf of owner (operator) |
+| `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
+| `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |
+| `getDataHashByStorageRef(ref)` | Read | No | Reverse lookup: storage ref → data hash |
 | `recordAccess(hash)` | Write | Yes | Record access event |
 | `recordTransformation(orig, new, desc)` | Write | Yes | Record 1-to-1 data transformation |
 | `mergeTransform(sources, new, desc, type?)` | Write | Yes | Record N-to-1 merge transformation (v2) |

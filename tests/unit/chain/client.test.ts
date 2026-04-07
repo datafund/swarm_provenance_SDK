@@ -374,8 +374,10 @@ describe('ChainClient', () => {
 
   describe('recordTransformation', () => {
     it('should record transformation', async () => {
-      // First call: getTransformationLinks check (no duplicates)
+      // 1st call: getTransformationLinks check (no duplicates)
       mockReadContract.mockResolvedValueOnce([]);
+      // 2nd call: verifyOnChain (new hash not registered) — dataRecords returns zero
+      mockReadContract.mockResolvedValueOnce([ZERO_HASH, '0x' + '00'.repeat(20), BigInt(0), '', ZERO_HASH, 0]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
         blockNumber: BigInt(101),
@@ -407,8 +409,24 @@ describe('ChainClient', () => {
       ).rejects.toThrow('already recorded on-chain');
     });
 
-    it('should proceed if duplicate check fails', async () => {
-      // getTransformationLinks fails (e.g. RPC error) — should still proceed
+    it('should throw when new hash is already registered', async () => {
+      const newHash = 'cd'.repeat(32);
+      // 1st call: getTransformationLinks (no duplicates)
+      mockReadContract.mockResolvedValueOnce([]);
+      // 2nd call: verifyOnChain — new hash IS registered
+      mockReadContract.mockResolvedValueOnce([`0x${newHash}`, MOCK_ADDRESS, BigInt(1700000000), 'dataset', ZERO_HASH, 0]);
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+
+      await expect(
+        client.recordTransformation(SAMPLE_HASH, newHash, 'filtered PII')
+      ).rejects.toThrow('already registered on-chain');
+    });
+
+    it('should proceed if pre-checks fail', async () => {
+      // Both read calls fail (e.g. RPC timeout) — should still proceed with tx
+      mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
       mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
@@ -1006,8 +1024,10 @@ describe('ChainClient', () => {
     });
 
     it('should merge transform and return result', async () => {
-      // getTransformationParents check (no duplicates)
+      // 1st call: getTransformationParents check (no duplicates)
       mockReadContract.mockResolvedValueOnce([]);
+      // 2nd call: verifyOnChain (new hash not registered)
+      mockReadContract.mockResolvedValueOnce([ZERO_HASH, '0x' + '00'.repeat(20), BigInt(0), '', ZERO_HASH, 0]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
         blockNumber: BigInt(200),
@@ -1034,6 +1054,8 @@ describe('ChainClient', () => {
 
     it('should default newDataType to "merged"', async () => {
       mockReadContract.mockResolvedValueOnce([]); // getTransformationParents check
+      // verifyOnChain (not registered)
+      mockReadContract.mockResolvedValueOnce([ZERO_HASH, '0x' + '00'.repeat(20), BigInt(0), '', ZERO_HASH, 0]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
         blockNumber: BigInt(201),
@@ -1063,8 +1085,24 @@ describe('ChainClient', () => {
       ).rejects.toThrow('already has transformation parents');
     });
 
-    it('should proceed if duplicate check fails', async () => {
-      // getTransformationParents fails — should proceed with transaction
+    it('should throw when new hash is already registered (merge)', async () => {
+      const hashMerged = 'ee'.repeat(32);
+      // 1st call: getTransformationParents (no duplicates)
+      mockReadContract.mockResolvedValueOnce([]);
+      // 2nd call: verifyOnChain — new hash IS registered
+      mockReadContract.mockResolvedValueOnce([`0x${hashMerged}`, MOCK_ADDRESS, BigInt(1700000000), 'dataset', ZERO_HASH, 0]);
+
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+
+      await expect(
+        client.mergeTransform([SAMPLE_HASH, 'cd'.repeat(32)], hashMerged, 'merged')
+      ).rejects.toThrow('already registered on-chain');
+    });
+
+    it('should proceed if pre-checks fail', async () => {
+      // Both read calls fail — should proceed with transaction
+      mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
       mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
@@ -1081,6 +1119,45 @@ describe('ChainClient', () => {
       );
 
       expect(result.txHash).toBe(MOCK_TX_HASH);
+    });
+  });
+
+  describe('storageRef in getDataRecord', () => {
+    it('should include storageRef when non-zero', async () => {
+      const STORAGE_REF_0X: Hex = `0x${'dd'.repeat(32)}`;
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: SAMPLE_HASH_0X,
+        owner: MOCK_ADDRESS,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        storageRef: STORAGE_REF_0X,
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const record = await client.getDataRecord(SAMPLE_HASH);
+
+      expect(record.storageRef).toBe(STORAGE_REF_0X);
+    });
+
+    it('should omit storageRef when zero', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: SAMPLE_HASH_0X,
+        owner: MOCK_ADDRESS,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        storageRef: ZERO_HASH,
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const record = await client.getDataRecord(SAMPLE_HASH);
+
+      expect(record.storageRef).toBeUndefined();
     });
   });
 
@@ -1152,6 +1229,72 @@ describe('ChainClient', () => {
         const txError = error as ChainTransactionError;
         expect(txError.message).toBe('Transaction failed: insufficient funds for gas');
         expect(txError.originalError).toBe(shortError);
+      }
+    });
+
+    it('should extract revert reason from Hardhat-style error', async () => {
+      const revertError = new Error(
+        "Error: VM Exception while processing transaction: reverted with reason string 'New data hash already exists'"
+      );
+
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        storageRef: ZERO_HASH,
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn().mockRejectedValue(revertError);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
+
+      try {
+        await client.anchor(SAMPLE_HASH, 'dataset');
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        const txError = error as ChainTransactionError;
+        expect(txError.message).toBe('Transaction failed: New data hash already exists');
+      }
+    });
+
+    it('should extract message from raw RPC error objects (not [object Object])', async () => {
+      // EIP-1193 providers may throw plain objects, not Error instances
+      const rpcError = { message: "reverted with reason string 'Not the owner of the original data'", code: -32603 };
+
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        storageRef: ZERO_HASH,
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn().mockRejectedValue(rpcError);
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        sendTransaction,
+      };
+      const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
+
+      try {
+        await client.anchor(SAMPLE_HASH, 'dataset');
+        expect.fail('Should have thrown');
+      } catch (error) {
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        const txError = error as ChainTransactionError;
+        expect(txError.message).toContain('Not the owner');
+        expect(txError.message).not.toContain('[object Object]');
       }
     });
 
@@ -1353,6 +1496,189 @@ describe('ChainClient', () => {
       await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow(ChainTransactionError);
       // 1 initial + 2 retries = 3 calls
       expect(sendTransaction).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('storageRef support (#90)', () => {
+    const STORAGE_REF = 'cd'.repeat(32);
+    const STORAGE_REF_0X: Hex = `0x${STORAGE_REF}`;
+
+    describe('anchor with storageRef', () => {
+      it('should anchor with optional storageRef', async () => {
+        // Pre-check: hash not registered
+        mockReadContract.mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        });
+
+        mockWaitForTransactionReceipt.mockResolvedValueOnce({
+          status: 'success',
+          blockNumber: BigInt(12345),
+          gasUsed: BigInt(55000),
+        });
+
+        const signer = createMockSigner();
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const result = await client.anchor(SAMPLE_HASH, 'dataset', STORAGE_REF);
+
+        expect(result.dataHash).toBe(SAMPLE_HASH_0X);
+        expect(result.storageRef).toBe(STORAGE_REF_0X);
+        expect(result.dataType).toBe('dataset');
+      });
+
+      it('should anchor without storageRef (backward compatible)', async () => {
+        mockReadContract.mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        });
+
+        mockWaitForTransactionReceipt.mockResolvedValueOnce({
+          status: 'success',
+          blockNumber: BigInt(12345),
+          gasUsed: BigInt(50000),
+        });
+
+        const signer = createMockSigner();
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const result = await client.anchor(SAMPLE_HASH, 'dataset');
+
+        expect(result.dataHash).toBe(SAMPLE_HASH_0X);
+        expect(result.storageRef).toBeUndefined();
+      });
+    });
+
+    describe('anchorFor with storageRef', () => {
+      it('should anchorFor with optional storageRef', async () => {
+        mockReadContract.mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        });
+
+        mockWaitForTransactionReceipt.mockResolvedValueOnce({
+          status: 'success',
+          blockNumber: BigInt(100),
+          gasUsed: BigInt(60000),
+        });
+
+        const signer = createMockSigner();
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const result = await client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS, STORAGE_REF);
+
+        expect(result.storageRef).toBe(STORAGE_REF_0X);
+        expect(result.owner).toBe(MOCK_ADDRESS);
+      });
+
+      it('should anchorFor without storageRef (backward compatible)', async () => {
+        mockReadContract.mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        });
+
+        mockWaitForTransactionReceipt.mockResolvedValueOnce({
+          status: 'success',
+          blockNumber: BigInt(100),
+          gasUsed: BigInt(60000),
+        });
+
+        const signer = createMockSigner();
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const result = await client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS);
+
+        expect(result.storageRef).toBeUndefined();
+      });
+    });
+
+    it('should reject invalid storageRef format', async () => {
+      const signer = createMockSigner();
+      const client = new ChainClient({ chain: 'base-sepolia', signer });
+      await expect(client.anchor(SAMPLE_HASH, 'dataset', 'not-a-valid-hash')).rejects.toThrow(
+        'Invalid data hash'
+      );
+    });
+
+    describe('getDataHashByStorageRef', () => {
+      it('should return data hash for a known storage ref', async () => {
+        mockReadContract.mockResolvedValueOnce(SAMPLE_HASH_0X);
+
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getDataHashByStorageRef(STORAGE_REF);
+
+        expect(result).toBe(SAMPLE_HASH_0X);
+      });
+
+      it('should return null for unknown storage ref', async () => {
+        mockReadContract.mockResolvedValueOnce(ZERO_HASH);
+
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getDataHashByStorageRef(STORAGE_REF);
+
+        expect(result).toBeNull();
+      });
+
+      it('should accept 0x-prefixed storage ref', async () => {
+        mockReadContract.mockResolvedValueOnce(SAMPLE_HASH_0X);
+
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getDataHashByStorageRef(STORAGE_REF_0X);
+
+        expect(result).toBe(SAMPLE_HASH_0X);
+      });
+    });
+
+    describe('batchAnchor with storageRef', () => {
+      it('should batch anchor with storageRefs', async () => {
+        mockWaitForTransactionReceipt.mockResolvedValueOnce({
+          status: 'success',
+          blockNumber: BigInt(200),
+          gasUsed: BigInt(100000),
+        });
+
+        const signer = createMockSigner();
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const result = await client.batchAnchor([
+          { dataHash: SAMPLE_HASH, dataType: 'dataset', storageRef: STORAGE_REF },
+          { dataHash: 'ee'.repeat(32), dataType: 'document' },
+        ]);
+
+        expect(result.count).toBe(2);
+      });
+
+      it('should batch anchor without storageRefs (backward compatible)', async () => {
+        mockWaitForTransactionReceipt.mockResolvedValueOnce({
+          status: 'success',
+          blockNumber: BigInt(200),
+          gasUsed: BigInt(80000),
+        });
+
+        const signer = createMockSigner();
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const result = await client.batchAnchor([
+          { dataHash: SAMPLE_HASH, dataType: 'dataset' },
+          { dataHash: 'ee'.repeat(32), dataType: 'document' },
+        ]);
+
+        expect(result.count).toBe(2);
+      });
     });
   });
 });

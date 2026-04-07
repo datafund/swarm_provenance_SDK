@@ -1,4 +1,4 @@
-import type { ProvenanceMetadata } from './types.js';
+import type { ProvenanceMetadata, DocumentMetadata } from './types.js';
 import { sha256Hex, bytesToBase64, base64ToBytes, toBytes } from './utils.js';
 
 /**
@@ -62,6 +62,50 @@ export function verifyContentHash(metadata: ProvenanceMetadata): boolean {
  */
 export function serializeMetadata(metadata: ProvenanceMetadata): string {
   return JSON.stringify(metadata);
+}
+
+/**
+ * Options for building document metadata (raw JSON, no base64)
+ */
+export interface DocumentMetadataOptions {
+  /** Postage stamp ID */
+  stampId: string;
+  /** Optional provenance standard identifier */
+  standard?: string;
+}
+
+/**
+ * Build document metadata from a raw JSON object (no base64 wrapping).
+ * The `data` field contains the object directly; `content_hash` is SHA256 of JSON.stringify(data).
+ */
+export function buildDocumentMetadata(
+  document: Record<string, unknown>,
+  options: DocumentMetadataOptions
+): DocumentMetadata {
+  const dataStr = JSON.stringify(document);
+  const contentHash = sha256Hex(toBytes(dataStr));
+
+  const metadata: DocumentMetadata = {
+    data: document,
+    content_hash: contentHash,
+    stamp_id: options.stampId,
+  };
+
+  if (options.standard) {
+    metadata.provenance_standard = options.standard;
+  }
+
+  return metadata;
+}
+
+/**
+ * Verify the content hash of a document metadata (raw JSON).
+ * Recomputes SHA256 of JSON.stringify(data) and compares to content_hash.
+ */
+export function verifyDocumentHash(metadata: DocumentMetadata): boolean {
+  const dataStr = JSON.stringify(metadata.data);
+  const computedHash = sha256Hex(toBytes(dataStr));
+  return computedHash === metadata.content_hash;
 }
 
 /**
