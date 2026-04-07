@@ -53,12 +53,20 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 5. Gateway uploads to Swarm, returns reference
 6. Use `client.upload(jsonObj, { raw: true })` or `client.upload(jsonStr, { raw: true })`
 
-### Download
+### Download (default)
 1. GET reference from gateway
 2. Parse response as ProvenanceMetadata (+ optional signatures)
-3. Verify content_hash matches decoded data
+3. Verify content_hash matches decoded data (base64)
 4. If signed, verify signatures against notary address
-5. Return decoded file content
+5. Return decoded file content as `Uint8Array`
+
+### Download (document)
+1. GET reference from gateway
+2. Parse response — `data` field is raw JSON object (not base64)
+3. Verify content_hash matches `JSON.stringify(data)`
+4. If signed, verify signatures
+5. Return `document` as `Record<string, unknown>`
+6. Use `client.downloadDocument(reference)` for this mode
 
 ## Type System
 
@@ -268,6 +276,7 @@ The `PaymentWallet` interface requires `address`, `signTypedData`, and `readCont
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
+| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object |
 | `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
 
 Note: `GatewayConnectionError` may include a `.suggestion` field with recovery hints from the gateway.
@@ -291,12 +300,13 @@ import { ChainClient, fromEip1193Provider } from '@datafund/swarm-provenance/cha
 // Read-only (no wallet needed)
 const chain = new ChainClient({ chain: 'base-sepolia' });
 await chain.verifyOnChain(hash);           // → boolean
-await chain.getDataRecord(hash);           // → ChainProvenanceRecord
+await chain.getDataRecord(hash);           // → ChainProvenanceRecord (includes storageRef)
+await chain.getDataHashByStorageRef(ref);  // → string | null (reverse lookup)
 
 // With wallet (browser)
 const signer = await fromEip1193Provider(window.ethereum);
 const chain = new ChainClient({ chain: 'base-sepolia', signer });
-await chain.anchor(swarmRef, 'dataset');   // → AnchorResult
+await chain.anchor(contentHash, 'dataset', swarmRef);  // → AnchorResult (with storageRef)
 await chain.recordAccess(swarmRef);        // → AccessResult
 
 // With private key (Node.js)

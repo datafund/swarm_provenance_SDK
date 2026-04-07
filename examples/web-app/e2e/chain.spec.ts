@@ -232,6 +232,37 @@ test.describe('Chain Section - Wallet Connection', () => {
     await expect(page.locator('button').filter({ hasText: 'Connecting...' })).toBeVisible();
   });
 
+  test('disconnect button resets wallet state', async ({ page }) => {
+    await page.addInitScript(injectMockProvider());
+    await page.goto('/');
+
+    // Connect
+    await page.locator('button').filter({ hasText: 'Connect Wallet' }).click();
+    await expect(page.getByText('Connected:')).toBeVisible({ timeout: 5000 });
+
+    // Disconnect
+    await page.locator('button').filter({ hasText: 'Disconnect' }).click();
+
+    // Should show Connect Wallet button again
+    await expect(page.locator('button').filter({ hasText: 'Connect Wallet' })).toBeVisible();
+    await expect(page.getByText('Connected:')).not.toBeVisible();
+
+    // Anchor form should be hidden
+    await expect(page.locator('h3').filter({ hasText: 'Anchor Data' })).not.toBeVisible();
+  });
+
+  test('chain switch buttons visible when connected', async ({ page }) => {
+    await page.addInitScript(injectMockProvider());
+    await page.goto('/');
+
+    await page.locator('button').filter({ hasText: 'Connect Wallet' }).click();
+    await expect(page.getByText('Connected:')).toBeVisible({ timeout: 5000 });
+
+    // Chain switch buttons should be visible
+    await expect(page.locator('button').filter({ hasText: 'Hardhat (local)' })).toBeVisible();
+    await expect(page.locator('button').filter({ hasText: 'Base Sepolia' })).toBeVisible();
+  });
+
   test('connect wallet shows error on rejection', async ({ page }) => {
     await page.addInitScript(() => {
       (window as any).ethereum = {
@@ -284,6 +315,22 @@ test.describe('Chain Section - Anchor Form', () => {
     await typeInput.clear();
     await typeInput.fill('model');
     await expect(typeInput).toHaveValue('model');
+  });
+
+  test('storage reference field is visible and optional', async ({ page }) => {
+    const storageRefInput = page.getByPlaceholder(/bidirectional lookup/);
+    await expect(storageRefInput).toBeVisible();
+    await expect(storageRefInput).toHaveValue('');
+
+    // Anchor button should be enabled without storageRef (it's optional)
+    await page.getByPlaceholder('auto-populated after upload').fill('ab'.repeat(32));
+    await expect(page.locator('button').filter({ hasText: 'Anchor On-Chain' })).toBeEnabled();
+  });
+
+  test('storage reference field is editable', async ({ page }) => {
+    const storageRefInput = page.getByPlaceholder(/bidirectional lookup/);
+    await storageRefInput.fill('cd'.repeat(32));
+    await expect(storageRefInput).toHaveValue('cd'.repeat(32));
   });
 
   test('anchor button shows hash and type are both required', async ({ page }) => {
