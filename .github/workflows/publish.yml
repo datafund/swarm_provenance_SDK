@@ -18,14 +18,11 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
-      - name: Use Node.js 22.x
+      - name: Use Node.js 24.x
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: 24.x
           cache: 'pnpm'
-
-      - name: Upgrade npm for trusted publishing (requires >=11.5)
-        run: npm install -g npm@11
 
       - name: Install dependencies
         run: pnpm install
