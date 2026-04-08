@@ -37,7 +37,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 
 ## Data Flow
 
-### Upload
+### Upload (default)
 1. Content → `toBytes()` conversion
 2. Build `ProvenanceMetadata` (base64 data + SHA256 hash + stamp_id)
 3. Acquire stamp from pool (or use provided stampId)
@@ -45,12 +45,28 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 5. Gateway uploads to Swarm, returns reference
 6. Optionally: notary signs the document
 
-### Download
+### Upload (raw mode)
+1. Content is a JSON object or JSON string — no base64 wrapping
+2. Build `DocumentMetadata` (raw JSON data + SHA256 of JSON.stringify(data) + stamp_id)
+3. Acquire stamp from pool (or use provided stampId)
+4. POST metadata as JSON to gateway
+5. Gateway uploads to Swarm, returns reference
+6. Use `client.upload(jsonObj, { raw: true })` or `client.upload(jsonStr, { raw: true })`
+
+### Download (default)
 1. GET reference from gateway
 2. Parse response as ProvenanceMetadata (+ optional signatures)
-3. Verify content_hash matches decoded data
+3. Verify content_hash matches decoded data (base64)
 4. If signed, verify signatures against notary address
-5. Return decoded file content
+5. Return decoded file content as `Uint8Array`
+
+### Download (document)
+1. GET reference from gateway
+2. Parse response — `data` field is raw JSON object (not base64)
+3. Verify content_hash matches `JSON.stringify(data)`
+4. If signed, verify signatures
+5. Return `document` as `Record<string, unknown>`
+6. Use `client.downloadDocument(reference)` for this mode
 
 ## Type System
 
@@ -58,6 +74,13 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 ProvenanceMetadata
 ├── data: string (base64)
 ├── content_hash: string (SHA256 hex)
+├── stamp_id: string
+├── provenance_standard?: string
+└── encryption?: string
+
+DocumentMetadata (raw JSON uploads)
+├── data: Record<string, unknown> (raw JSON, not base64)
+├── content_hash: string (SHA256 of JSON.stringify(data))
 ├── stamp_id: string
 ├── provenance_standard?: string
 └── encryption?: string
@@ -101,7 +124,7 @@ src/
 
 ## Testing Strategy
 
-- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (211 tests)
+- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (272 tests)
 - **Integration tests** (`tests/integration/`): Real gateway, full round-trips
 - **E2E tests** (`examples/web-app/e2e/`): Playwright browser tests (11 tests)
 
@@ -253,6 +276,7 @@ The `PaymentWallet` interface requires `address`, `signTypedData`, and `readCont
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
+| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object |
 | `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
 
 Note: `GatewayConnectionError` may include a `.suggestion` field with recovery hints from the gateway.
@@ -276,12 +300,13 @@ import { ChainClient, fromEip1193Provider } from '@datafund/swarm-provenance/cha
 // Read-only (no wallet needed)
 const chain = new ChainClient({ chain: 'base-sepolia' });
 await chain.verifyOnChain(hash);           // → boolean
-await chain.getDataRecord(hash);           // → ChainProvenanceRecord
+await chain.getDataRecord(hash);           // → ChainProvenanceRecord (includes storageRef)
+await chain.getDataHashByStorageRef(ref);  // → string | null (reverse lookup)
 
 // With wallet (browser)
 const signer = await fromEip1193Provider(window.ethereum);
 const chain = new ChainClient({ chain: 'base-sepolia', signer });
-await chain.anchor(swarmRef, 'dataset');   // → AnchorResult
+await chain.anchor(contentHash, 'dataset', swarmRef);  // → AnchorResult (with storageRef)
 await chain.recordAccess(swarmRef);        // → AccessResult
 
 // With private key (Node.js)
@@ -292,8 +317,8 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 ### Contract
 
 - **Contract**: DataProvenance on Base Sepolia
-- **Address**: `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a`
-- **Explorer**: https://sepolia.basescan.org/address/0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a
+- **Address**: `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`
+- **Explorer**: https://sepolia.basescan.org/address/0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322
 
 ### Methods
 
@@ -313,8 +338,9 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC connectivity |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
-| `anchor(hash, type)` | Write | Yes | Register hash on-chain |
-| `anchorFor(hash, type, owner)` | Write | Yes | Register on behalf of owner (operator) |
+| `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
+| `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |
+| `getDataHashByStorageRef(ref)` | Read | No | Reverse lookup: storage ref → data hash |
 | `recordAccess(hash)` | Write | Yes | Record access event |
 | `recordTransformation(orig, new, desc)` | Write | Yes | Record 1-to-1 data transformation |
 | `mergeTransform(sources, new, desc, type?)` | Write | Yes | Record N-to-1 merge transformation (v2) |

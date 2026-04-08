@@ -99,6 +99,113 @@ test.describe('Swarm Provenance Demo', () => {
   });
 });
 
+test.describe('Upload Mode Toggle', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+  });
+
+  test('shows content mode by default with text and file inputs', async ({ page }) => {
+    await expect(page.getByLabel('Content (base64 wrapped)')).toBeChecked();
+    await expect(page.locator('textarea')).toBeVisible();
+    await expect(page.locator('input[type="file"]')).toBeVisible();
+  });
+
+  test('switching to raw JSON mode shows JSON textarea', async ({ page }) => {
+    await page.getByLabel('Raw JSON (no wrapping)').click();
+
+    // JSON textarea should be visible with placeholder
+    const jsonTextarea = page.locator('textarea');
+    await expect(jsonTextarea).toBeVisible();
+    await expect(jsonTextarea).toHaveAttribute('placeholder', /file_hash/);
+
+    // File input should not be visible
+    await expect(page.locator('input[type="file"]')).not.toBeVisible();
+  });
+
+  test('upload button is disabled in raw mode when JSON is empty', async ({ page }) => {
+    await page.getByLabel('Raw JSON (no wrapping)').click();
+    const uploadButton = page.locator('button').filter({ hasText: 'Upload' });
+    await expect(uploadButton).toBeDisabled();
+  });
+
+  test('upload button is enabled in raw mode when JSON is entered', async ({ page }) => {
+    await page.getByLabel('Raw JSON (no wrapping)').click();
+    await page.locator('textarea').fill('{"test": true}');
+    const uploadButton = page.locator('button').filter({ hasText: 'Upload' });
+    await expect(uploadButton).toBeEnabled();
+  });
+});
+
+test.describe('Download Mode Toggle', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+  });
+
+  test('shows auto-detect mode by default', async ({ page }) => {
+    await expect(page.getByLabel('Auto-detect')).toBeChecked();
+  });
+
+  test('can switch to raw JSON document mode', async ({ page }) => {
+    await page.getByLabel('Raw JSON document').click();
+    await expect(page.getByLabel('Raw JSON document')).toBeChecked();
+  });
+});
+
+test.describe('Raw JSON Upload and Download Flow', () => {
+  test('full raw JSON upload and document download cycle', async ({ page }) => {
+    test.setTimeout(120000);
+
+    await page.goto('/');
+    await expect(page.getByText('Connected')).toBeVisible({ timeout: 15000 });
+
+    // Switch to raw JSON mode
+    await page.getByLabel('Raw JSON (no wrapping)').click();
+
+    // Enter JSON document
+    const testDoc = JSON.stringify({ file_hash: 'abc123', timestamp: Date.now() });
+    await page.locator('textarea').fill(testDoc);
+
+    // Upload
+    await page.locator('button').filter({ hasText: /Upload/ }).click();
+
+    // Wait for result
+    await page.waitForFunction(
+      () => document.body.innerText.includes('Upload Successful') || document.body.innerText.includes('Upload failed'),
+      { timeout: 60000 }
+    );
+
+    const uploadSuccess = await page.getByText('Upload Successful').isVisible();
+    if (!uploadSuccess) {
+      const errorText = await page.locator('.error').textContent();
+      throw new Error(`Raw upload failed: ${errorText}`);
+    }
+
+    // Should show raw mode indicator
+    await expect(page.getByText('Raw JSON (no base64 wrapping)')).toBeVisible();
+
+    // Download mode should auto-switch to document
+    await expect(page.getByLabel('Raw JSON document')).toBeChecked();
+
+    // Download
+    await page.locator('button').filter({ hasText: 'Download' }).click();
+
+    await page.waitForFunction(
+      () => document.body.innerText.includes('Document Download Successful') || document.body.innerText.includes('Download failed'),
+      { timeout: 60000 }
+    );
+
+    const downloadSuccess = await page.getByText('Document Download Successful').isVisible();
+    if (!downloadSuccess) {
+      const errorText = await page.locator('.download .error').textContent().catch(() => 'no error');
+      throw new Error(`Document download failed: ${errorText}`);
+    }
+
+    // Verify JSON document content is displayed
+    await expect(page.locator('pre')).toContainText('file_hash');
+    await expect(page.locator('pre')).toContainText('abc123');
+  });
+});
+
 test.describe('Error Handling', () => {
   test('download with invalid reference shows error', async ({ page }) => {
     await page.goto('/');

@@ -12,6 +12,9 @@ export type {
   DownloadOptions,
   UploadResult,
   DownloadResult,
+  DocumentMetadata,
+  DocumentUploadResult,
+  DocumentDownloadResult,
   ProvenanceMetadata,
   NotarySignature,
   SignedDocument,
@@ -35,8 +38,10 @@ export {
 // Utilities (for advanced use)
 export {
   buildMetadata,
+  buildDocumentMetadata,
   extractContent,
   verifyContentHash,
+  verifyDocumentHash,
   parseMetadata,
   serializeMetadata,
 } from './metadata.js';

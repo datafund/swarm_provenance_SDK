@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ProvenanceClient } from '../../src/client.js';
-import { GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
+import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
+import { sha256Hex, toBytes } from '../../src/utils.js';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -520,6 +521,311 @@ describe('ProvenanceClient', () => {
 
       const client = new ProvenanceClient();
       await expect(client.download('abcd1234'.repeat(8))).rejects.toThrow(GatewayConnectionError);
+    });
+  });
+
+  describe('upload raw mode (#89)', () => {
+    it('should upload raw JSON object without base64 wrapping', async () => {
+      // Mock upload (stampId provided, so no pool/acquire calls)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          reference: 'abcd1234'.repeat(8),
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const doc = { file_hash: 'abc123', filename: 'report.pdf' };
+      const result = await client.upload(doc, { raw: true, stampId: 'myStamp' });
+
+      expect(result.reference).toBe('abcd1234'.repeat(8));
+      expect(result.metadata.data).toEqual(doc);
+      expect(result.metadata.stamp_id).toBe('myStamp');
+      // content_hash should be SHA256 of JSON.stringify(doc)
+      const expectedHash = sha256Hex(toBytes(JSON.stringify(doc)));
+      expect(result.metadata.content_hash).toBe(expectedHash);
+    });
+
+    it('should upload raw JSON string', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          reference: 'abcd1234'.repeat(8),
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const doc = { key: 'value' };
+      const result = await client.upload(JSON.stringify(doc), { raw: true, stampId: 'myStamp' });
+
+      expect(result.metadata.data).toEqual(doc);
+    });
+
+    it('should throw on invalid JSON string in raw mode', async () => {
+      const client = new ProvenanceClient();
+      await expect(
+        client.upload('not valid json', { raw: true, stampId: 'myStamp' })
+      ).rejects.toThrow(ProvenanceError);
+    });
+
+    it('should include provenance standard in raw upload', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ reference: 'ref123'.padEnd(64, '0') }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.upload(
+        { data: 'test' },
+        { raw: true, stampId: 'myStamp', standard: 'provenance-v1' }
+      );
+
+      expect(result.metadata.provenance_standard).toBe('provenance-v1');
+    });
+
+    it('should acquire stamp from pool in raw mode when no stampId', async () => {
+      // Pool status
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          reserve_config: { '17': 1 },
+          current_levels: { '17': 5 },
+          available_stamps: {},
+          total_stamps: 5,
+          low_reserve_warning: false,
+          last_check: '2024-01-01T00:00:00Z',
+          next_check: '2024-01-01T01:00:00Z',
+          errors: [],
+        }),
+      });
+      // Acquire stamp
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          batch_id: 'poolStamp',
+          depth: 17,
+          size_name: 'small',
+          fallback_used: false,
+        }),
+      });
+      // Upload
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ reference: 'abcd1234'.repeat(8) }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.upload({ test: true }, { raw: true });
+
+      expect(result.metadata.stamp_id).toBe('poolStamp');
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('should reject Blob content in raw mode', async () => {
+      const client = new ProvenanceClient();
+      const blob = new Blob(['test']);
+      await expect(
+        client.upload(blob, { raw: true, stampId: 'myStamp' })
+      ).rejects.toThrow('Raw mode requires valid JSON string or plain object');
+    });
+
+    it('should reject Uint8Array content in raw mode', async () => {
+      const client = new ProvenanceClient();
+      await expect(
+        client.upload(new Uint8Array([1, 2, 3]), { raw: true, stampId: 'myStamp' })
+      ).rejects.toThrow('Raw mode requires valid JSON string or plain object');
+    });
+
+    it('should support notary signing in raw mode', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ reference: 'ref'.padEnd(64, '0') }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.upload(
+        { data: 'test' },
+        { raw: true, stampId: 'myStamp', sign: 'notary' }
+      );
+
+      expect(result.reference).toBe('ref'.padEnd(64, '0'));
+
+      // Verify the query string included sign=notary
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const callUrl = mockFetch.mock.calls[0][0] as string;
+      expect(callUrl).toContain('sign=notary');
+    });
+  });
+
+  describe('downloadDocument (#89)', () => {
+    it('should download raw JSON document (wrapped format)', async () => {
+      const doc = { file_hash: 'abc123', filename: 'test.txt' };
+      const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          metadata: {
+            data: doc,
+            content_hash: contentHash,
+            stamp_id: 'stamp123',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.downloadDocument('abcd1234'.repeat(8));
+
+      expect(result.document).toEqual(doc);
+      expect(result.metadata.content_hash).toBe(contentHash);
+      expect(result.metadata.stamp_id).toBe('stamp123');
+    });
+
+    it('should download raw JSON document (direct format)', async () => {
+      const doc = { file_hash: 'abc123' };
+      const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          data: doc,
+          content_hash: contentHash,
+          stamp_id: 'stamp123',
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.downloadDocument('abcd1234'.repeat(8));
+
+      expect(result.document).toEqual(doc);
+    });
+
+    it('should throw on content hash mismatch', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          metadata: {
+            data: { file_hash: 'abc' },
+            content_hash: 'wrong_hash',
+            stamp_id: 'stamp123',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.downloadDocument('abcd1234'.repeat(8))).rejects.toThrow(
+        'Content hash verification failed'
+      );
+    });
+
+    it('should include signatures when present', async () => {
+      const doc = { test: true };
+      const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          data: doc,
+          content_hash: contentHash,
+          stamp_id: 'stamp123',
+          signatures: [
+            {
+              type: 'notary',
+              signer: '0xNotary',
+              timestamp: '2024-01-01T00:00:00Z',
+              data_hash: 'somehash',
+              signature: '0xsig',
+              hashed_fields: ['data'],
+              signed_message_format: '{data_hash}|{timestamp}',
+            },
+          ],
+        }),
+      });
+
+      // Mock notary info
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          enabled: true,
+          available: true,
+          address: '0xNotary',
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.downloadDocument('abcd1234'.repeat(8));
+
+      expect(result.signatures).toHaveLength(1);
+    });
+
+    it('should include provenance_standard when present', async () => {
+      const doc = { test: true };
+      const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          metadata: {
+            data: doc,
+            content_hash: contentHash,
+            stamp_id: 'stamp123',
+            provenance_standard: 'prov-v1',
+          },
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.downloadDocument('abcd1234'.repeat(8));
+
+      expect(result.metadata.provenance_standard).toBe('prov-v1');
+    });
+
+    it('should skip signature verification when verify is false', async () => {
+      const doc = { test: true };
+      const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          data: doc,
+          content_hash: contentHash,
+          stamp_id: 'stamp123',
+          signatures: [
+            {
+              type: 'notary',
+              signer: '0xNotary',
+              timestamp: '2024-01-01T00:00:00Z',
+              data_hash: 'somehash',
+              signature: '0xsig',
+              hashed_fields: ['data'],
+              signed_message_format: '{data_hash}|{timestamp}',
+            },
+          ],
+        }),
+      });
+
+      const client = new ProvenanceClient();
+      const result = await client.downloadDocument('abcd1234'.repeat(8), { verify: false });
+
+      expect(result.signatures).toHaveLength(1);
+      expect(result.verified).toBeUndefined();
+      // Only 1 fetch call — no notary info lookup
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should throw on gateway error', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: () => Promise.resolve({ detail: 'Not found' }),
+      });
+
+      const client = new ProvenanceClient();
+      await expect(client.downloadDocument('abcd1234'.repeat(8))).rejects.toThrow(
+        GatewayConnectionError
+      );
     });
   });
 

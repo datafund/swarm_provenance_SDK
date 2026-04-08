@@ -46,3 +46,6 @@ export { BASE_SEPOLIA, BASE_MAINNET, CHAIN_PRESETS } from './constants.js';
 
 // Validation utilities
 export { normalizeHash } from './validation.js';
+
+// Contract encoding (advanced use)
+export { encodeGetDataHashByStorageRef, decodeGetDataHashByStorageRef } from './contract.js';

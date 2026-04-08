@@ -5,6 +5,8 @@ import {
   StampError,
   type UploadResult,
   type DownloadResult,
+  type DocumentUploadResult,
+  type DocumentDownloadResult,
   type NotaryInfo,
 } from '@datafund/swarm-provenance';
 import {
@@ -15,6 +17,7 @@ import {
   type ChainProvenanceRecord,
   type AnchorResult,
   type MergeTransformResult,
+  type TransformResult,
   type TransformationLink,
 } from '@datafund/swarm-provenance/chain';
 
@@ -39,15 +42,19 @@ function App() {
   // Upload state
   const [uploadText, setUploadText] = useState('');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadMode, setUploadMode] = useState<'content' | 'raw'>('content');
+  const [rawJsonText, setRawJsonText] = useState('');
   const [useNotary, setUseNotary] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadResult, setUploadResult] = useState<UploadResult | DocumentUploadResult | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Download state
   const [downloadRef, setDownloadRef] = useState('');
+  const [downloadMode, setDownloadMode] = useState<'auto' | 'document'>('auto');
   const [downloading, setDownloading] = useState(false);
   const [downloadResult, setDownloadResult] = useState<DownloadResult | null>(null);
+  const [docDownloadResult, setDocDownloadResult] = useState<DocumentDownloadResult | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Chain state
@@ -59,7 +66,9 @@ function App() {
   const [connecting, setConnecting] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [anchorHash, setAnchorHash] = useState('');
+  const [anchorHashSource, setAnchorHashSource] = useState<'content' | 'swarm'>('content');
   const [anchorType, setAnchorType] = useState('dataset');
+  const [anchorStorageRef, setAnchorStorageRef] = useState('');
   const [anchoring, setAnchoring] = useState(false);
   const [anchorResult, setAnchorResult] = useState<AnchorResult | null>(null);
   const [anchorError, setAnchorError] = useState<string | null>(null);
@@ -72,14 +81,14 @@ function App() {
   // Wallet balance
   const [walletBalance, setWalletBalance] = useState<string | null>(null);
 
-  // Merge transform state
-  const [mergeSourceHashes, setMergeSourceHashes] = useState<string[]>(['', '']);
-  const [mergeNewHash, setMergeNewHash] = useState('');
-  const [mergeDescription, setMergeDescription] = useState('');
-  const [mergeDataType, setMergeDataType] = useState('merged');
-  const [merging, setMerging] = useState(false);
-  const [mergeResult, setMergeResult] = useState<MergeTransformResult | null>(null);
-  const [mergeError, setMergeError] = useState<string | null>(null);
+  // Transform state
+  const [transformSourceHashes, setTransformSourceHashes] = useState<string[]>(['']);
+  const [transformNewHash, setTransformNewHash] = useState('');
+  const [transformDescription, setTransformDescription] = useState('');
+  const [transformDataType, setTransformDataType] = useState('dataset');
+  const [transforming, setTransforming] = useState(false);
+  const [transformResult, setTransformResult] = useState<TransformResult | MergeTransformResult | null>(null);
+  const [transformError, setTransformError] = useState<string | null>(null);
 
   // Provenance chain state
   const [chainTraceHash, setChainTraceHash] = useState('');
@@ -106,20 +115,41 @@ function App() {
     setUploadResult(null);
 
     try {
-      const content = uploadFile || uploadText;
-      if (!content) {
-        throw new Error('Please enter text or select a file');
+      if (uploadMode === 'raw') {
+        if (!rawJsonText.trim()) {
+          throw new Error('Please enter JSON to upload');
+        }
+        const result = await client.upload(rawJsonText, {
+          raw: true,
+          sign: useNotary ? 'notary' : undefined,
+          standard: 'demo-v1',
+        });
+        setUploadResult(result);
+        setDownloadRef(result.reference);
+        setDownloadMode('document');
+        setAnchorHash(anchorHashSource === 'swarm' ? result.reference : result.metadata.content_hash);
+        // Auto-populate storageRef with the Swarm reference when anchoring content hash
+        if (anchorHashSource === 'content') {
+          setAnchorStorageRef(result.reference);
+        }
+      } else {
+        const content = uploadFile || uploadText;
+        if (!content) {
+          throw new Error('Please enter text or select a file');
+        }
+        const result = await client.upload(content, {
+          sign: useNotary ? 'notary' : undefined,
+          standard: 'demo-v1',
+        });
+        setUploadResult(result);
+        setDownloadRef(result.reference);
+        setDownloadMode('auto');
+        setAnchorHash(anchorHashSource === 'swarm' ? result.reference : result.metadata.content_hash);
+        // Auto-populate storageRef with the Swarm reference when anchoring content hash
+        if (anchorHashSource === 'content') {
+          setAnchorStorageRef(result.reference);
+        }
       }
-
-      const result = await client.upload(content, {
-        sign: useNotary ? 'notary' : undefined,
-        standard: 'demo-v1',
-      });
-
-      setUploadResult(result);
-      setDownloadRef(result.reference);
-      // Auto-populate anchor hash with the content hash
-      setAnchorHash(result.metadata.content_hash);
     } catch (err) {
       if (err instanceof GatewayConnectionError && err.suggestion) {
         setUploadError(`${err.message}. ${err.suggestion}`);
@@ -137,14 +167,31 @@ function App() {
     setDownloading(true);
     setDownloadError(null);
     setDownloadResult(null);
+    setDocDownloadResult(null);
 
     try {
       if (!downloadRef.trim()) {
         throw new Error('Please enter a reference');
       }
 
-      const result = await client.download(downloadRef.trim());
-      setDownloadResult(result);
+      if (downloadMode === 'document') {
+        const result = await client.downloadDocument(downloadRef.trim());
+        setDocDownloadResult(result);
+      } else {
+        // Auto mode: try standard download first, fall back to document
+        try {
+          const result = await client.download(downloadRef.trim());
+          setDownloadResult(result);
+        } catch (downloadErr) {
+          // If content hash mismatch (likely raw JSON), try document download
+          if (downloadErr instanceof Error && downloadErr.message.includes('Content hash')) {
+            const result = await client.downloadDocument(downloadRef.trim());
+            setDocDownloadResult(result);
+          } else {
+            throw downloadErr;
+          }
+        }
+      }
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : 'Download failed');
     } finally {
@@ -272,11 +319,15 @@ function App() {
 
     try {
       if (!anchorHash.trim()) {
-        throw new Error('Please enter a data hash to anchor');
+        throw new Error('Please enter a Content SHA256 to anchor');
       }
-      console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType);
+      console.log('[anchor] Starting anchor:', anchorHash.trim(), anchorType, anchorStorageRef || '(no storageRef)');
       console.log('[anchor] Chain preset:', chainPreset);
-      const result = await chainClient.anchor(anchorHash.trim(), anchorType);
+      const result = await chainClient.anchor(
+        anchorHash.trim(),
+        anchorType,
+        anchorStorageRef.trim() || undefined,
+      );
       console.log('[anchor] Success:', result);
       setAnchorResult(result);
       // Auto-populate verify hash
@@ -297,7 +348,7 @@ function App() {
 
     try {
       if (!verifyHash.trim()) {
-        throw new Error('Please enter a hash to verify');
+        throw new Error('Please enter a Content SHA256 to verify');
       }
       // Read-only client - uses same chain as connected wallet (or base-sepolia default)
       const readClient = new ChainClient({ chain: chainPreset });
@@ -314,35 +365,46 @@ function App() {
     }
   };
 
-  const handleMergeTransform = async () => {
+  const handleTransform = async () => {
     if (!chainClient) return;
-    setMerging(true);
-    setMergeError(null);
-    setMergeResult(null);
+    setTransforming(true);
+    setTransformError(null);
+    setTransformResult(null);
 
     try {
-      const sources = mergeSourceHashes.filter((h) => h.trim());
-      if (sources.length < 2) {
-        throw new Error('At least 2 source hashes are required');
+      const sources = transformSourceHashes.filter((h) => h.trim());
+      if (sources.length < 1) {
+        throw new Error('At least 1 source hash is required');
       }
-      if (!mergeNewHash.trim()) {
-        throw new Error('Please enter the resulting merged hash');
+      if (!transformNewHash.trim()) {
+        throw new Error('Please enter the resulting hash');
       }
-      if (!mergeDescription.trim()) {
+      if (!transformDescription.trim()) {
         throw new Error('Please enter a description');
       }
 
-      const result = await chainClient.mergeTransform(
-        sources,
-        mergeNewHash.trim(),
-        mergeDescription.trim(),
-        mergeDataType.trim() || 'merged',
-      );
-      setMergeResult(result);
+      if (sources.length === 1) {
+        // 1-to-1 transformation
+        const result = await chainClient.recordTransformation(
+          sources[0],
+          transformNewHash.trim(),
+          transformDescription.trim(),
+        );
+        setTransformResult(result);
+      } else {
+        // N-to-1 merge transformation
+        const result = await chainClient.mergeTransform(
+          sources,
+          transformNewHash.trim(),
+          transformDescription.trim(),
+          transformDataType.trim() || 'dataset',
+        );
+        setTransformResult(result);
+      }
     } catch (err) {
-      setMergeError(err instanceof Error ? err.message : 'Merge transform failed');
+      setTransformError(err instanceof Error ? err.message : 'Transform failed');
     } finally {
-      setMerging(false);
+      setTransforming(false);
     }
   };
 
@@ -353,7 +415,7 @@ function App() {
 
     try {
       if (!chainTraceHash.trim()) {
-        throw new Error('Please enter a hash to trace');
+        throw new Error('Please enter a Content SHA256 to trace');
       }
       const readClient = new ChainClient({ chain: chainPreset });
       const chain = await readClient.getProvenanceChain(chainTraceHash.trim());
@@ -425,28 +487,67 @@ function App() {
         <h2>Upload</h2>
 
         <div className="input-group">
-          <label>Text content:</label>
-          <textarea
-            value={uploadText}
-            onChange={(e) => setUploadText(e.target.value)}
-            placeholder="Enter text to upload..."
-            rows={4}
-            disabled={!!uploadFile}
-          />
+          <label>Upload mode:</label>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <label>
+              <input
+                type="radio"
+                name="uploadMode"
+                checked={uploadMode === 'content'}
+                onChange={() => setUploadMode('content')}
+              />{' '}
+              Content (base64 wrapped)
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="uploadMode"
+                checked={uploadMode === 'raw'}
+                onChange={() => setUploadMode('raw')}
+              />{' '}
+              Raw JSON (no wrapping)
+            </label>
+          </div>
         </div>
 
-        <div className="input-group">
-          <label>Or select a file:</label>
-          <input
-            type="file"
-            onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-          />
-          {uploadFile && (
-            <button className="small" onClick={() => setUploadFile(null)}>
-              Clear
-            </button>
-          )}
-        </div>
+        {uploadMode === 'content' ? (
+          <>
+            <div className="input-group">
+              <label>Text content:</label>
+              <textarea
+                value={uploadText}
+                onChange={(e) => setUploadText(e.target.value)}
+                placeholder="Enter text to upload..."
+                rows={4}
+                disabled={!!uploadFile}
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Or select a file:</label>
+              <input
+                type="file"
+                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+              />
+              {uploadFile && (
+                <button className="small" onClick={() => setUploadFile(null)}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="input-group">
+            <label>JSON document:</label>
+            <textarea
+              value={rawJsonText}
+              onChange={(e) => setRawJsonText(e.target.value)}
+              placeholder={'{\n  "file_hash": "abc123...",\n  "filename": "report.pdf"\n}'}
+              rows={6}
+              style={{ fontFamily: 'monospace' }}
+            />
+          </div>
+        )}
 
         {notaryInfo?.available && (
           <div className="input-group checkbox">
@@ -456,12 +557,15 @@ function App() {
                 checked={useNotary}
                 onChange={(e) => setUseNotary(e.target.checked)}
               />
-              Sign with Notary
+              Sign with gateway notary
             </label>
           </div>
         )}
 
-        <button onClick={handleUpload} disabled={uploading || (!uploadText && !uploadFile)}>
+        <button
+          onClick={handleUpload}
+          disabled={uploading || (uploadMode === 'content' ? (!uploadText && !uploadFile) : !rawJsonText.trim())}
+        >
           {uploading ? 'Uploading...' : 'Upload'}
         </button>
 
@@ -471,15 +575,22 @@ function App() {
           <div className="result">
             <h3>Upload Successful</h3>
             <p>
-              <strong>Reference:</strong>
+              <strong>Swarm reference:</strong>
               <code>{uploadResult.reference}</code>
             </p>
             <p>
-              <strong>Content Hash:</strong>
+              <strong>Content SHA256:</strong>
               <code>{uploadResult.metadata.content_hash}</code>
             </p>
+            <p>
+              <strong>Swarm stamp ID:</strong>
+              <code>{uploadResult.metadata.stamp_id}</code>
+            </p>
+            {uploadMode === 'raw' && (
+              <p><strong>Mode:</strong> Raw JSON (no base64 wrapping)</p>
+            )}
             {useNotary && (
-              <p className="success">Signed by notary</p>
+              <p className="success">Signed by gateway notary</p>
             )}
           </div>
         )}
@@ -490,13 +601,37 @@ function App() {
         <h2>Download</h2>
 
         <div className="input-group">
-          <label>Reference:</label>
+          <label>Swarm reference:</label>
           <input
             type="text"
             value={downloadRef}
             onChange={(e) => setDownloadRef(e.target.value)}
             placeholder="Enter Swarm reference (64 hex chars)..."
           />
+        </div>
+
+        <div className="input-group">
+          <label>Download mode:</label>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <label>
+              <input
+                type="radio"
+                name="downloadMode"
+                checked={downloadMode === 'auto'}
+                onChange={() => setDownloadMode('auto')}
+              />{' '}
+              Auto-detect
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="downloadMode"
+                checked={downloadMode === 'document'}
+                onChange={() => setDownloadMode('document')}
+              />{' '}
+              Raw JSON document
+            </label>
+          </div>
         </div>
 
         <button onClick={handleDownload} disabled={downloading || !downloadRef.trim()}>
@@ -509,11 +644,11 @@ function App() {
           <div className="result">
             <h3>Download Successful</h3>
             <p>
-              <strong>Content Hash:</strong>
+              <strong>Content SHA256:</strong>
               <code>{downloadResult.metadata.content_hash}</code>
             </p>
             <p>
-              <strong>Stamp ID:</strong>
+              <strong>Swarm stamp ID:</strong>
               <code>{downloadResult.metadata.stamp_id}</code>
             </p>
             {downloadResult.metadata.provenance_standard && (
@@ -562,11 +697,11 @@ function App() {
                       <span className="value">{sig.type}</span>
                     </div>
                     <div className="detail-row">
-                      <span className="label">Timestamp:</span>
+                      <span className="label">Gateway notary timestamp:</span>
                       <span className="value">{new Date(sig.timestamp).toLocaleString()}</span>
                     </div>
                     <div className="detail-row">
-                      <span className="label">Data Hash:</span>
+                      <span className="label">Signed fields hash (SHA256):</span>
                       <code className="value small">{sig.data_hash}</code>
                     </div>
                   </div>
@@ -579,13 +714,67 @@ function App() {
             </div>
           </div>
         )}
+
+        {docDownloadResult && (
+          <div className="result">
+            <h3>Document Download Successful</h3>
+            <p>
+              <strong>Content SHA256:</strong>
+              <code>{docDownloadResult.metadata.content_hash}</code>
+            </p>
+            <p>
+              <strong>Swarm stamp ID:</strong>
+              <code>{docDownloadResult.metadata.stamp_id}</code>
+            </p>
+            <p><strong>Mode:</strong> Raw JSON document</p>
+            {docDownloadResult.metadata.provenance_standard && (
+              <p>
+                <strong>Standard:</strong> {docDownloadResult.metadata.provenance_standard}
+              </p>
+            )}
+            {docDownloadResult.signatures && docDownloadResult.signatures.length > 0 && (
+              <div className={`signature-section ${docDownloadResult.verified ? 'verified' : 'failed'}`}>
+                <h4>Notary Signature</h4>
+                <div className="verification-status">
+                  {docDownloadResult.verified ? (
+                    <div className="status-badge success">
+                      <span className="icon">✓</span>
+                      <span>Signature Verified</span>
+                    </div>
+                  ) : (
+                    <div className="status-badge error">
+                      <span className="icon">✗</span>
+                      <span>Verification Failed</span>
+                    </div>
+                  )}
+                </div>
+                {docDownloadResult.signatures.map((sig, index) => (
+                  <div key={index} className="signature-details">
+                    <div className="detail-row">
+                      <span className="label">Signer:</span>
+                      <code className="value">{sig.signer}</code>
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Timestamp:</span>
+                      <span className="value">{new Date(sig.timestamp).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="content-preview">
+              <strong>Document:</strong>
+              <pre>{JSON.stringify(docDownloadResult.document, null, 2)}</pre>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Chain Anchoring Section */}
       <section className="chain">
         <h2>Blockchain Anchoring</h2>
         <p className="section-description">
-          Anchor data hashes on the DataProvenance contract for immutable on-chain provenance.
+          Anchor content hashes on the blockchain for immutable on-chain provenance.
         </p>
 
         {/* Wallet Connection */}
@@ -610,21 +799,42 @@ function App() {
                 ({parseFloat(walletBalance).toFixed(4)} ETH)
               </span>
             )}
+            <button
+              className="small"
+              style={{ marginLeft: 12 }}
+              onClick={() => {
+                setWalletAddress(null);
+                setChainClient(null);
+                setChainName(null);
+                setWrongChain(false);
+                setWalletBalance(null);
+                setAnchorResult(null);
+                setAnchorError(null);
+                setVerifyRecord(null);
+                setVerifyError(null);
+              }}
+            >
+              Disconnect
+            </button>
           </div>
         )}
 
-        {/* Wrong chain warning */}
-        {walletAddress && wrongChain && (
-          <div className="chain-switch">
-            <p className="warning">
-              Please switch to a supported network:
-            </p>
-            <button className="small" onClick={() => handleSwitchChain(31337)} disabled={switching}>
-              {switching ? 'Switching...' : 'Switch to Hardhat (local)'}
-            </button>
-            <button className="small" onClick={() => handleSwitchChain(84532)} disabled={switching}>
-              {switching ? 'Switching...' : 'Switch to Base Sepolia'}
-            </button>
+        {/* Chain switch buttons */}
+        {walletAddress && (
+          <div className="chain-switch" style={{ marginTop: 8 }}>
+            {wrongChain && (
+              <p className="warning">
+                Please switch to a supported network:
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="small" onClick={() => handleSwitchChain(31337)} disabled={switching}>
+                {switching ? 'Switching...' : 'Hardhat (local)'}
+              </button>
+              <button className="small" onClick={() => handleSwitchChain(84532)} disabled={switching}>
+                {switching ? 'Switching...' : 'Base Sepolia'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -633,7 +843,36 @@ function App() {
           <>
             <h3>Anchor Data</h3>
             <div className="input-group">
-              <label>Data Hash (SHA256):</label>
+              <label>What to anchor:</label>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <label>
+                  <input
+                    type="radio"
+                    name="anchorSource"
+                    checked={anchorHashSource === 'content'}
+                    onChange={() => {
+                      setAnchorHashSource('content');
+                      if (uploadResult) setAnchorHash(uploadResult.metadata.content_hash);
+                    }}
+                  />{' '}
+                  Content SHA256
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="anchorSource"
+                    checked={anchorHashSource === 'swarm'}
+                    onChange={() => {
+                      setAnchorHashSource('swarm');
+                      if (uploadResult) setAnchorHash(uploadResult.reference);
+                    }}
+                  />{' '}
+                  Swarm reference
+                </label>
+              </div>
+            </div>
+            <div className="input-group">
+              <label>{anchorHashSource === 'swarm' ? 'Swarm reference' : 'Content SHA256'}:</label>
               <input
                 type="text"
                 value={anchorHash}
@@ -643,12 +882,22 @@ function App() {
             </div>
 
             <div className="input-group">
-              <label>Data Type:</label>
+              <label>Data type:</label>
               <input
                 type="text"
                 value={anchorType}
                 onChange={(e) => setAnchorType(e.target.value)}
                 placeholder="e.g. dataset, model, document"
+              />
+            </div>
+
+            <div className="input-group">
+              <label>Storage reference (optional):</label>
+              <input
+                type="text"
+                value={anchorStorageRef}
+                onChange={(e) => setAnchorStorageRef(e.target.value)}
+                placeholder="Swarm reference for bidirectional lookup (auto-populated after upload)"
               />
             </div>
 
@@ -664,30 +913,36 @@ function App() {
           <div className="result">
             <h3>Anchored Successfully</h3>
             <div className="detail-row">
-              <span className="label">Tx Hash:</span>
+              <span className="label">Blockchain tx hash:</span>
               <a href={anchorResult.explorerUrl} target="_blank" rel="noopener noreferrer">
                 <code className="value">{anchorResult.txHash.slice(0, 10)}...{anchorResult.txHash.slice(-8)}</code>
               </a>
             </div>
             <div className="detail-row">
-              <span className="label">Block:</span>
+              <span className="label">Blockchain block:</span>
               <span className="value">{anchorResult.blockNumber}</span>
             </div>
             <div className="detail-row">
-              <span className="label">Gas Used:</span>
+              <span className="label">Gas used:</span>
               <span className="value">{anchorResult.gasUsed.toString()}</span>
             </div>
             <div className="detail-row">
-              <span className="label">Owner:</span>
+              <span className="label">Owner address:</span>
               <code className="value">{anchorResult.owner}</code>
             </div>
+            {anchorResult.storageRef && (
+              <div className="detail-row">
+                <span className="label">Storage reference:</span>
+                <code className="value">{anchorResult.storageRef}</code>
+              </div>
+            )}
           </div>
         )}
 
         {/* Verify On-Chain */}
         <h3>Verify On-Chain</h3>
         <div className="input-group">
-          <label>Data Hash to verify:</label>
+          <label>Content SHA256 to verify:</label>
           <input
             type="text"
             value={verifyHash}
@@ -712,11 +967,11 @@ function App() {
           <div className="result">
             <h3>On-Chain Record</h3>
             <div className="detail-row">
-              <span className="label">Owner:</span>
+              <span className="label">Owner address:</span>
               <code className="value">{verifyRecord.owner}</code>
             </div>
             <div className="detail-row">
-              <span className="label">Data Type:</span>
+              <span className="label">Data type:</span>
               <span className="value">{verifyRecord.dataType}</span>
             </div>
             <div className="detail-row">
@@ -726,7 +981,7 @@ function App() {
               </span>
             </div>
             <div className="detail-row">
-              <span className="label">Registered:</span>
+              <span className="label">Blockchain timestamp:</span>
               <span className="value">{new Date(verifyRecord.timestamp * 1000).toLocaleString()}</span>
             </div>
             {verifyRecord.accessors.length > 0 && (
@@ -754,34 +1009,35 @@ function App() {
           </div>
         )}
 
-        {/* Merge Transform */}
+        {/* Record Transformation */}
         {walletAddress && !wrongChain && (
           <>
-            <h3>Merge Transform</h3>
+            <h3>Record Transformation</h3>
             <p className="section-description">
-              Combine multiple source data hashes into a single merged result (v2 contract feature).
+              Record how data was derived from existing data. Use one source for a simple transformation
+              (e.g. filtering, anonymizing) or multiple sources for a merge (e.g. combining datasets).
             </p>
 
-            {mergeSourceHashes.map((hash, i) => (
+            {transformSourceHashes.map((hash, i) => (
               <div key={i} className="input-group" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <div style={{ flex: 1 }}>
-                  <label>Source Hash {i + 1}:</label>
+                  <label>Source Content SHA256 {transformSourceHashes.length > 1 ? `#${i + 1}` : ''}:</label>
                   <input
                     type="text"
                     value={hash}
                     onChange={(e) => {
-                      const updated = [...mergeSourceHashes];
+                      const updated = [...transformSourceHashes];
                       updated[i] = e.target.value;
-                      setMergeSourceHashes(updated);
+                      setTransformSourceHashes(updated);
                     }}
-                    placeholder="Source data hash (hex)"
+                    placeholder="Content SHA256 of source data (hex)"
                   />
                 </div>
-                {mergeSourceHashes.length > 2 && (
+                {transformSourceHashes.length > 1 && (
                   <button
                     className="small"
                     style={{ marginTop: 20 }}
-                    onClick={() => setMergeSourceHashes(mergeSourceHashes.filter((_, j) => j !== i))}
+                    onClick={() => setTransformSourceHashes(transformSourceHashes.filter((_, j) => j !== i))}
                   >
                     Remove
                   </button>
@@ -789,23 +1045,23 @@ function App() {
               </div>
             ))}
 
-            {mergeSourceHashes.length < 10 && (
+            {transformSourceHashes.length < 10 && (
               <button
                 className="small"
                 style={{ marginBottom: 12, marginLeft: 0 }}
-                onClick={() => setMergeSourceHashes([...mergeSourceHashes, ''])}
+                onClick={() => setTransformSourceHashes([...transformSourceHashes, ''])}
               >
-                + Add Source
+                + Add source (merge)
               </button>
             )}
 
             <div className="input-group">
-              <label>New Merged Hash:</label>
+              <label>Result Content SHA256:</label>
               <input
                 type="text"
-                value={mergeNewHash}
-                onChange={(e) => setMergeNewHash(e.target.value)}
-                placeholder="Merged result hash (hex)"
+                value={transformNewHash}
+                onChange={(e) => setTransformNewHash(e.target.value)}
+                placeholder="Content SHA256 of resulting data (hex)"
               />
             </div>
 
@@ -813,53 +1069,57 @@ function App() {
               <label>Description:</label>
               <input
                 type="text"
-                value={mergeDescription}
-                onChange={(e) => setMergeDescription(e.target.value)}
-                placeholder="e.g. Merged datasets A and B"
+                value={transformDescription}
+                onChange={(e) => setTransformDescription(e.target.value)}
+                placeholder="e.g. Filtered PII from dataset"
               />
             </div>
 
-            <div className="input-group">
-              <label>Data Type:</label>
-              <input
-                type="text"
-                value={mergeDataType}
-                onChange={(e) => setMergeDataType(e.target.value)}
-                placeholder="e.g. merged, dataset"
-              />
-            </div>
+            {transformSourceHashes.filter((h) => h.trim()).length > 1 && (
+              <div className="input-group">
+                <label>Data type:</label>
+                <input
+                  type="text"
+                  value={transformDataType}
+                  onChange={(e) => setTransformDataType(e.target.value)}
+                  placeholder="e.g. dataset, model"
+                />
+              </div>
+            )}
 
             <button
-              onClick={handleMergeTransform}
-              disabled={merging || mergeSourceHashes.filter((h) => h.trim()).length < 2 || !mergeNewHash.trim() || !mergeDescription.trim()}
+              onClick={handleTransform}
+              disabled={transforming || transformSourceHashes.filter((h) => h.trim()).length < 1 || !transformNewHash.trim() || !transformDescription.trim()}
             >
-              {merging ? 'Merging...' : 'Merge Transform'}
+              {transforming ? 'Recording...' : transformSourceHashes.filter((h) => h.trim()).length > 1 ? 'Record Merge Transform' : 'Record Transformation'}
             </button>
           </>
         )}
 
-        {mergeError && <p className="error">{mergeError}</p>}
+        {transformError && <p className="error">{transformError}</p>}
 
-        {mergeResult && (
+        {transformResult && (
           <div className="result">
-            <h3>Merge Successful</h3>
+            <h3>Transformation Recorded</h3>
             <div className="detail-row">
-              <span className="label">Tx Hash:</span>
-              <a href={mergeResult.explorerUrl} target="_blank" rel="noopener noreferrer">
-                <code className="value">{mergeResult.txHash.slice(0, 10)}...{mergeResult.txHash.slice(-8)}</code>
+              <span className="label">Blockchain tx hash:</span>
+              <a href={transformResult.explorerUrl} target="_blank" rel="noopener noreferrer">
+                <code className="value">{transformResult.txHash.slice(0, 10)}...{transformResult.txHash.slice(-8)}</code>
               </a>
             </div>
+            {'sourceHashes' in transformResult && (
+              <div className="detail-row">
+                <span className="label">Sources:</span>
+                <span className="value">{(transformResult as MergeTransformResult).sourceHashes.length} hashes merged</span>
+              </div>
+            )}
             <div className="detail-row">
-              <span className="label">Sources:</span>
-              <span className="value">{mergeResult.sourceHashes.length} hashes merged</span>
+              <span className="label">Result Content SHA256:</span>
+              <code className="value small">{transformResult.newHash}</code>
             </div>
             <div className="detail-row">
-              <span className="label">Result:</span>
-              <code className="value small">{mergeResult.newHash}</code>
-            </div>
-            <div className="detail-row">
-              <span className="label">Gas Used:</span>
-              <span className="value">{mergeResult.gasUsed.toString()}</span>
+              <span className="label">Gas used:</span>
+              <span className="value">{transformResult.gasUsed.toString()}</span>
             </div>
           </div>
         )}
@@ -867,16 +1127,16 @@ function App() {
         {/* Provenance Chain Traversal */}
         <h3>Provenance Chain</h3>
         <p className="section-description">
-          Trace the full lineage of a data hash — ancestors and descendants.
+          Trace the full lineage of a content hash — ancestors and descendants.
         </p>
 
         <div className="input-group">
-          <label>Data Hash to trace:</label>
+          <label>Content SHA256 to trace:</label>
           <input
             type="text"
             value={chainTraceHash}
             onChange={(e) => setChainTraceHash(e.target.value)}
-            placeholder="Hash to trace lineage"
+            placeholder="Content SHA256 to trace lineage"
           />
         </div>
 
@@ -893,15 +1153,15 @@ function App() {
             {provenanceChain.map((record, i) => (
               <div key={i} className="chain-record">
                 <div className="detail-row">
-                  <span className="label">Hash:</span>
+                  <span className="label">Content SHA256:</span>
                   <code className="value small">{record.dataHash}</code>
                 </div>
                 <div className="detail-row">
-                  <span className="label">Type:</span>
+                  <span className="label">Data type:</span>
                   <span className="value">{record.dataType}</span>
                 </div>
                 <div className="detail-row">
-                  <span className="label">Owner:</span>
+                  <span className="label">Owner address:</span>
                   <code className="value">{record.owner.slice(0, 6)}...{record.owner.slice(-4)}</code>
                 </div>
                 <div className="detail-row">

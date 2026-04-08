@@ -1,11 +1,11 @@
 import type { ChainPreset } from './types.js';
 
-/** Base Sepolia testnet preset (v2 contract) */
+/** Base Sepolia testnet preset (v3 contract with storageRef support) */
 export const BASE_SEPOLIA: ChainPreset = {
   chainId: 84532,
   name: 'base-sepolia',
   rpcUrl: 'https://sepolia.base.org',
-  contractAddress: '0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a',
+  contractAddress: '0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322',
   explorerUrl: 'https://sepolia.basescan.org',
 };
 

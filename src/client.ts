@@ -7,6 +7,9 @@ import type {
   DownloadOptions,
   UploadResult,
   DownloadResult,
+  DocumentUploadResult,
+  DocumentDownloadResult,
+  DocumentMetadata,
   NotaryInfo,
   PoolStatus,
   AcquiredStamp,
@@ -25,7 +28,7 @@ import {
   NotaryError,
   PaymentRateLimitError,
 } from './errors.js';
-import { buildMetadata, extractContent, verifyContentHash } from './metadata.js';
+import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { toBytes } from './utils.js';
 import { createX402Fetch } from './payment.js';
@@ -164,31 +167,30 @@ export class ProvenanceClient {
   }
 
   /**
-   * Upload provenance data to Swarm
+   * Upload provenance data to Swarm.
+   *
+   * By default, content is base64-encoded and wrapped in ProvenanceMetadata.
+   * With `options.raw = true`, content is uploaded as raw JSON without base64 wrapping.
+   * In raw mode, content must be a JSON string or a plain object — the `data` field
+   * will contain the structured document directly.
    */
   async upload(
+    content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
+    options: UploadOptions & { raw: true }
+  ): Promise<DocumentUploadResult>;
+  async upload(
     content: Uint8Array | ArrayBuffer | string | File | Blob,
+    options?: UploadOptions
+  ): Promise<UploadResult>;
+  async upload(
+    content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
     options: UploadOptions = {}
-  ): Promise<UploadResult> {
+  ): Promise<UploadResult | DocumentUploadResult> {
     // Get stamp - either from options or acquire from pool
-    let stampId = options.stampId;
-    if (!stampId) {
-      // Pre-check pool availability to fail fast
-      try {
-        const status = await this.poolStatus();
-        if (status.enabled && status.totalStamps === 0) {
-          throw new StampError(
-            'Stamp pool is empty — no stamps available for any size',
-            'POOL_EXHAUSTED',
-          );
-        }
-      } catch (error) {
-        if (error instanceof StampError) throw error;
-        // Pool status check failed — proceed with acquire anyway
-      }
+    const stampId = await this.resolveStampId(options);
 
-      const stamp = await this.acquireStamp(options.poolSize ?? 'small');
-      stampId = stamp.batchId;
+    if (options.raw) {
+      return this.uploadRawDocument(content as string | Record<string, unknown>, stampId, options);
     }
 
     // Convert content to bytes
@@ -197,7 +199,7 @@ export class ProvenanceClient {
       const buffer = await content.arrayBuffer();
       bytes = new Uint8Array(buffer);
     } else {
-      bytes = toBytes(content);
+      bytes = toBytes(content as Uint8Array | ArrayBuffer | string);
     }
 
     // Build metadata
@@ -207,6 +209,161 @@ export class ProvenanceClient {
     }
     const metadata = buildMetadata(bytes, metadataOptions);
 
+    const data = await this.postMetadata(JSON.stringify(metadata), stampId, options);
+
+    return {
+      reference: data.reference,
+      metadata,
+    };
+  }
+
+  /**
+   * Download a raw JSON document from Swarm.
+   * Use this for documents uploaded with `raw: true` where the `data` field
+   * contains structured JSON instead of base64-encoded content.
+   */
+  async downloadDocument(reference: string, options: DownloadOptions = {}): Promise<DocumentDownloadResult> {
+    const response = await this.fetch(`/api/v1/data/${reference}`);
+
+    if (!response.ok) {
+      throw await this.handleError(response);
+    }
+
+    const raw = (await response.json()) as Record<string, unknown>;
+
+    let documentData: Record<string, unknown>;
+    let contentHash: string;
+    let stampId: string;
+    let provenanceStandard: string | undefined;
+    let signatures: NotarySignature[] | undefined;
+
+    if (raw['metadata'] && typeof raw['metadata'] === 'object') {
+      // Wrapped format: {metadata: {...}, signatures: [...]}
+      const meta = raw['metadata'] as Record<string, unknown>;
+      documentData = meta['data'] as Record<string, unknown>;
+      contentHash = meta['content_hash'] as string;
+      stampId = meta['stamp_id'] as string;
+      provenanceStandard = meta['provenance_standard'] as string | undefined;
+      signatures = raw['signatures'] as NotarySignature[] | undefined;
+    } else {
+      // Direct format: {data: {...}, content_hash: "...", stamp_id: "...", ...}
+      documentData = raw['data'] as Record<string, unknown>;
+      contentHash = raw['content_hash'] as string;
+      stampId = raw['stamp_id'] as string;
+      provenanceStandard = raw['provenance_standard'] as string | undefined;
+      if (raw['signatures'] && Array.isArray(raw['signatures'])) {
+        signatures = raw['signatures'] as NotarySignature[];
+      }
+    }
+
+    const metadata: DocumentMetadata = {
+      data: documentData,
+      content_hash: contentHash,
+      stamp_id: stampId,
+    };
+    if (provenanceStandard !== undefined) {
+      metadata.provenance_standard = provenanceStandard;
+    }
+
+    // Verify content hash
+    if (!verifyDocumentHash(metadata)) {
+      throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
+    }
+
+    const result: DocumentDownloadResult = {
+      document: documentData,
+      metadata,
+    };
+    if (signatures !== undefined) {
+      result.signatures = signatures;
+    }
+
+    // Verify signatures if present and requested
+    if (signatures && signatures.length > 0) {
+      const shouldVerify = options.verify !== false;
+      if (shouldVerify) {
+        const notary = await this.notaryInfo();
+        // For document metadata, create a compatible metadata for signature verification
+        const sigMetadata: ProvenanceMetadata = {
+          data: JSON.stringify(documentData),
+          content_hash: contentHash,
+          stamp_id: stampId,
+        };
+        const verification = verifyAllSignatures(signatures, sigMetadata, notary.address);
+        result.verified = verification.allValid;
+      }
+    }
+
+    return result;
+  }
+
+  private async resolveStampId(options: UploadOptions): Promise<string> {
+    if (options.stampId) {
+      return options.stampId;
+    }
+
+    // Pre-check pool availability to fail fast
+    try {
+      const status = await this.poolStatus();
+      if (status.enabled && status.totalStamps === 0) {
+        throw new StampError(
+          'Stamp pool is empty — no stamps available for any size',
+          'POOL_EXHAUSTED',
+        );
+      }
+    } catch (error) {
+      if (error instanceof StampError) throw error;
+      // Pool status check failed — proceed with acquire anyway
+    }
+
+    const stamp = await this.acquireStamp(options.poolSize ?? 'small');
+    return stamp.batchId;
+  }
+
+  private async uploadRawDocument(
+    content: string | Record<string, unknown>,
+    stampId: string,
+    options: UploadOptions,
+  ): Promise<DocumentUploadResult> {
+    let documentData: Record<string, unknown>;
+
+    if (typeof content === 'string') {
+      try {
+        documentData = JSON.parse(content) as Record<string, unknown>;
+      } catch {
+        throw new ProvenanceError(
+          'Raw mode requires valid JSON string or plain object',
+          'INVALID_INPUT',
+        );
+      }
+    } else if (typeof content === 'object' && content !== null && !ArrayBuffer.isView(content) && !(content instanceof ArrayBuffer) && !(content instanceof Blob)) {
+      documentData = content;
+    } else {
+      throw new ProvenanceError(
+        'Raw mode requires valid JSON string or plain object',
+        'INVALID_INPUT',
+      );
+    }
+
+    const metadataOptions: { stampId: string; standard?: string } = { stampId };
+    if (options.standard !== undefined) {
+      metadataOptions.standard = options.standard;
+    }
+    const metadata = buildDocumentMetadata(documentData, metadataOptions);
+
+    const data = await this.postMetadata(JSON.stringify(metadata), stampId, options);
+
+    return {
+      reference: data.reference,
+      metadata,
+    };
+  }
+
+  private async postMetadata(
+    metadataJson: string,
+    stampId: string,
+    options: UploadOptions,
+  ): Promise<GatewayUploadResponse> {
     // Build query params
     const params = new URLSearchParams();
     params.set('stamp_id', stampId);
@@ -219,7 +376,7 @@ export class ProvenanceClient {
 
     // Create form data with the metadata JSON as file content
     const formData = new FormData();
-    const metadataBlob = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
+    const metadataBlob = new Blob([metadataJson], { type: 'application/json' });
     formData.append('file', metadataBlob, 'provenance.json');
 
     const response = await this.fetch(`/api/v1/data/?${params.toString()}`, {
@@ -235,12 +392,7 @@ export class ProvenanceClient {
       throw error;
     }
 
-    const data = (await response.json()) as GatewayUploadResponse;
-
-    return {
-      reference: data.reference,
-      metadata,
-    };
+    return (await response.json()) as GatewayUploadResponse;
   }
 
   /**

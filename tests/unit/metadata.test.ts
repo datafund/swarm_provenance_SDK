@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildMetadata,
+  buildDocumentMetadata,
   extractContent,
   verifyContentHash,
+  verifyDocumentHash,
   serializeMetadata,
   parseMetadata,
 } from '../../src/metadata.js';
-import { sha256Hex, bytesToBase64 } from '../../src/utils.js';
+import { sha256Hex, bytesToBase64, toBytes } from '../../src/utils.js';
 
 describe('buildMetadata', () => {
   it('should create metadata with correct hash', () => {
@@ -205,6 +207,80 @@ describe('parseMetadata', () => {
   it('should throw on missing stamp_id field', () => {
     const json = JSON.stringify({ data: 'abc', content_hash: 'x' });
     expect(() => parseMetadata(json)).toThrow('missing or invalid stamp_id field');
+  });
+});
+
+describe('buildDocumentMetadata', () => {
+  it('should create metadata with data as raw object', () => {
+    const doc = { file_hash: 'abc123', filename: 'report.pdf' };
+    const stampId = 'stamp123';
+
+    const metadata = buildDocumentMetadata(doc, { stampId });
+
+    expect(metadata.data).toEqual(doc);
+    expect(metadata.stamp_id).toBe(stampId);
+    expect(typeof metadata.content_hash).toBe('string');
+    expect(metadata.content_hash.length).toBe(64);
+  });
+
+  it('should compute content_hash as SHA256 of JSON.stringify(data)', () => {
+    const doc = { key: 'value', num: 42 };
+    const stampId = 'stamp123';
+
+    const metadata = buildDocumentMetadata(doc, { stampId });
+
+    const expectedHash = sha256Hex(toBytes(JSON.stringify(doc)));
+    expect(metadata.content_hash).toBe(expectedHash);
+  });
+
+  it('should include optional standard', () => {
+    const doc = { test: true };
+    const metadata = buildDocumentMetadata(doc, { stampId: 's1', standard: 'provenance-v1' });
+
+    expect(metadata.provenance_standard).toBe('provenance-v1');
+  });
+
+  it('should not include undefined optional fields', () => {
+    const doc = { test: true };
+    const metadata = buildDocumentMetadata(doc, { stampId: 's1' });
+
+    expect('provenance_standard' in metadata).toBe(false);
+  });
+
+  it('should handle nested objects', () => {
+    const doc = { nested: { deep: { value: [1, 2, 3] } } };
+    const metadata = buildDocumentMetadata(doc, { stampId: 's1' });
+
+    expect(metadata.data).toEqual(doc);
+    expect(verifyDocumentHash(metadata)).toBe(true);
+  });
+});
+
+describe('verifyDocumentHash', () => {
+  it('should return true for valid document hash', () => {
+    const doc = { file_hash: 'abc123', filename: 'test.txt' };
+    const metadata = buildDocumentMetadata(doc, { stampId: 's1' });
+
+    expect(verifyDocumentHash(metadata)).toBe(true);
+  });
+
+  it('should return false for tampered data', () => {
+    const doc = { file_hash: 'abc123' };
+    const metadata = buildDocumentMetadata(doc, { stampId: 's1' });
+
+    // Tamper with data
+    metadata.data = { file_hash: 'tampered' };
+
+    expect(verifyDocumentHash(metadata)).toBe(false);
+  });
+
+  it('should return false for wrong content_hash', () => {
+    const doc = { test: true };
+    const metadata = buildDocumentMetadata(doc, { stampId: 's1' });
+
+    metadata.content_hash = 'wrong_hash';
+
+    expect(verifyDocumentHash(metadata)).toBe(false);
   });
 });
 
