@@ -25,6 +25,9 @@ jobs:
           cache: 'pnpm'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Upgrade npm
+        run: npm install -g npm@10
+
       - name: Install dependencies
         run: pnpm install
 
