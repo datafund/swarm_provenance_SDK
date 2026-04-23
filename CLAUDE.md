@@ -351,6 +351,14 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 | `batchRecordAccess(hashes)` | Write | Yes | Batch record access |
 | `batchSetDataStatus(items)` | Write | Yes | Batch set statuses |
 
+## PLUR Domain Scoping
+
+When calling `plur_learn`, always set:
+- `domain`: `provenance.sdk`
+- `scope`: `project:swarm-provenance-sdk`
+
+This ensures engrams are tagged for retrieval in the right context across the global store.
+
 ## PLUR Memory
 
 You have persistent memory via PLUR. Corrections, preferences, and conventions persist across sessions as engrams.
