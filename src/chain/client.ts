@@ -347,10 +347,14 @@ export class ChainClient {
    * chronological; sort by `timestamp` or walk the edges if you need either.
    *
    * @param dataHash - Starting hash
-   * @param maxDepth - Maximum traversal depth (default 10, max 50)
+   * @param maxDepth - Maximum traversal depth (default 10, clamped to 1..50; NaN throws ChainValidationError)
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
+    // NaN survives the clamp below and makes `depth >= NaN` always false: no depth limit
+    if (typeof maxDepth !== 'number' || Number.isNaN(maxDepth)) {
+      throw new ChainValidationError(`maxDepth must be a number, got ${String(maxDepth)}`);
+    }
     const effectiveMaxDepth = Math.min(Math.max(maxDepth, 1), 50);
     const startHash = normalizeHash(dataHash);
 

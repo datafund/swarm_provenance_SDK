@@ -945,6 +945,12 @@ describe('ChainClient', () => {
       expect(mockReadContract).toHaveBeenCalledTimes(4);
     });
 
+    it('rejects a non-numeric maxDepth instead of traversing without a limit', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getProvenanceChain(SAMPLE_HASH, NaN)).rejects.toThrow(ChainValidationError);
+      expect(mockReadContract).not.toHaveBeenCalled();
+    });
+
     it('leaves parents undefined when the parent lookup fails', async () => {
       mockReadContract
         .mockResolvedValueOnce({
