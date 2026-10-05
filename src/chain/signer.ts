@@ -73,7 +73,7 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
     viemAccounts = await import('viem/accounts');
   } catch {
     throw new ChainConfigurationError(
-      'viem is required for private key signing. Install it: pnpm add viem'
+      'viem is required for private key signing. Install it: npm install viem (or pnpm add viem)'
     );
   }
 

@@ -50,9 +50,15 @@ jobs:
           test -f dist/chain/index.cjs
           test -f dist/chain/index.d.ts
 
-      - name: Verify missing-viem message (CJS chain entry)
+      - name: Verify viem guard (CJS chain entry, #99)
         run: |
-          # Copy dist outside node_modules' reach so viem cannot resolve (#99)
+          # viem present: the CJS chain entry loads
+          node -e "if (typeof require('./dist/chain/index.cjs').ChainClient !== 'function') process.exit(1)"
+          # viem absent (dist copied outside node_modules' reach): actionable message
           mkdir -p "$RUNNER_TEMP/noviem" && cp -r dist "$RUNNER_TEMP/noviem/"
-          echo '{"type":"module"}' > "$RUNNER_TEMP/noviem/package.json"
           node -e "try { require(process.argv[1]); console.error('expected a throw'); process.exit(1) } catch (e) { if (!e.message.includes('npm install viem')) { console.error(e.message); process.exit(1) } }" "$RUNNER_TEMP/noviem/dist/chain/index.cjs"
+          # bundled with viem inlined: loads with no node_modules at runtime
+          echo "require('$GITHUB_WORKSPACE/dist/chain/index.cjs').ChainClient.name" > "$RUNNER_TEMP/entry.cjs"
+          mkdir -p "$RUNNER_TEMP/bundle"
+          pnpm exec esbuild "$RUNNER_TEMP/entry.cjs" --bundle --platform=node --outfile="$RUNNER_TEMP/bundle/out.cjs" --log-level=error
+          (cd "$RUNNER_TEMP/bundle" && node out.cjs)

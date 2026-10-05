@@ -292,7 +292,7 @@ The `@datafund/swarm-provenance/chain` sub-path provides on-chain provenance anc
 pnpm add viem  # Required only for chain features
 ```
 
-Missing `viem` (#99): `tsup.config.ts` `onSuccess` inserts a `require.resolve('viem')` guard on the `'use strict'` line of `dist/chain/index.cjs`, so CJS users get an actionable message. CI checks this by requiring the built file from a directory where viem cannot resolve. ESM cannot be guarded: imports link before any code runs, and a top-level-await wrapper would break Vite client builds (default target excludes TLA) and esbuild bundles to CJS. The README "Troubleshooting" entry covers the ESM error text.
+Missing `viem` (#99): `tsup.config.ts` `onSuccess` wraps the single `var viem = require('viem');` line of `dist/chain/index.cjs` in a try/catch that rewrites only MODULE_NOT_FOUND-for-viem into an actionable message (original kept as `cause`). It stays a literal `require('viem')` so bundlers inlining viem still work (a `require.resolve` probe broke them). Not an esbuild plugin: `treeshake: true` makes tsup emit CJS via rollup. The build fails if the line is not found exactly once. CI checks three cases: viem present, viem absent, and an esbuild bundle run without node_modules. ESM cannot be guarded: imports link before any code runs, and a top-level-await wrapper would break Vite client builds (default target excludes TLA) and esbuild bundles to CJS. The README "Troubleshooting" entry covers the ESM error text.
 
 ### Usage
 
