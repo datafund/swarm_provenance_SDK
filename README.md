@@ -291,7 +291,7 @@ await chain.getTransformationParents(dataHash);  // => string[]
 await chain.getChildHashes(dataHash);  // => string[]
 
 // Traverse full provenance chain (BFS, bidirectional)
-await chain.getProvenanceChain(dataHash, 10);
+await chain.getProvenanceChain(dataHash, 10);  // => records in BFS order; edges in transformationLinks (children) and parents
 // => ChainProvenanceRecord[] — ancestors + descendants up to maxDepth
 
 // Detect v2 contract support

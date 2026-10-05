@@ -339,6 +339,13 @@ export class ChainClient {
    * Traverse the full provenance chain (DAG) from any node.
    * Performs BFS in both directions (ancestors via parents, descendants via children).
    *
+   * Edges: each record carries its child edges in `transformationLinks` and its
+   * parent edges in `parents`, so the DAG can be rebuilt without further RPC calls.
+   * Nodes at `maxDepth` are not expanded and have `parents` undefined.
+   *
+   * Order: BFS order from the start node. This is neither topological nor
+   * chronological; sort by `timestamp` or walk the edges if you need either.
+   *
    * @param dataHash - Starting hash
    * @param maxDepth - Maximum traversal depth (default 10, max 50)
    * @returns Array of ChainProvenanceRecord for each node in the DAG
@@ -385,6 +392,7 @@ export class ChainClient {
       // Backward: parent hashes
       try {
         const parents = await this.getTransformationParents(hash);
+        record.parents = parents;
         for (const parent of parents) {
           if (!visited.has(parent.toLowerCase())) {
             queue.push([parent as Hex, depth + 1]);

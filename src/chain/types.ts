@@ -41,7 +41,15 @@ export interface ChainProvenanceRecord {
   storageRef?: string;
   status: DataStatus;
   accessors: Address[];
+  /** Child edges (this hash was transformed into each newDataHash) */
   transformationLinks: TransformationLink[];
+  /**
+   * Parent hashes (each was transformed into this one). Set only by
+   * getProvenanceChain: `[]` means no parents, `undefined` means they were not
+   * fetched (node at maxDepth, lookup failed, or the record came from getDataRecord).
+   * May name hashes absent from the returned chain (beyond maxDepth or unregistered).
+   */
+  parents?: string[];
 }
 
 /** Base result for all write transactions */

@@ -334,7 +334,7 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 | `getTransformationLinks(hash)` | Read | No | Get child transformation links (v2) |
 | `getTransformationParents(hash)` | Read | No | Get parent hashes (reverse traversal) |
 | `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
-| `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG |
+| `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG; records carry `parents` (undefined at maxDepth) and `transformationLinks` (children). BFS order, not topological |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC connectivity |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
