@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { VIEM_REQUIRE_GUARDED } from '../../../tsup.config.js';
+import { VIEM_REQUIRE_GUARDED } from '../../../scripts/viem-guard.js';
 
 // Evaluates the exact guard line the build writes into dist/chain/index.cjs,
 // with a stand-in `require`.
@@ -45,12 +45,16 @@ describe('CJS viem guard', () => {
     expect(() => runGuard(notFound(message))).not.toThrow(/npm install viem/);
   });
 
-  it('rethrows non-MODULE_NOT_FOUND errors unchanged', () => {
+  it('rethrows non-MODULE_NOT_FOUND errors unchanged (same object)', () => {
     const err = new SyntaxError('Unexpected token');
-    expect(() =>
+    let thrown: unknown;
+    try {
       runGuard(() => {
         throw err;
-      }),
-    ).toThrow(err);
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBe(err);
   });
 });
