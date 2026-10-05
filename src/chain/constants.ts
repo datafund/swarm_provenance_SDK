@@ -1,7 +1,7 @@
 import type { ChainPreset } from './types.js';
 
 /** Base Sepolia testnet preset (v3 contract with storageRef support) */
-export const BASE_SEPOLIA: ChainPreset = Object.freeze({
+export const BASE_SEPOLIA: Readonly<ChainPreset> = Object.freeze({
   chainId: 84532,
   name: 'base-sepolia',
   rpcUrl: 'https://base-sepolia-rpc.publicnode.com',
@@ -10,7 +10,7 @@ export const BASE_SEPOLIA: ChainPreset = Object.freeze({
 });
 
 /** Base mainnet preset (contract not yet deployed) */
-export const BASE_MAINNET: ChainPreset = Object.freeze({
+export const BASE_MAINNET: Readonly<ChainPreset> = Object.freeze({
   chainId: 8453,
   name: 'base',
   rpcUrl: 'https://mainnet.base.org',
@@ -19,7 +19,7 @@ export const BASE_MAINNET: ChainPreset = Object.freeze({
 });
 
 /** Local Hardhat preset for development (address from ConsentsBasedDataProvenance deploy script) */
-export const HARDHAT_LOCAL: ChainPreset = Object.freeze({
+export const HARDHAT_LOCAL: Readonly<ChainPreset> = Object.freeze({
   chainId: 31337,
   name: 'hardhat',
   rpcUrl: 'http://127.0.0.1:8545',
@@ -28,7 +28,7 @@ export const HARDHAT_LOCAL: ChainPreset = Object.freeze({
 });
 
 /** All available chain presets indexed by name (frozen, like the presets) */
-export const CHAIN_PRESETS: Record<string, ChainPreset> = Object.freeze({
+export const CHAIN_PRESETS: Readonly<Record<string, Readonly<ChainPreset>>> = Object.freeze({
   'base-sepolia': BASE_SEPOLIA,
   'base': BASE_MAINNET,
   'hardhat': HARDHAT_LOCAL,

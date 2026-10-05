@@ -268,11 +268,12 @@ Reads fail over to the next RPC URL on any error except a contract revert or a u
 (that includes HTTP 4xx such as 401/429, so a bad API key on your primary is masked by the
 fallbacks; check `healthCheck()` against a client built with `rpcFallbacks: []` if that matters).
 With fallbacks the list is tried at most twice per call (a single URL keeps viem's default 3 retries).
-`chain: 'base-sepolia'` tries `base-sepolia-rpc.publicnode.com`, then `base-sepolia.gateway.tenderly.co`,
+`chain: 'base-sepolia'` (or `chain: BASE_SEPOLIA`) tries `base-sepolia-rpc.publicnode.com`, then `base-sepolia.gateway.tenderly.co`,
 then `sepolia.base.org` (`PRESET_RPC_FALLBACKS`). Setting `rpcUrl` to one of those keeps failover to
 the others; any other URL disables the preset's fallbacks, so reads meant for a private endpoint never
 go to public ones. Built-in fallbacks are not on the preset objects, so a spread copy
-(`{ ...BASE_SEPOLIA, rpcUrl }`) has none unless you give it `rpcFallbacks`. Presets are frozen.
+(`{ ...BASE_SEPOLIA, rpcUrl }`) has none unless you give it `rpcFallbacks`. Presets and `CHAIN_PRESETS` are
+frozen and typed `Readonly` (assigning to them was possible before; spread a copy instead).
 
 `healthCheck()` now makes a real `eth_call` to the configured contract (previously `eth_chainId`):
 it returns false for a wrong or undeployed contract address, and with fallbacks returns true if any

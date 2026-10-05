@@ -127,7 +127,8 @@ export class ChainClient {
    * Ordered RPC URLs: the primary, then fallbacks.
    *
    * - `config.rpcFallbacks`, when given, is used as is.
-   * - A preset chosen by name brings its PRESET_RPC_FALLBACKS; a preset object
+   * - A built-in preset (by name, or the exported object itself) brings its
+   *   PRESET_RPC_FALLBACKS; any other preset object, including a spread copy,
    *   brings its own `rpcFallbacks`, exactly as written.
    * - An explicit `config.rpcUrl` outside the preset's URL list is treated as a
    *   private endpoint: no preset fallbacks, so its reads never go to public
@@ -141,8 +142,10 @@ export class ChainClient {
     const same = (a: string, b: string) => norm(a) === norm(b);
 
     const preset = this.preset;
-    const presetFallbacks =
-      typeof config.chain === 'string' ? PRESET_RPC_FALLBACKS[config.chain] ?? [] : preset.rpcFallbacks ?? [];
+    // A built-in preset, by name or as the (frozen) object itself, brings its
+    // PRESET_RPC_FALLBACKS; any other preset object brings its own rpcFallbacks.
+    const builtinName = Object.keys(CHAIN_PRESETS).find((name) => CHAIN_PRESETS[name] === preset);
+    const presetFallbacks = builtinName ? PRESET_RPC_FALLBACKS[builtinName] ?? [] : preset.rpcFallbacks ?? [];
     const presetUrls = [preset.rpcUrl, ...presetFallbacks];
     const primary = config.rpcUrl?.trim() || preset.rpcUrl;
 

@@ -164,6 +164,13 @@ describe('ChainClient RPC fallback', () => {
     await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
   });
 
+  it('passing the exported built-in preset object keeps its fallbacks', async () => {
+    stubRpc({ [BASE_SEPOLIA.rpcUrl]: degraded, [FALLBACK_1!]: healthy });
+    const client = new ChainClient({ chain: BASE_SEPOLIA });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
   it('built-in fallbacks are not on the preset objects, and presets are frozen', () => {
     expect('rpcFallbacks' in BASE_SEPOLIA).toBe(false);
     expect(Object.isFrozen(BASE_SEPOLIA)).toBe(true);
