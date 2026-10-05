@@ -337,12 +337,16 @@ export class ProvenanceClient {
     // at most once a minute, so unverifiable documents don't each cost a request
     if (!outcome.verified && wasCached && Date.now() - this.notaryRecheckedAt > NOTARY_RECHECK_MS) {
       this.notaryRecheckedAt = Date.now();
+      const previous = this.cachedNotaryAddress;
       this.cachedNotaryAddress = undefined;
       try {
         const fresh = await this.gatewayNotaryAddress();
         if (fresh !== address) outcome = check(fresh, fresh === undefined ? 'none' : 'gateway');
       } catch {
-        // keep the first outcome: it already fails closed
+        // keep the first outcome (it already fails closed) and the address that
+        // was valid: a passing outage must not drop it
+      } finally {
+        this.cachedNotaryAddress ??= previous;
       }
     }
     return outcome;

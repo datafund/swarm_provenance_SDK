@@ -333,3 +333,29 @@ describe('review round 3 (#135)', () => {
     expect(result.verified).toBeUndefined();
   });
 });
+
+describe('final review (#135)', () => {
+  it('a failed re-check keeps the cached notary address', async () => {
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(5_000_000);
+      const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
+      serve(read('base64-document.json'));
+      await client.download(REF); // caches NOTARY
+
+      // An unverifiable document triggers a re-check while /notary/info is down
+      serve(edit('base64-document.json', (doc) => (doc.signatures[0]!['signature'] = '')));
+      routes['/api/v1/notary/info'] = { status: 500, body: '{"detail":"down"}' };
+      expect((await client.download(REF)).verified).toBe(false);
+
+      // Still down, but a genuine document verifies from the kept address
+      serve(read('base64-document.json'));
+      routes['/api/v1/notary/info'] = { status: 500, body: '{"detail":"down"}' };
+      const result = await client.download(REF);
+      expect(result.verified).toBe(true);
+      expect(result.verification?.expectedSigner).toBe(NOTARY);
+    } finally {
+      now.mockRestore();
+    }
+  });
+});
