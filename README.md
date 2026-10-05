@@ -291,8 +291,9 @@ await chain.getTransformationParents(dataHash);  // => string[]
 await chain.getChildHashes(dataHash);  // => string[]
 
 // Traverse full provenance chain (BFS, bidirectional)
-await chain.getProvenanceChain(dataHash, 10);  // => records in BFS order; edges in transformationLinks (children) and parents
-// => ChainProvenanceRecord[] — ancestors + descendants up to maxDepth
+await chain.getProvenanceChain(dataHash, 10);
+// => ChainProvenanceRecord[]: ancestors + descendants up to maxDepth, in BFS order (not topological).
+//    Edges: transformationLinks (children) and parents. Rejects if any lookup fails.
 
 // Detect v2 contract support
 await chain.supportsTransformationLinks();  // => boolean
@@ -396,6 +397,15 @@ try {
 |---------|--------|----------|
 | Base Sepolia (testnet) | `base-sepolia` | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
 | Base (mainnet) | `base` | Not yet deployed |
+
+### Behavior changes in the next release
+
+- `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
+  `ChainConnectionError` naming the node. Before, the failed branch was silently dropped
+  and the partial graph returned as if complete.
+- `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
+  disabled the depth limit. Fractional depths are floored.
+- Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
 
 ### Breaking Changes in v0.5.0
 

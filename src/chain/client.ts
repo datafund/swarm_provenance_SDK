@@ -356,7 +356,7 @@ export class ChainClient {
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
-    // Coerce like the clamp always did ('5' -> 5, null -> 0), but reject NaN: it
+    // Coerce like the clamp always did ('5' -> 5, null -> 0 -> clamped to 1), but reject NaN: it
     // survives Math.min/max and makes `depth >= NaN` always false, i.e. no limit.
     const requestedDepth = Number(maxDepth);
     if (Number.isNaN(requestedDepth)) {
@@ -377,21 +377,27 @@ export class ChainClient {
       if (visited.has(hashLower)) continue;
       visited.add(hashLower);
 
-      let record: ChainProvenanceRecord;
-      try {
-        record = await this.getDataRecord(hash);
-      } catch (error) {
-        if (error instanceof DataNotRegisteredError) continue;
-        throw error;
+      // Record and parents are independent: fetch both at once. Children come
+      // from the record (the contract's getChildHashes returns exactly
+      // transformationLinks[].newDataHash), so no third call.
+      const expand = depth < effectiveMaxDepth;
+      const [recordResult, parentsResult] = await Promise.allSettled([
+        this.getDataRecord(hash),
+        expand ? this.getTransformationParents(hash) : Promise.resolve(undefined),
+      ]);
+
+      if (recordResult.status === 'rejected') {
+        if (recordResult.reason instanceof DataNotRegisteredError) continue;
+        throw this.traversalError(hash, depth, recordResult.reason);
       }
+      const record = recordResult.value;
       records.push(record);
 
-      if (depth >= effectiveMaxDepth) continue;
-
-      // Children come from the record: the contract's getChildHashes returns
-      // exactly transformationLinks[].newDataHash, so no extra RPC call.
-      // Parents need one lookup; its errors propagate (fail closed).
-      const parents = await this.getTransformationParents(hash);
+      if (parentsResult.status === 'rejected') {
+        throw this.traversalError(hash, depth, parentsResult.reason);
+      }
+      const parents = parentsResult.value;
+      if (!parents) continue; // not expanded (maxDepth)
       record.parents = parents;
 
       const neighbours = [...record.transformationLinks.map((link) => link.newDataHash), ...parents];
@@ -403,6 +409,12 @@ export class ChainClient {
     }
 
     return records;
+  }
+
+  /** Fail-closed traversal error naming the node it stopped at. */
+  private traversalError(hash: Hex, depth: number, cause: unknown): ChainConnectionError {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    return new ChainConnectionError(`getProvenanceChain failed at ${hash} (depth ${depth}): ${message}`);
   }
 
   /**

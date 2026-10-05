@@ -742,7 +742,11 @@ describe('ChainClient', () => {
     const hashB: Hex = `0x${'bb'.repeat(32)}`;
     const hashC: Hex = `0x${'cc'.repeat(32)}`;
 
-    // clearAllMocks keeps implementations; don't leak mockDag into later suites
+    // clearAllMocks keeps implementations and queued once-values: reset on both
+    // sides so nothing leaks into or out of this suite
+    beforeEach(() => {
+      mockReadContract.mockReset();
+    });
     afterEach(() => {
       mockReadContract.mockReset();
     });
@@ -875,6 +879,8 @@ describe('ChainClient', () => {
 
       const client = new ChainClient({ chain: 'base-sepolia' });
       await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(ChainConnectionError);
+      // The error names the node and depth the traversal stopped at
+      await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(`failed at ${hashB} (depth 1)`);
     });
 
     it('rejects a NaN maxDepth instead of traversing without a limit', async () => {
