@@ -393,11 +393,11 @@ export class ChainClient {
       const record = recordResult.value;
       records.push(record);
 
+      if (!expand) continue; // at maxDepth: parents not fetched, stays undefined
       if (parentsResult.status === 'rejected') {
         throw this.traversalError(hash, depth, parentsResult.reason);
       }
-      const parents = parentsResult.value;
-      if (!parents) continue; // not expanded (maxDepth)
+      const parents = parentsResult.value ?? [];
       record.parents = parents;
 
       const neighbours = [...record.transformationLinks.map((link) => link.newDataHash), ...parents];
@@ -414,7 +414,9 @@ export class ChainClient {
   /** Fail-closed traversal error naming the node it stopped at. */
   private traversalError(hash: Hex, depth: number, cause: unknown): ChainConnectionError {
     const message = cause instanceof Error ? cause.message : String(cause);
-    return new ChainConnectionError(`getProvenanceChain failed at ${hash} (depth ${depth}): ${message}`);
+    const error = new ChainConnectionError(`getProvenanceChain failed at ${hash} (depth ${depth}): ${message}`);
+    error.cause = cause;
+    return error;
   }
 
   /**

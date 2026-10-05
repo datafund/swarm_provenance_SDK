@@ -398,7 +398,7 @@ try {
 | Base Sepolia (testnet) | `base-sepolia` | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
 | Base (mainnet) | `base` | Not yet deployed |
 
-### Behavior changes in the next release
+### Behavior changes in the next release (needs a minor version bump)
 
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node. Before, the failed branch was silently dropped

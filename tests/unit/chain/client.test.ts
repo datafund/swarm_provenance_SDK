@@ -752,10 +752,11 @@ describe('ChainClient', () => {
     });
 
     /** On-chain fixture: hash -> children (transformationLinks) and parents. Unlisted hashes are unregistered. */
-    function mockDag(nodes: Record<string, { children: Hex[]; parents: Hex[] | Error }>): void {
+    function mockDag(nodes: Record<string, { children: Hex[]; parents: Hex[] | Error; record?: Error }>): void {
       mockReadContract.mockImplementation(({ functionName, args }: { functionName: string; args: [Hex] }) => {
         const node = nodes[args[0]];
         if (functionName === 'getDataRecord') {
+          if (node?.record) return Promise.reject(node.record);
           return Promise.resolve({
             dataHash: node ? args[0] : ZERO_HASH,
             owner: MOCK_ADDRESS,
@@ -881,6 +882,37 @@ describe('ChainClient', () => {
       await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(ChainConnectionError);
       // The error names the node and depth the traversal stopped at
       await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(`failed at ${hashB} (depth 1)`);
+    });
+
+    it('fails closed when a record lookup fails mid-traversal, keeping the original as cause', async () => {
+      const rpcError = new Error('429 Too Many Requests');
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [], parents: [hashA], record: rpcError },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const error = await client.getProvenanceChain(SAMPLE_HASH).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ChainConnectionError);
+      expect((error as Error).message).toContain(`failed at ${hashB} (depth 1)`);
+      expect(((error as Error).cause as Error).message).toContain('429 Too Many Requests');
+    });
+
+    it('skips an unregistered node even if its parents lookup fails', async () => {
+      // hashB: linked but unregistered (not in the fixture), and its parents call errors
+      mockDag({ [hashA]: { children: [hashB], parents: [] } });
+      const base = mockReadContract.getMockImplementation()!;
+      mockReadContract.mockImplementation((req: { functionName: string; args: [Hex] }) =>
+        req.functionName === 'getTransformationParents' && req.args[0] === hashB
+          ? Promise.reject(new Error('rpc down'))
+          : (base(req) as Promise<unknown>),
+      );
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(SAMPLE_HASH);
+
+      expect(chain.map((r) => r.dataHash)).toEqual([hashA]);
     });
 
     it('rejects a NaN maxDepth instead of traversing without a limit', async () => {
