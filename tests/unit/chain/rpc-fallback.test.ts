@@ -138,6 +138,32 @@ describe('ChainClient RPC fallback', () => {
     await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
   });
 
+  it('a preset spread from BASE_SEPOLIA onto another chain does not inherit the Sepolia fallbacks', async () => {
+    const custom = 'https://private-base-mainnet.example.com';
+    stubRpc({ [custom]: degraded, [FALLBACK_1!]: healthy, [FALLBACK_2!]: healthy, [BASE_SEPOLIA.rpcUrl]: healthy });
+    const chain = { ...BASE_SEPOLIA, chainId: 8453, name: 'base', rpcUrl: custom };
+
+    await expect(new ChainClient({ chain }).getUserDataRecordsCount(USER)).rejects.toThrow(ChainConnectionError);
+    expect(new Set(calls.map((c) => c.url))).toEqual(new Set([custom]));
+  });
+
+  it("an explicit rpcUrl that is one of the preset's own URLs keeps failover to the others", async () => {
+    stubRpc({ [FALLBACK_2!]: degraded, [BASE_SEPOLIA.rpcUrl]: healthy });
+    // sepolia.base.org: the default older docs told users to pass explicitly
+    const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: FALLBACK_2! });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+    expect(calls.map((c) => c.url)).toEqual([FALLBACK_2, BASE_SEPOLIA.rpcUrl]);
+  });
+
+  it('drops blank rpcFallbacks entries (e.g. from splitting an empty env var)', async () => {
+    const backup = 'https://backup.example.com';
+    stubRpc({ [BASE_SEPOLIA.rpcUrl]: degraded, [backup]: healthy });
+    const client = new ChainClient({ chain: 'base-sepolia', rpcFallbacks: ['', ' ', backup] });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
   it("an empty rpcUrl means 'not set'", async () => {
     stubRpc({ [BASE_SEPOLIA.rpcUrl]: healthy });
     const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: '' });

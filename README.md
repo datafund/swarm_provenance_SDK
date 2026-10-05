@@ -268,10 +268,15 @@ Reads fail over to the next RPC URL on any error except a contract revert or a u
 (that includes HTTP 4xx such as 401/429, so a bad API key on your primary is masked by the
 fallbacks; check `healthCheck()` against a client built with `rpcFallbacks: []` if that matters).
 The list is tried at most twice per call. The `base-sepolia` preset tries `base-sepolia-rpc.publicnode.com`,
-then `base-sepolia.gateway.tenderly.co`, then `sepolia.base.org`. Preset fallbacks apply only while the
-primary is the preset's own URL: setting a different `rpcUrl`, or using a custom preset that changes a
-built-in preset's `rpcUrl` (spread, renamed or cloned), disables them, so reads meant for a private
-endpoint never go to public ones. Pass `rpcFallbacks` explicitly to choose your own.
+then `base-sepolia.gateway.tenderly.co`, then `sepolia.base.org`. Setting `rpcUrl` to one of those
+keeps failover to the others. Setting it to any other URL, or using a custom preset that carries a
+built-in preset's fallbacks with a different `rpcUrl` or `chainId` (e.g. `{ ...BASE_SEPOLIA, rpcUrl }`),
+disables preset fallbacks, so reads meant for a private endpoint never go to public ones or another
+chain. Pass `rpcFallbacks` explicitly to choose your own.
+
+`healthCheck()` now makes a real `eth_call` to the configured contract (previously `eth_chainId`):
+it returns false for a wrong or undeployed contract address, and with fallbacks returns true if any
+URL can serve the call.
 Sending transactions goes through the signer's own transport and does not fail over; waiting
 for the receipt uses the read client and does.
 

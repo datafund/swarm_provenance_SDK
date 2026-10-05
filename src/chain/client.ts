@@ -112,8 +112,9 @@ export class ChainClient {
     // fallback() moves to the next URL on any error except a revert or a user
     // rejection (viem's shouldThrow). retryCount 1: one more pass over the list
     // (with viem's backoff) rides out a burst of 429s; viem's default (3) would
-    // make 12 requests for 3 failing URLs. rank stays off: its liveness ping is
-    // eth_blockNumber, which the degraded endpoint in #101 still answered.
+    // make 12 requests for 3 failing URLs. rank stays off: its default ping is
+    // net_listening, which says nothing about eth_call. Ranking with an eth_call
+    // ping (a cooldown for degraded or hung URLs) is tracked in #104.
     this.publicClient = createPublicClient({
       transport:
         rpcUrls.length === 1
@@ -126,36 +127,49 @@ export class ChainClient {
    * Ordered RPC URLs: the primary, then fallbacks.
    *
    * - `config.rpcFallbacks`, when given, is used as is.
-   * - Otherwise the preset's fallbacks apply only while the primary is the
-   *   preset's own URL. An explicit `config.rpcUrl` that differs, or a custom
-   *   preset that changes a built-in preset's URL but carries its fallbacks
-   *   (spread, clone or rename; matched by chainId and value), gets none:
-   *   reads meant for a private endpoint never go to public ones.
+   * - An explicit `config.rpcUrl` outside the preset's own URL list is treated as
+   *   a private endpoint: no preset fallbacks, so its reads never go to public
+   *   ones. An `rpcUrl` that is one of the preset's URLs keeps the list.
+   * - A custom preset whose fallback list equals a built-in preset's, but whose
+   *   chainId or primary differs from that built-in, inherited the list by
+   *   spreading (`{ ...BASE_SEPOLIA, rpcUrl }`): it gets none. Otherwise those
+   *   fallbacks could serve another chain or leak private-RPC reads.
+   *   To keep public fallbacks deliberately, pass `config.rpcFallbacks`.
    *
-   * Duplicates are compared ignoring a trailing slash; the first spelling is
-   * kept and passed to viem unchanged.
+   * Blank entries are dropped. Duplicates are compared ignoring a trailing
+   * slash; the first spelling is passed to viem unchanged.
    */
   private resolveRpcUrls(config: ChainClientConfig): string[] {
-    const same = (a: string, b: string) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
-    const primary = config.rpcUrl || this.preset.rpcUrl;
+    const norm = (url: string) => url.trim().replace(/\/+$/, '');
+    const same = (a: string, b: string) => norm(a) === norm(b);
+    const sameList = (a: string[] = [], b: string[] = []) =>
+      a.length === b.length && a.every((url, i) => same(url, b[i]!));
+
+    const preset = this.preset;
+    const presetFallbacks = preset.rpcFallbacks ?? [];
+    const primary = config.rpcUrl?.trim() || preset.rpcUrl;
 
     let fallbacks: string[];
     if (config.rpcFallbacks) {
       fallbacks = config.rpcFallbacks;
-    } else if (!same(primary, this.preset.rpcUrl)) {
+    } else if (![preset.rpcUrl, ...presetFallbacks].some((url) => same(url, primary))) {
       fallbacks = [];
     } else {
-      const builtin = Object.values(CHAIN_PRESETS).find((p) => p.chainId === this.preset.chainId);
-      const inheritsBuiltinFallbacks =
-        builtin !== undefined &&
-        !same(this.preset.rpcUrl, builtin.rpcUrl) &&
-        JSON.stringify(this.preset.rpcFallbacks ?? []) === JSON.stringify(builtin.rpcFallbacks ?? []);
-      fallbacks = inheritsBuiltinFallbacks ? [] : this.preset.rpcFallbacks ?? [];
+      const inherited = Object.values(CHAIN_PRESETS).some(
+        (builtin) =>
+          builtin !== preset &&
+          presetFallbacks.length > 0 &&
+          sameList(presetFallbacks, builtin.rpcFallbacks) &&
+          (builtin.chainId !== preset.chainId || !same(builtin.rpcUrl, preset.rpcUrl)),
+      );
+      // Primary may be any URL of the preset's list; the rest (preset primary
+      // included) follow in preset order, the duplicate is removed below.
+      fallbacks = inherited ? [] : [preset.rpcUrl, ...presetFallbacks];
     }
 
     const urls: string[] = [];
     for (const url of [primary, ...fallbacks]) {
-      if (!urls.some((u) => same(u, url))) urls.push(url);
+      if (norm(url) && !urls.some((u) => same(u, url))) urls.push(url.trim());
     }
     return urls;
   }

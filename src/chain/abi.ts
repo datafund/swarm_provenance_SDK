@@ -1,7 +1,7 @@
 /**
  * DataProvenance smart contract ABI
  * Source: swarm_provenance_CLI/swarm_provenance_uploader/chain/abi/DataProvenance.json
- * Contract: Base Sepolia 0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a
+ * Contract: Base Sepolia 0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322
  */
 export const DATA_PROVENANCE_ABI = [
   {
