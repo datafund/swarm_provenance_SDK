@@ -80,6 +80,8 @@ Payment modes:
 
 ### Blockchain Anchoring
 
+Requires `viem` (an optional peer dependency, not installed automatically): `npm install viem`.
+
 ```typescript
 import { ChainClient, fromPrivateKey } from '@datafund/swarm-provenance/chain';
 
@@ -389,6 +391,17 @@ try {
   }
 }
 ```
+
+### Troubleshooting: `Cannot find package 'viem'`
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'viem' imported from .../@datafund/swarm-provenance/dist/chain/index.js
+```
+
+The `/chain` entry point needs the optional peer dependency `viem`, which npm does not install
+automatically. Fix: `npm install viem` (>= 2.0.0). The CommonJS build (`require`) says this
+directly. The ESM build cannot: Node resolves every `import` before any SDK code runs, so the
+message comes from Node itself.
 
 ### Supported Networks
 
