@@ -472,7 +472,7 @@ describe('ProvenanceClient', () => {
           signatures: [
             {
               type: 'notary',
-              signer: '0xNotary',
+              signer: '0x1234567890123456789012345678901234567890',
               timestamp: '2024-01-01T00:00:00Z',
               // sha256 of canonicalJson("aGVsbG8=") = sha256('"aGVsbG8="')
               data_hash: 'a06044467a47dac725953f9aec884c638596d7e61cec202a335986aac31e092e',
@@ -490,7 +490,7 @@ describe('ProvenanceClient', () => {
         json: () => Promise.resolve({
           enabled: true,
           available: true,
-          address: '0xNotary',
+          address: '0x1234567890123456789012345678901234567890',
         }),
       });
 
@@ -501,7 +501,8 @@ describe('ProvenanceClient', () => {
       // Data hash matches and the declared signer is the notary, but '0xsig' is
       // not a signature: 0.6.1 returned verified: true here.
       expect(result.verified).toBe(false);
-      expect(result.verification?.results[0]?.error).toMatch(/expected the gateway notary scheme|Invalid signature|No expected signer/);
+      expect(result.verification?.expectedSignerSource).toBe('gateway');
+      expect(result.verification?.results[0]?.error).toMatch(/^Invalid signature/);
     });
 
     it('should throw on content hash mismatch', async () => {

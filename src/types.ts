@@ -120,6 +120,8 @@ export interface SignatureVerification {
   expectedSignerSource: 'option' | 'gateway' | 'none';
   /** Per-signature results, in document order */
   results: SignatureCheck[];
+  /** Why no expected signer was available, e.g. the notary lookup failed */
+  error?: string;
 }
 
 /**
@@ -214,8 +216,11 @@ export interface DocumentDownloadResult {
   /** The document metadata from the gateway */
   metadata: DocumentMetadata;
   /**
-   * True only if every signature cryptographically verifies against the
-   * expected notary (see `verification`). Undefined if unsigned or not checked.
+   * True only if at least one signature cryptographically verifies against the
+   * expected notary over this exact data; other signatures (e.g. an uploader's
+   * own) are not covered, see `verification.results`. False if none does.
+   * Undefined if the document has no signatures or with `verify: false`: check
+   * `verified === true`.
    */
   verified?: boolean;
   /** Details of the signature check, when one ran */
@@ -233,8 +238,11 @@ export interface DownloadResult {
   /** The provenance metadata from the document */
   metadata: ProvenanceMetadata;
   /**
-   * True only if every signature cryptographically verifies against the
-   * expected notary (see `verification`). Undefined if unsigned or not checked.
+   * True only if at least one signature cryptographically verifies against the
+   * expected notary over this exact data; other signatures (e.g. an uploader's
+   * own) are not covered, see `verification.results`. False if none does.
+   * Undefined if the document has no signatures or with `verify: false`: check
+   * `verified === true`.
    */
   verified?: boolean;
   /** Details of the signature check, when one ran */

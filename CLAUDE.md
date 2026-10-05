@@ -47,7 +47,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 
 ### Upload (raw mode)
 1. Content is a JSON object or JSON string — no base64 wrapping
-2. Build `DocumentMetadata` (raw JSON data + SHA256 of JSON.stringify(data) + stamp_id)
+2. Build `DocumentMetadata` (raw JSON data + SHA256 of canonical JSON of data + stamp_id; see Notary Signature Verification)
 3. Acquire stamp from pool (or use provided stampId)
 4. POST metadata as JSON to gateway
 5. Gateway uploads to Swarm, returns reference
@@ -63,7 +63,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 ### Download (document)
 1. GET reference from gateway
 2. Parse response — `data` field is raw JSON object (not base64)
-3. Verify content_hash matches `JSON.stringify(data)`
+3. Verify content_hash matches the canonical JSON of `data` (lossless, from the response text), or `JSON.stringify(data)` for SDK 0.6.x uploads
 4. If signed, verify signatures
 5. Return `document` as `Record<string, unknown>`
 6. Use `client.downloadDocument(reference)` for this mode
@@ -90,13 +90,13 @@ ProvenanceMetadata
 
 DocumentMetadata (raw JSON uploads)
 ├── data: Record<string, unknown> (raw JSON, not base64)
-├── content_hash: string (SHA256 of JSON.stringify(data))
+├── content_hash: string (SHA256 of canonical JSON of data)
 ├── stamp_id: string
 ├── provenance_standard?: string
 └── encryption?: string
 
 NotarySignature
-├── type: string (eip191)
+├── type: string ('notary')
 ├── signer: string (0x address)
 ├── timestamp: string (ISO 8601)
 ├── data_hash: string (SHA256 of hashed_fields)
@@ -120,6 +120,7 @@ src/
 ├── metadata.ts   # Metadata builder/parser
 ├── notary.ts     # Signature verification
 ├── utils.ts      # SHA256, base64, helpers
+├── canonical-json.ts # Python-compatible canonical JSON (lossless parser)
 └── chain/        # Blockchain anchoring (sub-path: ./chain)
     ├── index.ts      # Public exports for @datafund/swarm-provenance/chain
     ├── client.ts     # ChainClient class
@@ -157,7 +158,8 @@ Features: upload text/files, download by reference, notary signing, metadata dis
 
 ## Dependencies
 
-- `@noble/hashes` - SHA256 (same as Fairdrop v3)
+- `@noble/hashes` - SHA256, keccak (same as Fairdrop v3)
+- `@noble/curves` - secp256k1 recovery for notary signatures
 - `viem` - Optional peer dependency for blockchain anchoring (`./chain` entry point)
 - `@x402/fetch` - Optional peer dependency for x402 payment mode
 - `@x402/evm` - Optional peer dependency for x402 EVM payment signing

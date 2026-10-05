@@ -21,7 +21,10 @@ export const NOTARY_SIGNATURE_TYPE = 'notary';
 export const NOTARY_HASHED_FIELDS: readonly string[] = ['data'];
 export const NOTARY_MESSAGE_FORMAT = '{data_hash}|{timestamp}';
 
-const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+/** 0x followed by 40 hex characters (any case; no checksum check) */
+export function isAddress(value: unknown): value is string {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
+}
 const SIGNATURE = /^(?:0x)?([0-9a-fA-F]{128})([0-9a-fA-F]{2})$/;
 
 /**
@@ -168,7 +171,7 @@ export function verifySignature(
     return { valid: false, dataHashValid: false, error: 'Data hash mismatch' };
   }
 
-  if (!expectedSigner || !ADDRESS.test(expectedSigner)) {
+  if (!isAddress(expectedSigner)) {
     return { valid: false, dataHashValid: true, error: 'No expected signer address to verify against' };
   }
 
@@ -217,8 +220,17 @@ export function verifyAllSignatures(
   expectedSigner?: string,
   canonicalData?: string
 ): { allValid: boolean; anyValid: boolean; results: SignatureCheck[] } {
+  // Canonicalise and hash the data once, not once per signature
+  let canonical = canonicalData;
+  if (canonical === undefined && metadata?.data !== undefined) {
+    try {
+      canonical = canonicalizeJsonValue(metadata.data);
+    } catch {
+      // leave undefined: each check then fails closed on the data hash
+    }
+  }
   const results = (Array.isArray(signatures) ? signatures : []).map((sig, index) => {
-    const result = verifySignature(sig, metadata, expectedSigner, canonicalData);
+    const result = verifySignature(sig, metadata, expectedSigner, canonical);
     const item: SignatureCheck = { index, valid: result.valid, dataHashValid: result.dataHashValid };
     if (result.recoveredAddress !== undefined) item.recoveredAddress = result.recoveredAddress;
     if (result.error !== undefined) item.error = result.error;

@@ -232,13 +232,54 @@ describe('review round 1 (#135)', () => {
     expect(calls.filter((p) => p === '/api/v1/notary/info')).toHaveLength(1);
   });
 
-  it('does not cache a failed notary lookup', async () => {
+  it('a failed notary lookup fails closed (data still returned) and is not cached', async () => {
     serve(read('base64-document.json'));
     routes['/api/v1/notary/info'] = { status: 500, body: '{"detail":"boom"}' };
     const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
-    await expect(client.download(REF)).rejects.toThrow();
+
+    const first = await client.download(REF);
+    expect(first.file.length).toBeGreaterThan(0);
+    expect(first.verified).toBe(false);
+    expect(first.verification).toMatchObject({ expectedSignerSource: 'none' });
+    expect(first.verification?.error).toMatch(/Could not get the gateway notary address/);
 
     serve(read('base64-document.json'));
     expect((await client.download(REF)).verified).toBe(true);
+  });
+
+  it('"no notary address" is not cached: a later download verifies once the gateway reports one', async () => {
+    const client = new ProvenanceClient();
+    serve(read('base64-document.json'), { enabled: false, available: false, address: null });
+    expect((await client.download(REF)).verified).toBe(false);
+
+    serve(read('base64-document.json'));
+    expect((await client.download(REF)).verified).toBe(true);
+  });
+
+  it('a cached notary address is looked up again when nothing verifies against it (key rotation)', async () => {
+    const client = new ProvenanceClient();
+    // Before rotation: the gateway's notary is OTHER, and the document is signed by OTHER
+    const doc = JSON.parse(read('base64-document.json')) as FixtureDoc;
+    const sig = doc.signatures[0]!;
+    serve(
+      JSON.stringify({
+        ...doc,
+        signatures: [
+          {
+            ...sig,
+            signer: OTHER.address,
+            signature: await OTHER.signMessage({ message: `${String(sig['data_hash'])}|${String(sig['timestamp'])}` }),
+          },
+        ],
+      }),
+      { enabled: true, available: true, address: OTHER.address },
+    );
+    expect((await client.download(REF)).verified).toBe(true);
+
+    // After rotation: the gateway reports NOTARY; the cached OTHER no longer verifies
+    serve(read('base64-document.json'));
+    const after = await client.download(REF);
+    expect(after.verified).toBe(true);
+    expect(after.verification?.expectedSigner).toBe(NOTARY);
   });
 });
