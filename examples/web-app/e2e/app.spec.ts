@@ -326,14 +326,16 @@ test.describe('Notary Integration', () => {
     await expect(page.getByText('Signature Verified')).toBeVisible();
 
     // Verify signature details are shown
-    await expect(page.locator('.signature-details')).toBeVisible();
-    await expect(page.getByText('Signer:')).toBeVisible();
-    await expect(page.getByText('Type:')).toBeVisible();
-    await expect(page.getByText('Timestamp:')).toBeVisible();
-    await expect(page.getByText('Data Hash:')).toBeVisible();
+    await expect(page.locator('.signature-details').first()).toBeVisible();
+    // Labels as the download view renders them (exact: 'Type:' is also a substring of 'Data type:')
+    const details = page.locator('.signature-details').first();
+    await expect(details.getByText('Signer:', { exact: true })).toBeVisible();
+    await expect(details.getByText('Type:', { exact: true })).toBeVisible();
+    await expect(details.getByText('Gateway notary timestamp:', { exact: true })).toBeVisible();
+    await expect(details.getByText('Signed fields hash (SHA256):', { exact: true })).toBeVisible();
 
-    // Verify signer matches gateway notary badge
-    await expect(page.getByText('Matches Gateway Notary')).toBeVisible();
+    // Badge from the recovered address (one per valid signature: check the first)
+    await expect(page.getByText('Signed by Gateway Notary').first()).toBeVisible();
   });
 });
 

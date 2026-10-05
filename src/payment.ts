@@ -1,4 +1,4 @@
-import type { X402PaymentConfig } from './types.js';
+import type { PaymentWallet, X402PaymentConfig } from './types.js';
 import { PaymentConfigurationError } from './errors.js';
 
 /**
@@ -39,14 +39,18 @@ export async function createX402Fetch(config: X402PaymentConfig): Promise<typeof
   // Viem's WalletClient.extend(publicActions) puts address at account.address,
   // not at the top level. The x402 schemes need address directly on the signer.
   const wallet = config.wallet;
-  const address = wallet.address
-    ?? (wallet as unknown as { account?: { address: `0x${string}` } }).account?.address;
+  // Typed as one or the other, but plain JS callers may pass anything
+  const loose = wallet as { address?: unknown; account?: { address?: unknown } | null };
+  const address = (typeof loose.address === 'string' ? loose.address : loose.account?.address) as
+    | `0x${string}`
+    | undefined;
   if (!address) {
     throw new PaymentConfigurationError(
       'Wallet must have an address. Pass a viem WalletClient created with an account, or use toClientEvmSigner().'
     );
   }
-  const signer = address !== wallet.address ? { ...wallet, address } : wallet;
+  // Pass the wallet through unchanged when it already carries the address
+  const signer = hasAddress(wallet) ? wallet : { ...wallet, address };
 
   const network = config.network ?? 'eip155:84532';
   const client = new x402Fetch.x402Client();
@@ -79,4 +83,8 @@ export async function createX402Fetch(config: X402PaymentConfig): Promise<typeof
   };
 
   return x402Fetch.wrapFetchWithPayment(normalizingFetch, client);
+}
+
+function hasAddress(wallet: PaymentWallet): wallet is PaymentWallet & { address: `0x${string}` } {
+  return typeof (wallet as { address?: unknown }).address === 'string';
 }

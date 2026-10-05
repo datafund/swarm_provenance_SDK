@@ -3,8 +3,14 @@
  * Compatible with viem's WalletClient extended with publicActions, or
  * composed via `toClientEvmSigner(account, publicClient)` from @x402/evm.
  */
-export interface PaymentWallet {
-  address: `0x${string}`;
+export type PaymentWallet = PaymentWalletMethods &
+  (
+    | { /** Signer address (e.g. from toClientEvmSigner) */ address: `0x${string}` }
+    | { /** viem WalletClient: the address is read from its account */ account: { address: `0x${string}` } }
+  );
+
+/** Signing and read methods every payment wallet needs (see PaymentWallet). */
+export interface PaymentWalletMethods {
   signTypedData(args: {
     domain: Record<string, unknown>;
     types: Record<string, unknown>;

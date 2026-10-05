@@ -122,7 +122,8 @@ Download and optionally verify provenance data from Swarm.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `verify` | `boolean` | `true` | Verify notary signature if present |
+| `verify` | `boolean` | `true` | Verify notary signatures if present |
+| `notaryAddress` | `string` | gateway's `/api/v1/notary/info` address | Notary address to trust. Pin it to verify independently of the gateway |
 
 **Returns:** `DownloadResult`
 
@@ -130,10 +131,35 @@ Download and optionally verify provenance data from Swarm.
 interface DownloadResult {
   file: Uint8Array;            // Decoded original content
   metadata: ProvenanceMetadata;
-  verified?: boolean;          // Signature verification result
+  verified?: boolean;          // true if at least one signature verifies (below)
+  verification?: SignatureVerification;
   signatures?: NotarySignature[];
 }
+
+interface SignatureVerification {
+  expectedSigner?: string;                            // address verified against
+  expectedSignerSource: 'option' | 'gateway' | 'none';
+  results: SignatureCheck[];                          // one per signature, in order
+  error?: string;                                     // e.g. the notary lookup failed
+}
+
+interface SignatureCheck {
+  index: number;
+  valid: boolean;              // verifies against the expected signer
+  dataHashValid: boolean;      // data_hash matches this document's data
+  recoveredAddress?: string;
+  error?: string;              // why it is not valid
+}
 ```
+
+`verified` is `true` only if at least one signature is an EIP-191 signature that recovers
+to the expected notary over `sha256(canonical JSON of data)|timestamp`; every signature's
+result is in `verification.results`. If none is, `verified` is `false`: that covers
+signature entries with an empty, missing or malformed `signature` value, other signers,
+changed data, and no expected address. `verified` is `undefined` when the document carries
+no signatures at all (missing or empty `signatures` list) or with `verify: false`, so
+check `verified === true`, never `verified !== false`. A malformed `notaryAddress` throws
+`ProvenanceError` with code `INVALID_INPUT`.
 
 #### `downloadDocument(reference, options?): Promise<DocumentDownloadResult>`
 
@@ -152,7 +178,8 @@ Download a raw JSON document from Swarm. Use for documents uploaded with `raw: t
 interface DocumentDownloadResult {
   document: Record<string, unknown>;  // The raw JSON document
   metadata: DocumentMetadata;
-  verified?: boolean;
+  verified?: boolean;                 // as for download()
+  verification?: SignatureVerification;
   signatures?: NotarySignature[];
 }
 ```
@@ -178,7 +205,9 @@ interface ProvenanceMetadata {
 ```typescript
 interface DocumentMetadata {
   data: Record<string, unknown>; // Raw JSON (not base64)
-  content_hash: string;          // SHA256 of JSON.stringify(data)
+  content_hash: string;          // SHA-256 of canonical JSON of data:
+                                 // json.dumps(data, sort_keys=True, separators=(',', ':'))
+                                 // (JSON.stringify(data) from SDK 0.6.x is also accepted)
   stamp_id: string;
   provenance_standard?: string;
   encryption?: string;
@@ -189,13 +218,13 @@ interface DocumentMetadata {
 
 ```typescript
 interface NotarySignature {
-  type: string;              // Signature type (e.g., 'eip191')
+  type: string;              // 'notary' (the gateway's scheme; others do not verify)
   signer: string;            // Signer's Ethereum address
   timestamp: string;         // ISO 8601 timestamp
-  data_hash: string;         // SHA256 of signed data
-  signature: string;         // The actual signature
-  hashed_fields: string[];   // Fields included in hash
-  signed_message_format: string;
+  data_hash: string;         // SHA-256 of canonical JSON of `data`
+  signature: string;         // EIP-191 signature, 65 bytes hex (0x optional)
+  hashed_fields: string[];   // ['data']
+  signed_message_format: string; // '{data_hash}|{timestamp}'
 }
 ```
 
@@ -207,6 +236,9 @@ interface SignedDocument {
   signatures: NotarySignature[];
 }
 ```
+
+Exported for typing stored documents. `upload()` does not return it: `UploadResult` is
+`{ reference, metadata }`; download the reference to get the signatures.
 
 ### NotaryInfo
 
@@ -276,7 +308,9 @@ Error related to notary signing service.
 
 ### VerificationError
 
-Error when signature verification fails.
+Thrown by `recoverSigner()` for a malformed or unrecoverable signature
+(`INVALID_SIGNATURE`).
+`download()` does not throw on a bad signature: it returns `verified: false`.
 
 ---
 
@@ -307,29 +341,45 @@ function buildDocumentMetadata(
   options: DocumentMetadataOptions
 ): DocumentMetadata;
 
-// Verify document content hash
-function verifyDocumentHash(metadata: DocumentMetadata): boolean;
+// Verify document content hash (canonical JSON, or JSON.stringify from SDK 0.6.x).
+// canonicalData: canonicalizeJsonText(responseText, ['data']) (['metadata', 'data'] if wrapped)
+// for exact floats/big ints
+function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: string): boolean;
 ```
 
 ### Signature Verification
 
+All of these fail closed. Without `expectedSigner` a signature is never valid: a signature
+proves who signed, not whether that signer should be trusted.
+
 ```typescript
-// Verify a single signature
+// Verify a single signature (EIP-191 recovery against expectedSigner)
 function verifySignature(
   signature: NotarySignature,
-  metadata: ProvenanceMetadata,
-  expectedSigner?: string
-): { valid: boolean; dataHashValid: boolean; signerValid?: boolean; error?: string };
+  metadata: { data: unknown },
+  expectedSigner?: string,
+  canonicalData?: string        // canonicalizeJsonText(responseText, ['data']),
+                                // or ['metadata', 'data'] for a wrapped response
+): { valid: boolean; dataHashValid: boolean; signerValid?: boolean; recoveredAddress?: string; error?: string };
 
-// Verify all signatures
+// Verify all signatures: anyValid = at least one valid (what download() reports);
+// allValid = at least one, and every one valid
 function verifyAllSignatures(
   signatures: NotarySignature[],
-  metadata: ProvenanceMetadata,
-  expectedSigner?: string
-): { allValid: boolean; results: Array<{ index: number; valid: boolean; error?: string }> };
+  metadata: { data: unknown },
+  expectedSigner?: string,
+  canonicalData?: string
+): { allValid: boolean; anyValid: boolean; results: SignatureCheck[] };
 
-// Verify data hash matches metadata
-function verifyDataHash(signature: NotarySignature, metadata: ProvenanceMetadata): boolean;
+// Verify data hash matches the document's data (hashed_fields ['data'] only)
+function verifyDataHash(signature: NotarySignature, metadata: { data: unknown }, canonicalData?: string): boolean;
+
+// Recover the EIP-191 signer address (lowercase); throws VerificationError
+function recoverSigner(message: string, signature: string): string;
+
+// Canonical JSON, byte-compatible with Python json.dumps(sort_keys=True, separators=(',', ':'))
+function canonicalizeJsonText(text: string, path?: string[]): string | undefined;
+function canonicalizeJsonValue(value: unknown): string;
 ```
 
 ### Hashing and Encoding
