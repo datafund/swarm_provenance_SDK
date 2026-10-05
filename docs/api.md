@@ -139,8 +139,16 @@ interface DownloadResult {
 interface SignatureVerification {
   expectedSigner?: string;                            // address verified against
   expectedSignerSource: 'option' | 'gateway' | 'none';
-  results: Array<{ index: number; valid: boolean; dataHashValid: boolean;
-                   recoveredAddress?: string; error?: string }>;
+  results: SignatureCheck[];                          // one per signature, in order
+  error?: string;                                     // e.g. the notary lookup failed
+}
+
+interface SignatureCheck {
+  index: number;
+  valid: boolean;              // verifies against the expected signer
+  dataHashValid: boolean;      // data_hash matches this document's data
+  recoveredAddress?: string;
+  error?: string;              // why it is not valid
 }
 ```
 

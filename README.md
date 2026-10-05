@@ -99,9 +99,11 @@ const [account] = await walletClient.requestAddresses();
 try {
   await walletClient.switchChain({ id: baseSepolia.id });
 } catch (error) {
-  // 4902: the wallet does not know the chain yet
-  if ((error as { code?: number }).code !== 4902) throw error;
+  // 4902: the wallet does not know the chain yet (some wallets nest the code)
+  const e = error as { code?: number; cause?: { code?: number } };
+  if ((e.code ?? e.cause?.code) !== 4902) throw error;
   await walletClient.addChain({ chain: baseSepolia });
+  await walletClient.switchChain({ id: baseSepolia.id }); // not every wallet switches on add
 }
 
 const wallet = createWalletClient({
@@ -136,8 +138,8 @@ const signer = await fromEip1193Provider(window.ethereum);
 const chain = new ChainClient({ chain: 'base-sepolia', signer });
 const result = await chain.anchor(contentHash, 'dataset');
 
-// With private key (Node.js)
-const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
+// With private key (Node.js only; load it from the environment or a secret store)
+const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${string}`, 'https://base-sepolia-rpc.publicnode.com');
 const chain = new ChainClient({ chain: 'base-sepolia', signer });
 await chain.anchor(contentHash, 'dataset');
 ```
@@ -166,9 +168,10 @@ What the SDK checks, and what it does not:
   See [What `verified` means](#what-verified-means).
 - **On-chain anchoring** (`/chain`) proves that an address registered a hash at a block time.
   It does not prove anything about content the hash was not computed from.
-- **Keys:** in browsers use an injected wallet (`fromEip1193Provider`, or a viem client over
-  `window.ethereum`); on servers load keys from the environment or a secret store. A private
-  key in browser code is public.
+- **Keys:** in browsers use the injected wallet: `fromEip1193Provider(window.ethereum)` for
+  `/chain` writes, and a viem wallet client over `custom(window.ethereum)` for x402 payments
+  (see [x402 Payment Mode](#x402-payment-mode)). On servers load keys from the environment or a
+  secret store. A private key in browser code is public.
 - **Default gateway is production:** `https://provenance-gateway.datafund.io`. Pass
   `gatewayUrl` to use another (e.g. `https://provenance-gateway.dev.datafund.io` for testing).
 - **Data expires.** Swarm storage is rented: data stays available only while the postage stamp
@@ -446,8 +449,8 @@ import {
 // Browser wallet (MetaMask, etc.)
 const signer = await fromEip1193Provider(window.ethereum);
 
-// Private key (Node.js / scripts)
-const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
+// Private key (Node.js / scripts; from the environment, never hard-coded)
+const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${string}`, 'https://base-sepolia-rpc.publicnode.com');
 
 // Existing viem WalletClient
 const signer = fromViemWalletClient(walletClient);

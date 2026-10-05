@@ -28,3 +28,12 @@ describe('PaymentWallet accepts a viem WalletClient extended with publicActions'
     expect(new ProvenanceClient({ payment: { wallet } })).toBeInstanceOf(ProvenanceClient);
   });
 });
+
+describe('PaymentWallet rejects a wallet with no address at compile time', () => {
+  it('a viem WalletClient created without an account does not typecheck', () => {
+    const wallet = createWalletClient({ chain: baseSepolia, transport: http() }).extend(publicActions);
+    // @ts-expect-error neither `address` nor an `account` with an address
+    const config = { payment: { wallet } } satisfies ConstructorParameters<typeof ProvenanceClient>[0];
+    expect(config).toBeDefined();
+  });
+});

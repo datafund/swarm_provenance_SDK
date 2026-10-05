@@ -55,6 +55,7 @@ async function main() {
       console.log('    Data hash:', sig.data_hash);
     }
     console.log('\nSignature verified:', downloaded.verified);
+    if (downloaded.verification?.error) console.log('  Note:', downloaded.verification.error);
     for (const check of downloaded.verification?.results ?? []) {
       console.log(`  #${check.index}:`, check.valid ? `recovers to ${check.recoveredAddress}` : check.error);
     }

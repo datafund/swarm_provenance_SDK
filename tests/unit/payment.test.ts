@@ -132,9 +132,9 @@ describe('createX402Fetch', () => {
     expect(capturedSigner).toBe(mockWallet);
   });
 
-  it('should resolve address from wallet.account when wallet.address is undefined', async () => {
+  it.each([undefined, null])('should resolve address from wallet.account when wallet.address is %s', async (missing) => {
     const walletWithoutAddress = {
-      address: undefined as unknown as `0x${string}`,
+      address: missing as unknown as `0x${string}`,
       account: { address: '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as `0x${string}` },
       signTypedData: vi.fn().mockResolvedValue('0xsig' as `0x${string}`),
       readContract: vi.fn().mockResolvedValue(0n),

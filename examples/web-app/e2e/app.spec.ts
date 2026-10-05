@@ -326,7 +326,7 @@ test.describe('Notary Integration', () => {
     await expect(page.getByText('Signature Verified')).toBeVisible();
 
     // Verify signature details are shown
-    await expect(page.locator('.signature-details')).toBeVisible();
+    await expect(page.locator('.signature-details').first()).toBeVisible();
     // Labels as the download view renders them (exact: 'Type:' is also a substring of 'Data type:')
     const details = page.locator('.signature-details').first();
     await expect(details.getByText('Signer:', { exact: true })).toBeVisible();

@@ -242,7 +242,8 @@ import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 
 const wallet = createWalletClient({
-  account: privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`), // server only
+  // server only; check the variable is set before casting (see README)
+  account: privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`),
   chain: baseSepolia,
   transport: http(),
 }).extend(publicActions);
@@ -252,7 +253,7 @@ const client = new ProvenanceClient({ payment: { wallet } });
 
 Never hard-code keys in examples, and never use a raw key in browser code: browsers use an injected wallet (`custom(window.ethereum)`), see README "x402 Payment Mode".
 
-The `PaymentWallet` interface requires `signTypedData` and `readContract`, plus an address: top-level `address`, or `account.address` as on viem's `WalletClient.extend(publicActions)` (both typecheck; `tests/unit/payment-wallet-types.test.ts`). `@x402/evm`'s `toClientEvmSigner()` also fits.
+The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an address: top-level `address`, or `account.address` as on viem's `WalletClient.extend(publicActions)`. A wallet with neither does not typecheck (`tests/unit/payment-wallet-types.test.ts`). `@x402/evm`'s `toClientEvmSigner()` also fits.
 
 ## Related Projects
 
@@ -315,7 +316,7 @@ await chain.recordAccess(swarmRef);        // → AccessResult
 
 // With private key (Node.js)
 import { fromPrivateKey } from '@datafund/swarm-provenance/chain';
-const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
+const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${string}`, 'https://base-sepolia-rpc.publicnode.com');
 ```
 
 ### Contract
