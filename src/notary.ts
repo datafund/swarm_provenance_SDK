@@ -1,177 +1,213 @@
-import type { NotarySignature, ProvenanceMetadata } from './types.js';
+import { secp256k1 } from '@noble/curves/secp256k1';
+import { keccak_256 } from '@noble/hashes/sha3';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
+import type { NotarySignature, ProvenanceMetadata, DocumentMetadata, SignatureCheck } from './types.js';
 import { sha256Hex } from './utils.js';
 import { VerificationError } from './errors.js';
+import { canonicalizeJsonValue } from './canonical-json.js';
 
 /**
- * Reconstruct the message that was signed by the notary
+ * Notary signature scheme, as produced by the gateway (swarm_connect
+ * app/services/provenance.py + signing.py):
+ *
+ *   data_hash = sha256(canonical JSON of the document's `data` field)
+ *   message   = `${data_hash}|${timestamp}`
+ *   signature = EIP-191 personal_sign(message) by the notary key
+ *
+ * Verification fails closed: anything not exactly this scheme, any signature
+ * that does not recover, and any check without an expected signer is invalid.
+ */
+export const NOTARY_SIGNATURE_TYPE = 'notary';
+export const NOTARY_HASHED_FIELDS: readonly string[] = ['data'];
+export const NOTARY_MESSAGE_FORMAT = '{data_hash}|{timestamp}';
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const SIGNATURE = /^(?:0x)?([0-9a-fA-F]{128})([0-9a-fA-F]{2})$/;
+
+/**
+ * Reconstruct the message the notary signed. Only the gateway's format is
+ * accepted: the format string comes from the document, and honouring an
+ * arbitrary one would let a forger point it at any other message the notary
+ * key ever signed (with no placeholders, data_hash would not be bound at all).
  */
 export function reconstructSignedMessage(
   signature: NotarySignature,
-  _metadata: ProvenanceMetadata
+  _metadata?: ProvenanceMetadata | DocumentMetadata
 ): string {
-  // The signed message format is typically:
-  // "Provenance Notary\nTimestamp: {timestamp}\nData Hash: {data_hash}"
-  // But we should use the actual format specified in the signature
-  const format = signature.signed_message_format;
-
-  // Replace placeholders with actual values
-  let message = format;
-  message = message.replace('{timestamp}', signature.timestamp);
-  message = message.replace('{data_hash}', signature.data_hash);
-
-  return message;
+  if (signature.signed_message_format !== NOTARY_MESSAGE_FORMAT) {
+    throw new VerificationError(
+      `Unsupported signed_message_format: ${JSON.stringify(signature.signed_message_format)}`,
+      'UNSUPPORTED_SIGNATURE'
+    );
+  }
+  return `${signature.data_hash}|${signature.timestamp}`;
 }
 
 /**
- * Convert a value to canonical JSON (sorted keys, no whitespace)
+ * SHA-256 of the canonical JSON of the document's `data` field, as the notary
+ * computes it. Pass `canonicalData` (from canonicalizeJsonText on the response
+ * text) when available: it is exact for floats and large integers, which a
+ * parsed value can no longer reproduce.
  */
-function toCanonicalJson(value: unknown): string {
-  if (value === null || value === undefined) {
-    return JSON.stringify(value);
-  }
-  if (typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return '[' + value.map(toCanonicalJson).join(',') + ']';
-  }
-  // Object - sort keys
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  const pairs = keys.map(
-    (k) => JSON.stringify(k) + ':' + toCanonicalJson((value as Record<string, unknown>)[k])
-  );
-  return '{' + pairs.join(',') + '}';
+export function computeNotaryDataHash(
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
+  canonicalData?: string
+): string {
+  return sha256Hex(canonicalData ?? canonicalizeJsonValue(metadata.data));
 }
 
 /**
- * Verify that the data hash in the signature matches the metadata
+ * Verify that the signature's data_hash matches the document's `data` field.
+ * Only `hashed_fields: ['data']` (the gateway's scheme) is supported.
  */
-export function verifyDataHash(signature: NotarySignature, metadata: ProvenanceMetadata): boolean {
-  // The data hash is SHA-256 of the canonical JSON of the hashed fields
-  // Per gateway docs: hash of canonical JSON (sorted keys, no whitespace)
-  const hashedFields = signature.hashed_fields;
-
-  // Get the value to hash based on hashed_fields
-  // Typically ["data"] means hash the canonical JSON of metadata.data
-  let valueToHash: unknown;
-
-  if (hashedFields.length === 1 && hashedFields[0] === 'data') {
-    // Most common case: hash the data field
-    valueToHash = metadata.data;
-  } else {
-    // Build object from multiple fields
-    const obj: Record<string, unknown> = {};
-    for (const field of hashedFields) {
-      if (field === 'content_hash') {
-        obj[field] = metadata.content_hash;
-      } else if (field === 'data') {
-        obj[field] = metadata.data;
-      } else if (field === 'stamp_id') {
-        obj[field] = metadata.stamp_id;
-      } else if (field === 'provenance_standard') {
-        obj[field] = metadata.provenance_standard ?? '';
-      }
-    }
-    valueToHash = obj;
-  }
-
-  // Compute canonical JSON and hash it
-  const canonicalJson = toCanonicalJson(valueToHash);
-  const computedHash = sha256Hex(canonicalJson);
-  return computedHash === signature.data_hash;
+export function verifyDataHash(
+  signature: NotarySignature,
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
+  canonicalData?: string
+): boolean {
+  if (!isNotaryScheme(signature)) return false;
+  return computeNotaryDataHash(metadata, canonicalData) === signature.data_hash;
 }
 
 /**
- * Recover the signer address from an EIP-191 signature
- * Note: This is a placeholder - full implementation requires ethers or viem
+ * Recover the signer address from an EIP-191 personal_sign signature.
+ *
+ * @param message - The message that was signed (before the EIP-191 prefix)
+ * @param signature - 65-byte r || s || v hex, with or without 0x; v is 27/28 or 0/1
+ * @returns Lowercase 0x-prefixed address
+ * @throws VerificationError (INVALID_SIGNATURE) if the signature is malformed,
+ *   uses a high s value (EIP-2), or does not recover
  */
 export function recoverSigner(message: string, signature: string): string {
-  // For now, we just return the signature prefix as a placeholder
-  // Real implementation would use ethers.verifyMessage or viem's verifyMessage
-  void message;
-  void signature;
-  throw new VerificationError(
-    'Signature recovery not implemented - install ethers or viem for full verification',
-    'NOT_IMPLEMENTED'
+  const match = SIGNATURE.exec(typeof signature === 'string' ? signature : '');
+  if (!match) {
+    throw new VerificationError('Invalid signature: expected 65 bytes of hex (r || s || v)', 'INVALID_SIGNATURE');
+  }
+  const v = parseInt(match[2]!, 16);
+  const recovery = v >= 27 ? v - 27 : v;
+  if (recovery !== 0 && recovery !== 1) {
+    throw new VerificationError(`Invalid signature: v must be 27, 28, 0 or 1, got ${v}`, 'INVALID_SIGNATURE');
+  }
+
+  const body = utf8ToBytes(message);
+  const prefix = utf8ToBytes(`\x19Ethereum Signed Message:\n${body.length}`);
+  const prefixed = new Uint8Array(prefix.length + body.length);
+  prefixed.set(prefix);
+  prefixed.set(body, prefix.length);
+  const digest = keccak_256(prefixed);
+
+  try {
+    const sig = secp256k1.Signature.fromCompact(match[1]!);
+    if (sig.hasHighS()) {
+      throw new Error('high s value (non-canonical, EIP-2)');
+    }
+    const publicKey = sig.addRecoveryBit(recovery).recoverPublicKey(digest).toRawBytes(false);
+    return '0x' + bytesToHex(keccak_256(publicKey.subarray(1)).subarray(12));
+  } catch (e) {
+    throw new VerificationError(
+      `Invalid signature: ${e instanceof Error ? e.message : String(e)}`,
+      'INVALID_SIGNATURE'
+    );
+  }
+}
+
+function isNotaryScheme(signature: NotarySignature): boolean {
+  return (
+    typeof signature === 'object' &&
+    signature !== null &&
+    signature.type === NOTARY_SIGNATURE_TYPE &&
+    Array.isArray(signature.hashed_fields) &&
+    signature.hashed_fields.length === 1 &&
+    signature.hashed_fields[0] === 'data' &&
+    signature.signed_message_format === NOTARY_MESSAGE_FORMAT &&
+    typeof signature.data_hash === 'string' &&
+    typeof signature.timestamp === 'string' &&
+    signature.timestamp.length > 0 &&
+    typeof signature.signer === 'string' &&
+    typeof signature.signature === 'string'
   );
 }
 
 /**
- * Verify a notary signature
- * Returns true if:
- * 1. The data hash matches the metadata
- * 2. The signature is valid (if verification is possible)
+ * Verify one notary signature against an expected signer. Fails closed:
+ * valid only if the scheme is the gateway's, the data hash matches, the
+ * signature recovers to `expectedSigner`, and the declared signer is the same.
  *
- * @param signature - The notary signature to verify
- * @param metadata - The provenance metadata
- * @param expectedSigner - Optional expected signer address
- * @returns Object with verification status and details
+ * @param expectedSigner - The notary address to trust. Without one the result
+ *   is always invalid: a signature can only prove who signed, not whether that
+ *   signer should be trusted.
+ * @param canonicalData - Exact canonical JSON of `data` (see computeNotaryDataHash)
  */
 export function verifySignature(
   signature: NotarySignature,
-  metadata: ProvenanceMetadata,
-  expectedSigner?: string
-): { valid: boolean; dataHashValid: boolean; signerValid?: boolean; error?: string } {
-  // Step 1: Verify the data hash
-  const dataHashValid = verifyDataHash(signature, metadata);
-
-  if (!dataHashValid) {
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
+  expectedSigner?: string,
+  canonicalData?: string
+): { valid: boolean; dataHashValid: boolean; signerValid?: boolean; recoveredAddress?: string; error?: string } {
+  if (!isNotaryScheme(signature)) {
     return {
       valid: false,
       dataHashValid: false,
-      error: 'Data hash mismatch',
+      error: 'Unsupported or malformed signature (expected the gateway notary scheme)',
     };
   }
 
-  // Step 2: Check if signer matches expected (if provided)
-  if (expectedSigner) {
-    const signerValid =
-      signature.signer.toLowerCase() === expectedSigner.toLowerCase();
-    if (!signerValid) {
-      return {
-        valid: false,
-        dataHashValid: true,
-        signerValid: false,
-        error: `Signer mismatch: expected ${expectedSigner}, got ${signature.signer}`,
-      };
-    }
+  const dataHashValid = verifyDataHash(signature, metadata, canonicalData);
+  if (!dataHashValid) {
+    return { valid: false, dataHashValid: false, error: 'Data hash mismatch' };
+  }
+
+  if (!expectedSigner || !ADDRESS.test(expectedSigner)) {
+    return { valid: false, dataHashValid: true, error: 'No expected signer address to verify against' };
+  }
+
+  let recoveredAddress: string;
+  try {
+    recoveredAddress = recoverSigner(reconstructSignedMessage(signature), signature.signature);
+  } catch (e) {
+    return { valid: false, dataHashValid: true, signerValid: false, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  const expected = expectedSigner.toLowerCase();
+  if (recoveredAddress !== expected) {
     return {
-      valid: true,
+      valid: false,
       dataHashValid: true,
-      signerValid: true,
+      signerValid: false,
+      recoveredAddress,
+      error: `Signature recovers to ${recoveredAddress}, expected ${expected}`,
     };
   }
-
-  // Without crypto verification, we can only verify the data hash
-  // The signature itself would need ethers/viem to verify
-  return {
-    valid: true,
-    dataHashValid: true,
-  };
+  if (signature.signer.toLowerCase() !== expected) {
+    return {
+      valid: false,
+      dataHashValid: true,
+      signerValid: false,
+      recoveredAddress,
+      error: `Declared signer ${signature.signer} does not match the signature`,
+    };
+  }
+  return { valid: true, dataHashValid: true, signerValid: true, recoveredAddress };
 }
 
 /**
- * Verify all signatures on a document
+ * Verify every signature on a document. `allValid` is true only if there is at
+ * least one signature and every one verifies against `expectedSigner`; other
+ * signature types cannot be checked, so their presence makes it false.
  */
 export function verifyAllSignatures(
   signatures: NotarySignature[],
-  metadata: ProvenanceMetadata,
-  expectedSigner?: string
-): { allValid: boolean; results: Array<{ index: number; valid: boolean; error?: string }> } {
-  const results: Array<{ index: number; valid: boolean; error?: string }> = signatures.map((sig, index) => {
-    const result = verifySignature(sig, metadata, expectedSigner);
-    const item: { index: number; valid: boolean; error?: string } = {
-      index,
-      valid: result.valid,
-    };
-    if (result.error !== undefined) {
-      item.error = result.error;
-    }
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
+  expectedSigner?: string,
+  canonicalData?: string
+): { allValid: boolean; results: SignatureCheck[] } {
+  const results = (Array.isArray(signatures) ? signatures : []).map((sig, index) => {
+    const result = verifySignature(sig, metadata, expectedSigner, canonicalData);
+    const item: SignatureCheck = { index, valid: result.valid, dataHashValid: result.dataHashValid };
+    if (result.recoveredAddress !== undefined) item.recoveredAddress = result.recoveredAddress;
+    if (result.error !== undefined) item.error = result.error;
     return item;
   });
 
-  return {
-    allValid: results.every((r) => r.valid),
-    results,
-  };
+  return { allValid: results.length > 0 && results.every((r) => r.valid), results };
 }

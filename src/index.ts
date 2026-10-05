@@ -10,6 +10,8 @@ export type {
   GatewayRetryConfig,
   UploadOptions,
   DownloadOptions,
+  SignatureCheck,
+  SignatureVerification,
   UploadResult,
   DownloadResult,
   DocumentMetadata,
@@ -50,7 +52,12 @@ export {
   verifySignature,
   verifyAllSignatures,
   verifyDataHash,
+  recoverSigner,
+  computeNotaryDataHash,
+  NOTARY_MESSAGE_FORMAT,
 } from './notary.js';
+
+export { canonicalizeJsonText, canonicalizeJsonValue } from './canonical-json.js';
 
 export {
   sha256Hex,

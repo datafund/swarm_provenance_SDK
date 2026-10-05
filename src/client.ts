@@ -5,6 +5,7 @@ import type {
   GatewayRetryConfig,
   UploadOptions,
   DownloadOptions,
+  SignatureVerification,
   UploadResult,
   DownloadResult,
   DocumentUploadResult,
@@ -30,6 +31,7 @@ import {
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
+import { canonicalizeJsonText } from './canonical-json.js';
 import { toBytes } from './utils.js';
 import { createX402Fetch } from './payment.js';
 
@@ -229,7 +231,10 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const raw = (await response.json()) as Record<string, unknown>;
+    const text = await response.text();
+    const raw = JSON.parse(text) as Record<string, unknown>;
+    const wrapped = Boolean(raw['metadata'] && typeof raw['metadata'] === 'object');
+    const canonicalData = canonicalDataOf(text, wrapped);
 
     let documentData: Record<string, unknown>;
     let contentHash: string;
@@ -237,7 +242,7 @@ export class ProvenanceClient {
     let provenanceStandard: string | undefined;
     let signatures: NotarySignature[] | undefined;
 
-    if (raw['metadata'] && typeof raw['metadata'] === 'object') {
+    if (wrapped) {
       // Wrapped format: {metadata: {...}, signatures: [...]}
       const meta = raw['metadata'] as Record<string, unknown>;
       documentData = meta['data'] as Record<string, unknown>;
@@ -266,7 +271,7 @@ export class ProvenanceClient {
     }
 
     // Verify content hash
-    if (!verifyDocumentHash(metadata)) {
+    if (!verifyDocumentHash(metadata, canonicalData)) {
       throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
     }
 
@@ -278,23 +283,44 @@ export class ProvenanceClient {
       result.signatures = signatures;
     }
 
-    // Verify signatures if present and requested
-    if (signatures && signatures.length > 0) {
-      const shouldVerify = options.verify !== false;
-      if (shouldVerify) {
-        const notary = await this.notaryInfo();
-        // For document metadata, create a compatible metadata for signature verification
-        const sigMetadata: ProvenanceMetadata = {
-          data: JSON.stringify(documentData),
-          content_hash: contentHash,
-          stamp_id: stampId,
-        };
-        const verification = verifyAllSignatures(signatures, sigMetadata, notary.address);
-        result.verified = verification.allValid;
-      }
+    // Verify signatures if present and requested. The notary hashes the data
+    // object itself (#114: this used to pass JSON.stringify(data), a string).
+    if (signatures && signatures.length > 0 && options.verify !== false) {
+      Object.assign(result, await this.verifySignatures(signatures, metadata, canonicalData, options));
     }
 
     return result;
+  }
+
+  /**
+   * Check notary signatures against the expected signer: `options.notaryAddress`
+   * if given, else the address the gateway reports. Fails closed: with no
+   * usable address, `verified` is false.
+   */
+  private async verifySignatures(
+    signatures: NotarySignature[],
+    metadata: ProvenanceMetadata | DocumentMetadata,
+    canonicalData: string | undefined,
+    options: DownloadOptions
+  ): Promise<{ verified: boolean; verification: SignatureVerification }> {
+    let expectedSigner: string | undefined;
+    let expectedSignerSource: SignatureVerification['expectedSignerSource'] = 'none';
+    if (options.notaryAddress !== undefined) {
+      expectedSigner = options.notaryAddress;
+      expectedSignerSource = 'option';
+    } else {
+      const notary = await this.notaryInfo();
+      // address may be null or absent when the notary is disabled
+      if (typeof notary.address === 'string' && notary.address) {
+        expectedSigner = notary.address;
+        expectedSignerSource = 'gateway';
+      }
+    }
+
+    const { allValid, results } = verifyAllSignatures(signatures, metadata, expectedSigner, canonicalData);
+    const verification: SignatureVerification = { expectedSignerSource, results };
+    if (expectedSigner !== undefined) verification.expectedSigner = expectedSigner;
+    return { verified: allValid, verification };
   }
 
   private async resolveStampId(options: UploadOptions): Promise<string> {
@@ -411,11 +437,14 @@ export class ProvenanceClient {
     // Parse response - gateway may return:
     // 1. Wrapped format: {metadata: {...}, signatures: [...]}
     // 2. Direct format: {data: "...", content_hash: "...", stamp_id: "...", signatures?: [...]}
-    const data = (await response.json()) as
+    const text = await response.text();
+    const data = JSON.parse(text) as
       | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
       | (ProvenanceMetadata & { signatures?: NotarySignature[] });
+    const wrapped = Boolean('metadata' in data && data.metadata && typeof data.metadata === 'object');
+    const canonicalData = canonicalDataOf(text, wrapped);
 
-    if ('metadata' in data && data.metadata && typeof data.metadata === 'object') {
+    if ('metadata' in data && wrapped) {
       // Wrapped format
       metadata = data.metadata;
       signatures = data.signatures;
@@ -456,13 +485,8 @@ export class ProvenanceClient {
     }
 
     // Verify signatures if present and requested
-    if (signatures && signatures.length > 0) {
-      const shouldVerify = options.verify !== false;
-      if (shouldVerify) {
-        const notary = await this.notaryInfo();
-        const verification = verifyAllSignatures(signatures, metadata, notary.address);
-        result.verified = verification.allValid;
-      }
+    if (signatures && signatures.length > 0 && options.verify !== false) {
+      Object.assign(result, await this.verifySignatures(signatures, metadata, canonicalData, options));
     }
 
     return result;
@@ -589,5 +613,18 @@ export class ProvenanceClient {
     }
 
     return new GatewayConnectionError(message, response.status, code, suggestion);
+  }
+}
+
+/**
+ * Exact canonical JSON of the document's `data` field, taken from the response
+ * text so floats and large integers keep the form the notary hashed.
+ * Undefined if it cannot be extracted; callers then canonicalise the parsed value.
+ */
+function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
+  try {
+    return canonicalizeJsonText(text, wrapped ? ['metadata', 'data'] : ['data']);
+  } catch {
+    return undefined;
   }
 }

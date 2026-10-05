@@ -1,255 +1,209 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { privateKeyToAccount } from 'viem/accounts';
 import {
   verifyDataHash,
   verifySignature,
   verifyAllSignatures,
   reconstructSignedMessage,
+  recoverSigner,
+  computeNotaryDataHash,
 } from '../../src/notary.js';
-import { buildMetadata } from '../../src/metadata.js';
-import { sha256Hex } from '../../src/utils.js';
-import type { NotarySignature, ProvenanceMetadata } from '../../src/types.js';
+import { canonicalizeJsonText } from '../../src/canonical-json.js';
+import { VerificationError } from '../../src/errors.js';
+import type { NotarySignature } from '../../src/types.js';
 
-/**
- * Compute the expected data_hash as the gateway does:
- * SHA-256 of canonical JSON (sorted keys, no whitespace)
- */
-function computeDataHash(value: unknown): string {
-  const canonicalJson = toCanonicalJson(value);
-  return sha256Hex(canonicalJson);
+// Signed by the gateway's own ProvenanceService (see tests/fixtures/notary/generate.py)
+// with Hardhat account #0, a publicly known test key.
+const FIXTURES = new URL('../fixtures/notary/', import.meta.url);
+const NOTARY = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+const OTHER_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'; // Hardhat #1
+
+interface SignedDoc {
+  data: string | Record<string, unknown>;
+  content_hash: string;
+  stamp_id: string;
+  signatures: NotarySignature[];
 }
 
-function toCanonicalJson(value: unknown): string {
-  if (value === null || value === undefined) {
-    return JSON.stringify(value);
-  }
-  if (typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return '[' + value.map(toCanonicalJson).join(',') + ']';
-  }
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  const pairs = keys.map(
-    (k) => JSON.stringify(k) + ':' + toCanonicalJson((value as Record<string, unknown>)[k])
-  );
-  return '{' + pairs.join(',') + '}';
+function fixture(name: string): { text: string; doc: SignedDoc; sig: NotarySignature; canonical: string } {
+  const text = readFileSync(new URL(`${name}.json`, FIXTURES), 'utf8');
+  const doc = JSON.parse(text) as SignedDoc;
+  return { text, doc, sig: doc.signatures[0]!, canonical: canonicalizeJsonText(text, ['data'])! };
 }
 
-describe('verifyDataHash', () => {
-  it('should return true when hash matches data field (gateway format)', () => {
-    const content = 'Hello, World!';
-    const metadata = buildMetadata(content, { stampId: 'stamp123' });
+/** A signature over `${data_hash}|${timestamp}` made with an arbitrary key */
+async function signWith(key: `0x${string}`, dataHash: string, timestamp: string): Promise<string> {
+  return privateKeyToAccount(key).signMessage({ message: `${dataHash}|${timestamp}` });
+}
 
-    // Gateway uses hashed_fields: ['data'] and hashes canonical JSON of the data field
-    const signature: NotarySignature = {
-      type: 'notary',
-      signer: '0x1234567890123456789012345678901234567890',
-      timestamp: '2024-01-01T00:00:00Z',
-      data_hash: computeDataHash(metadata.data),
-      signature: '0xsignature',
-      hashed_fields: ['data'],
-      signed_message_format: '{data_hash}|{timestamp}',
-    };
-
-    expect(verifyDataHash(signature, metadata)).toBe(true);
+describe('recoverSigner', () => {
+  it('recovers the notary from a gateway signature (hex without 0x, v = 27/28)', () => {
+    const { sig } = fixture('base64-document');
+    expect(sig.signature.startsWith('0x')).toBe(false);
+    expect(recoverSigner(`${sig.data_hash}|${sig.timestamp}`, sig.signature)).toBe(NOTARY.toLowerCase());
   });
 
-  it('should return false when hash does not match', () => {
-    const metadata = buildMetadata('Hello', { stampId: 'stamp123' });
-
-    const signature: NotarySignature = {
-      type: 'notary',
-      signer: '0x1234567890123456789012345678901234567890',
-      timestamp: '2024-01-01T00:00:00Z',
-      data_hash: 'wrong_hash_value',
-      signature: '0xsignature',
-      hashed_fields: ['data'],
-      signed_message_format: '{data_hash}|{timestamp}',
-    };
-
-    expect(verifyDataHash(signature, metadata)).toBe(false);
+  it('accepts a 0x prefix and v as 0/1', () => {
+    const { sig } = fixture('base64-document');
+    const v = parseInt(sig.signature.slice(128), 16) - 27;
+    const zeroOne = `0x${sig.signature.slice(0, 128)}${v.toString(16).padStart(2, '0')}`;
+    expect(recoverSigner(`${sig.data_hash}|${sig.timestamp}`, zeroOne)).toBe(NOTARY.toLowerCase());
   });
 
-  it('should handle multiple hashed fields', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123', standard: 'v1' });
+  it.each([
+    ['empty', ''],
+    ['placeholder', '0xsignature'],
+    ['too short', '0x' + 'ab'.repeat(64)],
+    ['bad v', '0x' + 'ab'.repeat(64) + '05'],
+    ['not hex', 'zz'.repeat(65)],
+  ])('throws INVALID_SIGNATURE for a %s signature', (_label, signature) => {
+    expect(() => recoverSigner('msg', signature)).toThrow(VerificationError);
+    expect(() => recoverSigner('msg', signature)).toThrow(/Invalid signature/);
+  });
 
-    // When multiple fields, hash canonical JSON of object with those fields
-    const expectedHash = computeDataHash({
-      content_hash: metadata.content_hash,
-      stamp_id: metadata.stamp_id,
-    });
-
-    const signature: NotarySignature = {
-      type: 'notary',
-      signer: '0x1234567890123456789012345678901234567890',
-      timestamp: '2024-01-01T00:00:00Z',
-      data_hash: expectedHash,
-      signature: '0xsignature',
-      hashed_fields: ['content_hash', 'stamp_id'],
-      signed_message_format: '{data_hash}|{timestamp}',
-    };
-
-    expect(verifyDataHash(signature, metadata)).toBe(true);
+  it('rejects a high-s (malleated) signature', () => {
+    const { sig } = fixture('base64-document');
+    const n = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+    const s = BigInt('0x' + sig.signature.slice(64, 128));
+    const v = parseInt(sig.signature.slice(128), 16);
+    const malleated =
+      sig.signature.slice(0, 64) + (n - s).toString(16).padStart(64, '0') + (v === 27 ? '1c' : '1b');
+    expect(() => recoverSigner(`${sig.data_hash}|${sig.timestamp}`, malleated)).toThrow(/high s/);
   });
 });
 
 describe('reconstructSignedMessage', () => {
-  it('should reconstruct message with timestamp and hash', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
+  it('builds data_hash|timestamp for the gateway format', () => {
+    const { sig } = fixture('base64-document');
+    expect(reconstructSignedMessage(sig)).toBe(`${sig.data_hash}|${sig.timestamp}`);
+  });
 
-    const signature: NotarySignature = {
-      type: 'notary',
-      signer: '0x1234567890123456789012345678901234567890',
-      timestamp: '2024-01-15T10:30:00Z',
-      data_hash: 'abc123',
-      signature: '0xsig',
-      hashed_fields: ['data'],
-      signed_message_format: '{data_hash}|{timestamp}',
-    };
+  it('refuses any other format (it would let a forger choose what the notary signed)', () => {
+    const { sig } = fixture('base64-document');
+    expect(() => reconstructSignedMessage({ ...sig, signed_message_format: 'anything the notary signed' })).toThrow(
+      /Unsupported signed_message_format/,
+    );
+  });
+});
 
-    const message = reconstructSignedMessage(signature, metadata);
+describe('computeNotaryDataHash / verifyDataHash', () => {
+  it('matches the gateway for a base64 document', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(computeNotaryDataHash(doc)).toBe(sig.data_hash);
+    expect(verifyDataHash(sig, doc)).toBe(true);
+  });
 
-    expect(message).toBe('abc123|2024-01-15T10:30:00Z');
+  it('matches the gateway for a raw document when given the canonical text (floats, big ints)', () => {
+    const { doc, sig, canonical } = fixture('raw-document');
+    expect(computeNotaryDataHash(doc, canonical)).toBe(sig.data_hash);
+    // The parsed value has lost "2.0" and the 30-digit integer: it cannot match
+    expect(computeNotaryDataHash(doc)).not.toBe(sig.data_hash);
+  });
+
+  it('rejects hashed_fields other than ["data"]', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifyDataHash({ ...sig, hashed_fields: ['data', 'stamp_id'] }, doc)).toBe(false);
   });
 });
 
 describe('verifySignature', () => {
-  const createValidSignature = (metadata: ProvenanceMetadata): NotarySignature => ({
-    type: 'notary',
-    signer: '0xNotaryAddress123',
-    timestamp: '2024-01-01T00:00:00Z',
-    data_hash: computeDataHash(metadata.data),
-    signature: '0xvalidSignature',
-    hashed_fields: ['data'],
-    signed_message_format: '{data_hash}|{timestamp}',
+  it('a genuine notary signature is valid', () => {
+    const { doc, sig } = fixture('base64-document');
+    const result = verifySignature(sig, doc, NOTARY);
+    expect(result).toEqual({ valid: true, dataHashValid: true, signerValid: true, recoveredAddress: NOTARY.toLowerCase() });
   });
 
-  it('should return valid=true when data hash matches', () => {
-    const metadata = buildMetadata('test content', { stampId: 'stamp123' });
-    const signature = createValidSignature(metadata);
-
-    const result = verifySignature(signature, metadata);
-
-    expect(result.valid).toBe(true);
-    expect(result.dataHashValid).toBe(true);
+  it('a genuine raw-document signature is valid with the canonical text (#114)', () => {
+    const { doc, sig, canonical } = fixture('raw-document');
+    expect(verifySignature(sig, doc, NOTARY, canonical).valid).toBe(true);
   });
 
-  it('should return valid=false when data hash does not match', () => {
-    const metadata = buildMetadata('test content', { stampId: 'stamp123' });
-    const signature = createValidSignature(metadata);
-    signature.data_hash = 'tampered_hash';
+  it('compares addresses case-insensitively', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifySignature(sig, doc, NOTARY.toUpperCase().replace('0X', '0x')).valid).toBe(true);
+  });
 
-    const result = verifySignature(signature, metadata);
+  it('without an expected signer the result is invalid, even for a genuine signature', () => {
+    const { doc, sig } = fixture('base64-document');
+    for (const expected of [undefined, '', 'not-an-address']) {
+      const result = verifySignature(sig, doc, expected);
+      expect(result.valid).toBe(false);
+      expect(result.error).toMatch(/No expected signer/);
+    }
+  });
 
+  it.each([
+    ['empty signature', { signature: '' }],
+    ['placeholder signature', { signature: '0xsignature' }],
+    ['missing signature', { signature: undefined }],
+    ['invalid recovery bit', { signature: 'ab'.repeat(64) + '05' }],
+  ])('%s is invalid (the published 0.6.1 reported these as verified)', (_label, patch) => {
+    const { doc, sig } = fixture('base64-document');
+    const tampered = { ...sig, ...patch } as unknown as NotarySignature;
+    expect(verifySignature(tampered, doc, NOTARY).valid).toBe(false);
+  });
+
+  it('a well-formed signature from another key that declares the notary as signer is invalid', async () => {
+    const { doc, sig } = fixture('base64-document');
+    const forged = { ...sig, signature: await signWith(OTHER_KEY, sig.data_hash, sig.timestamp) };
+    const result = verifySignature(forged, doc, NOTARY);
     expect(result.valid).toBe(false);
-    expect(result.dataHashValid).toBe(false);
-    expect(result.error).toBe('Data hash mismatch');
+    expect(result.recoveredAddress).toBe(privateKeyToAccount(OTHER_KEY).address.toLowerCase());
   });
 
-  it('should verify signer when expectedSigner is provided', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signature = createValidSignature(metadata);
-    signature.signer = '0xCorrectSigner';
-
-    const result = verifySignature(signature, metadata, '0xCorrectSigner');
-
-    expect(result.valid).toBe(true);
-    expect(result.signerValid).toBe(true);
-  });
-
-  it('should fail when signer does not match expected', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signature = createValidSignature(metadata);
-    signature.signer = '0xWrongSigner';
-
-    const result = verifySignature(signature, metadata, '0xExpectedSigner');
-
+  it('a genuine notary signature with a different declared signer is invalid', () => {
+    const { doc, sig } = fixture('base64-document');
+    const result = verifySignature({ ...sig, signer: privateKeyToAccount(OTHER_KEY).address }, doc, NOTARY);
     expect(result.valid).toBe(false);
-    expect(result.signerValid).toBe(false);
-    expect(result.error).toContain('Signer mismatch');
+    expect(result.error).toMatch(/Declared signer/);
   });
 
-  it('should be case-insensitive for signer comparison', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signature = createValidSignature(metadata);
-    signature.signer = '0xABCDEF';
+  it('a genuine signature on different data is invalid', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifySignature(sig, { ...doc, data: 'dGFtcGVyZWQ=' }, NOTARY)).toMatchObject({
+      valid: false,
+      dataHashValid: false,
+    });
+  });
 
-    const result = verifySignature(signature, metadata, '0xabcdef');
+  it('a changed timestamp is invalid', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifySignature({ ...sig, timestamp: '2030-01-01T00:00:00+00:00' }, doc, NOTARY).valid).toBe(false);
+  });
 
-    expect(result.valid).toBe(true);
-    expect(result.signerValid).toBe(true);
+  it.each([
+    ['type', { type: 'eip191' }],
+    ['hashed_fields', { hashed_fields: ['data', 'content_hash'] }],
+    ['signed_message_format', { signed_message_format: '{timestamp}|{data_hash}' }],
+    ['empty timestamp', { timestamp: '' }],
+  ])('a different %s is invalid', (_label, patch) => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifySignature({ ...sig, ...patch } as NotarySignature, doc, NOTARY).valid).toBe(false);
   });
 });
 
 describe('verifyAllSignatures', () => {
-  const createSignature = (
-    metadata: ProvenanceMetadata,
-    signer: string,
-    valid: boolean
-  ): NotarySignature => ({
-    type: 'notary',
-    signer,
-    timestamp: '2024-01-01T00:00:00Z',
-    data_hash: valid ? computeDataHash(metadata.data) : 'invalid_hash',
-    signature: '0xsig',
-    hashed_fields: ['data'],
-    signed_message_format: '{data_hash}|{timestamp}',
+  it('is valid when every signature verifies', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifyAllSignatures([sig, sig], doc, NOTARY).allValid).toBe(true);
   });
 
-  it('should return allValid=true when all signatures are valid', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signatures = [
-      createSignature(metadata, '0xSigner1', true),
-      createSignature(metadata, '0xSigner2', true),
-    ];
-
-    const result = verifyAllSignatures(signatures, metadata);
-
-    expect(result.allValid).toBe(true);
-    expect(result.results).toHaveLength(2);
-    expect(result.results[0]?.valid).toBe(true);
-    expect(result.results[1]?.valid).toBe(true);
-  });
-
-  it('should return allValid=false when any signature is invalid', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signatures = [
-      createSignature(metadata, '0xSigner1', true),
-      createSignature(metadata, '0xSigner2', false),
-    ];
-
-    const result = verifyAllSignatures(signatures, metadata);
-
+  it('is invalid when any signature fails, and reports which', () => {
+    const { doc, sig } = fixture('base64-document');
+    const result = verifyAllSignatures([sig, { ...sig, signature: '' }], doc, NOTARY);
     expect(result.allValid).toBe(false);
-    expect(result.results[0]?.valid).toBe(true);
-    expect(result.results[1]?.valid).toBe(false);
+    expect(result.results.map((r) => r.valid)).toEqual([true, false]);
+    expect(result.results[1]!.error).toMatch(/Invalid signature/);
   });
 
-  it('should handle empty signatures array', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-
-    const result = verifyAllSignatures([], metadata);
-
-    expect(result.allValid).toBe(true);
-    expect(result.results).toHaveLength(0);
+  it('is invalid for an empty list', () => {
+    const { doc } = fixture('base64-document');
+    expect(verifyAllSignatures([], doc, NOTARY).allValid).toBe(false);
   });
 
-  it('should verify against expected signer', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signatures = [createSignature(metadata, '0xExpectedSigner', true)];
-
-    const result = verifyAllSignatures(signatures, metadata, '0xExpectedSigner');
-
-    expect(result.allValid).toBe(true);
-  });
-
-  it('should fail if signer does not match expected', () => {
-    const metadata = buildMetadata('test', { stampId: 'stamp123' });
-    const signatures = [createSignature(metadata, '0xWrongSigner', true)];
-
-    const result = verifyAllSignatures(signatures, metadata, '0xExpectedSigner');
-
-    expect(result.allValid).toBe(false);
-    expect(result.results[0]?.error).toContain('Signer mismatch');
+  it('is invalid without an expected signer', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifyAllSignatures([sig], doc).allValid).toBe(false);
   });
 });

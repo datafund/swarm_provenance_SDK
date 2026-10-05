@@ -3,9 +3,18 @@ import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
 
-// Mock fetch globally
+// Mock fetch globally. The mocks are plain objects with json(); the client
+// reads download bodies with text() (to canonicalise them losslessly), so
+// derive text() from json() for any mock that lacks it.
 const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
+vi.stubGlobal('fetch', async (...args: unknown[]) => {
+  const res = (await mockFetch(...args)) as { json?: () => Promise<unknown>; text?: () => Promise<string> } | undefined;
+  if (res && res.json && !res.text) {
+    const json = res.json;
+    return { ...res, text: async () => JSON.stringify(await json()) };
+  }
+  return res;
+});
 
 describe('ProvenanceClient', () => {
   beforeEach(() => {
@@ -449,7 +458,7 @@ describe('ProvenanceClient', () => {
       expect(result.metadata.content_hash).toBe(contentHash);
     });
 
-    it('should verify signatures when present', async () => {
+    it('does not report a placeholder signature as verified (the 0.6.1 false positive, #113)', async () => {
       const contentHash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
 
       // Mock download - using gateway format with signatures at same level
@@ -489,7 +498,10 @@ describe('ProvenanceClient', () => {
       const result = await client.download('abcd1234'.repeat(8));
 
       expect(result.signatures).toHaveLength(1);
-      expect(result.verified).toBe(true);
+      // Data hash matches and the declared signer is the notary, but '0xsig' is
+      // not a signature: 0.6.1 returned verified: true here.
+      expect(result.verified).toBe(false);
+      expect(result.verification?.results[0]?.error).toMatch(/expected the gateway notary scheme|Invalid signature|No expected signer/);
     });
 
     it('should throw on content hash mismatch', async () => {

@@ -1,5 +1,6 @@
 import type { ProvenanceMetadata, DocumentMetadata } from './types.js';
 import { sha256Hex, bytesToBase64, base64ToBytes, toBytes } from './utils.js';
+import { canonicalizeJsonValue } from './canonical-json.js';
 
 /**
  * Options for building provenance metadata
@@ -76,14 +77,15 @@ export interface DocumentMetadataOptions {
 
 /**
  * Build document metadata from a raw JSON object (no base64 wrapping).
- * The `data` field contains the object directly; `content_hash` is SHA256 of JSON.stringify(data).
+ * The `data` field contains the object directly; `content_hash` is SHA-256 of
+ * its canonical JSON, the convention shared with the gateway and the Python
+ * tools: json.dumps(data, sort_keys=True, separators=(',', ':')).
  */
 export function buildDocumentMetadata(
   document: Record<string, unknown>,
   options: DocumentMetadataOptions
 ): DocumentMetadata {
-  const dataStr = JSON.stringify(document);
-  const contentHash = sha256Hex(toBytes(dataStr));
+  const contentHash = sha256Hex(canonicalizeJsonValue(document));
 
   const metadata: DocumentMetadata = {
     data: document,
@@ -100,12 +102,17 @@ export function buildDocumentMetadata(
 
 /**
  * Verify the content hash of a document metadata (raw JSON).
- * Recomputes SHA256 of JSON.stringify(data) and compares to content_hash.
+ *
+ * Accepts SHA-256 of the canonical JSON of `data` (the cross-tool convention;
+ * pass `canonicalData` from canonicalizeJsonText on the response text for an
+ * exact result with floats and large integers), or of JSON.stringify(data),
+ * which SDK versions up to 0.6.x wrote. This is a self-consistency check only:
+ * anyone can compute it, so it does not bind the data to its author.
  */
-export function verifyDocumentHash(metadata: DocumentMetadata): boolean {
-  const dataStr = JSON.stringify(metadata.data);
-  const computedHash = sha256Hex(toBytes(dataStr));
-  return computedHash === metadata.content_hash;
+export function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: string): boolean {
+  const canonical = canonicalData ?? canonicalizeJsonValue(metadata.data);
+  if (sha256Hex(canonical) === metadata.content_hash) return true;
+  return sha256Hex(toBytes(JSON.stringify(metadata.data))) === metadata.content_hash;
 }
 
 /**

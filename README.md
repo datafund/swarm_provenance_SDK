@@ -147,17 +147,38 @@ const result = await client.upload(content, {
 
 ```typescript
 const result = await client.download(reference, {
-  verify?: boolean,  // Verify notary signature (default: true)
+  verify?: boolean,         // Verify notary signatures (default: true)
+  notaryAddress?: string,   // Notary to trust; default: the address the gateway reports
 });
 
 // Returns:
 // {
 //   file: Uint8Array,            // Decoded content
 //   metadata: ProvenanceMetadata,
-//   verified?: boolean,
+//   verified?: boolean,          // see "What verified means" below
+//   verification?: SignatureVerification,  // expected signer, its source, per-signature results
 //   signatures?: NotarySignature[],
 // }
 ```
+
+#### What `verified` means
+
+`verified: true` means every signature on the document is an EIP-191 signature that
+recovers to the expected notary address over `sha256(canonical JSON of data) | timestamp`
+(the gateway's scheme). It fails closed: an empty, missing or malformed signature, a
+signature by any other key, changed data, or no expected address gives `false`.
+`verified` is `undefined` for unsigned documents or with `verify: false`.
+
+The expected address is `notaryAddress` if you pass it, otherwise the one the gateway
+reports at `/api/v1/notary/info` (`verification.expectedSignerSource` says which). The
+default therefore trusts the gateway that served the document; pin `notaryAddress` to
+verify independently of it.
+
+Canonical JSON is the convention shared with the gateway and the Python tools:
+`json.dumps(data, sort_keys=True, separators=(',', ':'))`. It is also what `content_hash`
+covers for raw documents (`raw: true`); documents from SDK 0.6.x, which hashed
+`JSON.stringify(data)`, still pass the content-hash check. `content_hash` alone proves
+nothing about who wrote the data: anyone can compute it.
 
 ### Other Methods
 
@@ -245,7 +266,10 @@ import {
 } from '@datafund/swarm-provenance';
 
 const result = verifySignature(signature, metadata, expectedSigner);
-// => { valid: boolean, dataHashValid: boolean, signerValid?: boolean }
+// => { valid, dataHashValid, signerValid?, recoveredAddress?, error? }
+// valid is false without an expectedSigner. For raw documents with floats or
+// integers beyond 2^53, pass the canonical text of `data` as a 4th argument:
+// canonicalizeJsonText(responseText, ['data']).
 ```
 
 ## Blockchain Anchoring (`/chain`)

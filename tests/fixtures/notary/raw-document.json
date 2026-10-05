@@ -1,0 +1,38 @@
+{
+  "data": {
+    "zeta": 1,
+    "alpha": {
+      "b": [
+        1,
+        2.0,
+        0.1,
+        1e+16,
+        1.5e-07,
+        -0.0,
+        123456789012345678901234567890
+      ],
+      "a": null
+    },
+    "text": "quote\" backslash\\ slash/ tab\t newline\n del\u007f \u00e9 \u65e5\u672c \ud83d\ude00",
+    "\u00e9key": true,
+    "\ud83d\ude00": "astral key",
+    "\uff21": "BMP key above the surrogate range",
+    "empty": {},
+    "list": []
+  },
+  "content_hash": "a9b01acdbe00e0023be8a641f07d7ead40468ad750d41d7bed9ffc850f9f433b",
+  "stamp_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "signatures": [
+    {
+      "type": "notary",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "timestamp": "2026-10-05T12:00:00+00:00",
+      "data_hash": "a9b01acdbe00e0023be8a641f07d7ead40468ad750d41d7bed9ffc850f9f433b",
+      "signature": "3bf6637bb37053392122fa77bea1b2c544f21ec933afa13894ddceb0f05ca24c50d9a039ca48d756578c3b0f2ecaf4e78acb0b5f19f0b34b45f937fd2b9636e11b",
+      "hashed_fields": [
+        "data"
+      ],
+      "signed_message_format": "{data_hash}|{timestamp}"
+    }
+  ]
+}

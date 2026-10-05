@@ -68,6 +68,15 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 5. Return `document` as `Record<string, unknown>`
 6. Use `client.downloadDocument(reference)` for this mode
 
+## Notary Signature Verification
+
+Scheme (gateway `app/services/provenance.py` + `signing.py`): `data_hash = sha256(canonical JSON of data)`, message `"{data_hash}|{timestamp}"`, EIP-191 personal_sign by the notary key; signature hex may lack `0x`.
+
+- `src/notary.ts` fails closed: only `type: 'notary'`, `hashed_fields: ['data']` and format `{data_hash}|{timestamp}` are accepted (an arbitrary format string would let a forger point at any message the notary ever signed). Valid only if the signature recovers (low-s) to the expected signer and the declared signer matches. No expected signer = invalid.
+- Expected signer: `DownloadOptions.notaryAddress`, else the gateway's `/notary/info` address (`verification.expectedSignerSource`).
+- Canonical JSON (`src/canonical-json.ts`) = Python `json.dumps(sort_keys=True, separators=(',',':'))`: code-point key order, `\uXXXX` escapes, Python float repr, exact big ints. Downloads canonicalise the response *text* losslessly; parsed values lose `2.0` and big ints.
+- Fixtures in `tests/fixtures/notary/` are produced by the gateway's own code (`generate.py`); regenerate them, never hand-edit.
+
 ## Type System
 
 ```
