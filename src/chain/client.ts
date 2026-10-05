@@ -1,12 +1,13 @@
 import {
   createPublicClient,
+  fallback,
   formatEther,
   http,
   type PublicClient,
   type Hex,
 } from 'viem';
 import { DATA_PROVENANCE_ABI } from './abi.js';
-import { CHAIN_PRESETS, ZERO_BYTES32, ZERO_ADDRESS } from './constants.js';
+import { CHAIN_PRESETS, PRESET_RPC_FALLBACKS, ZERO_BYTES32, ZERO_ADDRESS } from './constants.js';
 import {
   ChainConfigurationError,
   ChainConnectionError,
@@ -92,7 +93,7 @@ export class ChainClient {
       this.preset = config.chain;
     }
 
-    const rpcUrl = config.rpcUrl ?? this.preset.rpcUrl;
+    const rpcUrls = this.resolveRpcUrls(config);
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
@@ -108,9 +109,63 @@ export class ChainClient {
       );
     }
 
+    // fallback() moves to the next URL on any error except a revert or a user
+    // rejection (viem's shouldThrow). retryCount 1: one more pass over the list
+    // (with viem's backoff) rides out a burst of 429s; viem's default (3) would
+    // make 12 requests for 3 failing URLs. rank stays off: its default ping is
+    // net_listening, which says nothing about eth_call. Ranking with an eth_call
+    // ping (a cooldown for degraded or hung URLs) is tracked in #104.
     this.publicClient = createPublicClient({
-      transport: http(rpcUrl),
+      transport:
+        rpcUrls.length === 1
+          ? http(rpcUrls[0])
+          : fallback(rpcUrls.map((url) => http(url)), { retryCount: 1 }),
     });
+  }
+
+  /**
+   * Ordered RPC URLs: the primary, then fallbacks.
+   *
+   * - `config.rpcFallbacks`, when given, is used as is.
+   * - A built-in preset (by name, or the exported object itself) brings its
+   *   PRESET_RPC_FALLBACKS; any other preset object, including a spread copy,
+   *   brings its own `rpcFallbacks`, exactly as written.
+   * - An explicit `config.rpcUrl` outside the preset's URL list is treated as a
+   *   private endpoint: no preset fallbacks, so its reads never go to public
+   *   ones. An `rpcUrl` that is one of the preset's URLs keeps the rest.
+   *
+   * Blank entries are dropped. Duplicates are compared ignoring a trailing
+   * slash; the first spelling is passed to viem unchanged.
+   */
+  private resolveRpcUrls(config: ChainClientConfig): string[] {
+    const norm = (url: string) => url.trim().replace(/\/+$/, '');
+    const same = (a: string, b: string) => norm(a) === norm(b);
+
+    const preset = this.preset;
+    // A built-in preset, by name or as the (frozen) object itself, brings its
+    // PRESET_RPC_FALLBACKS; any other preset object brings its own rpcFallbacks.
+    const builtinName = Object.keys(CHAIN_PRESETS).find((name) => CHAIN_PRESETS[name] === preset);
+    const presetFallbacks = builtinName ? PRESET_RPC_FALLBACKS[builtinName] ?? [] : preset.rpcFallbacks ?? [];
+    const presetUrls = [preset.rpcUrl, ...presetFallbacks];
+    const primary = config.rpcUrl?.trim() || preset.rpcUrl;
+
+    let fallbacks: readonly string[];
+    if (config.rpcFallbacks) {
+      fallbacks = config.rpcFallbacks;
+    } else if (presetUrls.some((url) => same(url, primary))) {
+      fallbacks = presetUrls; // the primary's own entry is removed as a duplicate below
+    } else {
+      fallbacks = [];
+    }
+
+    const urls: string[] = [];
+    for (const url of [primary, ...fallbacks]) {
+      if (norm(url) && !urls.some((u) => same(u, url))) urls.push(url.trim());
+    }
+    if (urls.length === 0) {
+      throw new ChainConfigurationError(`No RPC URL configured for ${preset.name}: set rpcUrl or the preset's rpcUrl`);
+    }
+    return urls;
   }
 
   // ─── Read Operations ─────────────────────────────────────────
@@ -461,12 +516,25 @@ export class ChainClient {
   }
 
   /**
-   * Check if the RPC connection is healthy.
-   * Returns true if connected, false on error (does not throw).
+   * Check that the RPC can serve contract reads against the configured contract.
+   * Returns true if it can, false on error (does not throw).
+   *
+   * Probes with a real eth_call (getUserDataRecordsCount on the zero address),
+   * the operation every read depends on. In #101, sepolia.base.org answered
+   * eth_chainId and eth_blockNumber while every eth_call returned 503.
+   *
+   * So it also returns false for a wrong or undeployed contract address. With
+   * fallbacks it returns true if any URL can serve the read; to check only the
+   * primary, use a client built with `rpcFallbacks: []`.
    */
   async healthCheck(): Promise<boolean> {
     try {
-      await this.publicClient.getChainId();
+      await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getUserDataRecordsCount',
+        args: [ZERO_ADDRESS],
+      });
       return true;
     } catch {
       return false;

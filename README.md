@@ -95,7 +95,7 @@ const chain = new ChainClient({ chain: 'base-sepolia', signer });
 const result = await chain.anchor(contentHash, 'dataset');
 
 // With private key (Node.js)
-const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
+const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
 const chain = new ChainClient({ chain: 'base-sepolia', signer });
 await chain.anchor(contentHash, 'dataset');
 ```
@@ -257,11 +257,29 @@ import { ChainClient } from '@datafund/swarm-provenance/chain';
 
 const chain = new ChainClient({
   chain: 'base-sepolia',     // or 'base' for mainnet, or a custom ChainPreset
-  rpcUrl?: string,            // override RPC endpoint
+  rpcUrl?: string,            // override RPC endpoint; a URL outside the preset's list disables its fallbacks
+  rpcFallbacks?: string[],    // tried in order on any error but a revert; defaults to the preset's, [] disables
   signer?: ChainSigner,       // required for write operations
   retry?: RetryConfig,        // auto-retry on nonce errors (default: 2 retries, 1s backoff)
 });
 ```
+
+Reads fail over to the next RPC URL on any error except a contract revert or a user rejection
+(that includes HTTP 4xx such as 401/429, so a bad API key on your primary is masked by the
+fallbacks; check `healthCheck()` against a client built with `rpcFallbacks: []` if that matters).
+With fallbacks the list is tried at most twice per call (a single URL keeps viem's default 3 retries).
+`chain: 'base-sepolia'` (or `chain: BASE_SEPOLIA`) tries `base-sepolia-rpc.publicnode.com`, then `base-sepolia.gateway.tenderly.co`,
+then `sepolia.base.org` (`PRESET_RPC_FALLBACKS`). Setting `rpcUrl` to one of those keeps failover to
+the others; any other URL disables the preset's fallbacks, so reads meant for a private endpoint never
+go to public ones. Built-in fallbacks are not on the preset objects, so a spread copy
+(`{ ...BASE_SEPOLIA, rpcUrl }`) has none unless you give it `rpcFallbacks`. Presets and `CHAIN_PRESETS` are
+frozen and typed `Readonly` (assigning to them was possible before; spread a copy instead).
+
+`healthCheck()` now makes a real `eth_call` to the configured contract (previously `eth_chainId`):
+it returns false for a wrong or undeployed contract address, and with fallbacks returns true if any
+URL can serve the call.
+Sending transactions goes through the signer's own transport and does not fail over; waiting
+for the receipt uses the read client and does.
 
 ### Read Operations (no signer required)
 
@@ -298,7 +316,7 @@ await chain.getProvenanceChain(dataHash, 10);
 await chain.supportsTransformationLinks();  // => boolean
 
 // Health check and balance
-await chain.healthCheck();  // => boolean (never throws)
+await chain.healthCheck();  // => boolean (never throws); a real eth_call to the contract, via any fallback
 await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 ```
 
@@ -362,7 +380,7 @@ import {
 const signer = await fromEip1193Provider(window.ethereum);
 
 // Private key (Node.js / scripts)
-const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
+const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
 
 // Existing viem WalletClient
 const signer = fromViemWalletClient(walletClient);
@@ -392,10 +410,10 @@ try {
 
 ### Supported Networks
 
-| Network | Preset | Contract |
-|---------|--------|----------|
-| Base Sepolia (testnet) | `base-sepolia` | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
-| Base (mainnet) | `base` | Not yet deployed |
+| Network | Preset | Contract | RPC (primary, then fallbacks) |
+|---------|--------|----------|-------------------------------|
+| Base Sepolia (testnet) | `base-sepolia` | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` | publicnode → tenderly → sepolia.base.org |
+| Base (mainnet) | `base` | Not yet deployed | mainnet.base.org |
 
 ### Breaking Changes in v0.5.0
 
