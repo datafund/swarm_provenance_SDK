@@ -950,8 +950,7 @@ describe('ChainClient', () => {
   describe('healthCheck', () => {
     it('should return true when connected', async () => {
       const client = new ChainClient({ chain: 'base-sepolia' });
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-      (client as any).publicClient.getChainId = vi.fn().mockResolvedValue(84532);
+      mockReadContract.mockResolvedValueOnce(0n);
 
       const result = await client.healthCheck();
       expect(result).toBe(true);
@@ -959,8 +958,7 @@ describe('ChainClient', () => {
 
     it('should return false when disconnected', async () => {
       const client = new ChainClient({ chain: 'base-sepolia' });
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-      (client as any).publicClient.getChainId = vi.fn().mockRejectedValue(new Error('connection failed'));
+      mockReadContract.mockRejectedValueOnce(new Error('connection failed'));
 
       const result = await client.healthCheck();
       expect(result).toBe(false);

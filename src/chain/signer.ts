@@ -61,7 +61,7 @@ export function fromViemWalletClient(walletClient: {
  *
  * @example
  * ```ts
- * const signer = await fromPrivateKey('0xabc...', 'https://sepolia.base.org');
+ * const signer = await fromPrivateKey('0xabc...', 'https://base-sepolia-rpc.publicnode.com');
  * ```
  */
 export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<ChainSigner> {
