@@ -1,0 +1,1 @@
+{"alpha":{"a":null,"b":[1,2.0,0.1,1e+16,1.5e-07,-0.0,123456789012345678901234567890]},"empty":{},"list":[],"text":"quote\" backslash\\ slash/ tab\t newline\n del\u007f \u00e9 \u65e5\u672c \ud83d\ude00","zeta":1,"\u00e9key":true,"\uff21":"BMP key above the surrogate range","\ud83d\ude00":"astral key"}

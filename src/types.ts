@@ -97,6 +97,37 @@ export interface UploadOptions {
 export interface DownloadOptions {
   /** Verify notary signature (default: true if document is signed) */
   verify?: boolean;
+  /**
+   * Notary address to trust. Without it the SDK uses the address the gateway
+   * reports at /api/v1/notary/info, i.e. it trusts the same gateway that served
+   * the document. Pin it to verify independently of the gateway.
+   */
+  notaryAddress?: string;
+}
+
+/** Result of checking one signature (see SignatureVerification) */
+export interface SignatureCheck {
+  index: number;
+  /** True only if the signature cryptographically verifies against the expected signer */
+  valid: boolean;
+  /** Whether the signature's data_hash matches the document's data */
+  dataHashValid: boolean;
+  /** Address the signature recovers to, if it recovered */
+  recoveredAddress?: string;
+  /** Why the signature is not valid */
+  error?: string;
+}
+
+/** How a download's notary signatures were verified */
+export interface SignatureVerification {
+  /** The address signatures were verified against, if one was available */
+  expectedSigner?: string;
+  /** 'option' = DownloadOptions.notaryAddress; 'gateway' = /notary/info; 'none' = no address */
+  expectedSignerSource: 'option' | 'gateway' | 'none';
+  /** Per-signature results, in document order */
+  results: SignatureCheck[];
+  /** Why no expected signer was available, e.g. the notary lookup failed */
+  error?: string;
 }
 
 /**
@@ -136,7 +167,7 @@ export interface DocumentMetadata {
  * Notary signature attached to a signed document
  */
 export interface NotarySignature {
-  /** Signature type (e.g., 'eip191') */
+  /** Signature type; the gateway notary uses 'notary' */
   type: string;
   /** Signer's Ethereum address */
   signer: string;
@@ -190,8 +221,16 @@ export interface DocumentDownloadResult {
   document: Record<string, unknown>;
   /** The document metadata from the gateway */
   metadata: DocumentMetadata;
-  /** Whether the notary signature was verified (if present) */
+  /**
+   * True only if at least one signature cryptographically verifies against the
+   * expected notary over this exact data; other signatures (e.g. an uploader's
+   * own) are not covered, see `verification.results`. False if none does.
+   * Undefined if the document has no signatures or with `verify: false`: check
+   * `verified === true`.
+   */
   verified?: boolean;
+  /** Details of the signature check, when one ran */
+  verification?: SignatureVerification;
   /** Notary signatures if present */
   signatures?: NotarySignature[];
 }
@@ -204,8 +243,16 @@ export interface DownloadResult {
   file: Uint8Array;
   /** The provenance metadata from the document */
   metadata: ProvenanceMetadata;
-  /** Whether the notary signature was verified (if present) */
+  /**
+   * True only if at least one signature cryptographically verifies against the
+   * expected notary over this exact data; other signatures (e.g. an uploader's
+   * own) are not covered, see `verification.results`. False if none does.
+   * Undefined if the document has no signatures or with `verify: false`: check
+   * `verified === true`.
+   */
   verified?: boolean;
+  /** Details of the signature check, when one ran */
+  verification?: SignatureVerification;
   /** Notary signatures if present */
   signatures?: NotarySignature[];
 }

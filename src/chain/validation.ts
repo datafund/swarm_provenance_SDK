@@ -1,5 +1,6 @@
 import type { Hex } from './types.js';
 import { ChainValidationError } from './errors.js';
+import { isAddress } from '../utils.js';
 
 /** Regex for a 0x-prefixed hex string of exactly 64 hex chars (bytes32) */
 const BYTES32_REGEX = /^0x[0-9a-fA-F]{64}$/;
@@ -29,7 +30,7 @@ export function normalizeHash(hash: string): Hex {
  * Validate that a string is a valid Ethereum address (0x + 40 hex chars).
  */
 export function validateAddress(address: string): void {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+  if (!isAddress(address)) {
     throw new ChainValidationError(`Invalid Ethereum address: "${address}"`);
   }
 }
