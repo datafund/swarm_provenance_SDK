@@ -28,6 +28,12 @@ const degraded: Responder = (method) =>
     ? { status: 200, body: { result: '0x14a34' } }
     : { status: 503, body: { error: { code: -32011, message: 'no backend is currently healthy to serve traffic' } } };
 
+/** Worse case a reviewer raised: gas price also answered (cached/oracle), only eth_call fails. */
+const callsOnlyFail: Responder = (method) =>
+  method === 'eth_call'
+    ? { status: 503, body: { error: { code: -32011, message: 'no backend is currently healthy to serve traffic' } } }
+    : { status: 200, body: { result: method === 'eth_gasPrice' ? '0x5b8d80' : '0x14a34' } };
+
 const healthy: Responder = (method) => {
   if (method === 'eth_call') return { status: 200, body: { result: COUNT_RESULT } };
   if (method === 'eth_gasPrice') return { status: 200, body: { result: '0x5b8d80' } };
@@ -101,11 +107,41 @@ describe('ChainClient RPC fallback', () => {
     expect(calls.filter((c) => c.method === 'eth_call').at(-1)?.url).toBe(FALLBACK_2);
   });
 
-  it('surfaces ChainConnectionError when all URLs fail', async () => {
+  it('surfaces ChainConnectionError when all URLs fail, trying each URL exactly once', async () => {
     stubRpc({ [BASE_SEPOLIA.rpcUrl]: degraded, [FALLBACK_1!]: degraded, [FALLBACK_2!]: degraded });
-    const client = new ChainClient({ chain: 'base-sepolia', retry: { maxRetries: 0 } });
+    const client = new ChainClient({ chain: 'base-sepolia' });
 
     await expect(client.getUserDataRecordsCount(USER)).rejects.toThrow(ChainConnectionError);
+    // viem's default fallback retryCount (3) would replay the list: 12 requests
+    expect(calls.map((c) => c.url)).toEqual([BASE_SEPOLIA.rpcUrl, FALLBACK_1, FALLBACK_2]);
+  });
+
+  it('a custom preset spread from BASE_SEPOLIA with its own rpcUrl does not inherit the public fallbacks', async () => {
+    const custom = 'https://private-rpc.example.com';
+    stubRpc({ [custom]: degraded, [FALLBACK_1!]: healthy, [FALLBACK_2!]: healthy });
+    const client = new ChainClient({ chain: { ...BASE_SEPOLIA, rpcUrl: custom } });
+
+    await expect(client.getUserDataRecordsCount(USER)).rejects.toThrow(ChainConnectionError);
+    expect(new Set(calls.map((c) => c.url))).toEqual(new Set([custom]));
+  });
+
+  it('a custom preset with its own rpcFallbacks keeps them', async () => {
+    const custom = 'https://private-rpc.example.com';
+    const backup = 'https://backup.example.com';
+    stubRpc({ [custom]: degraded, [backup]: healthy });
+    const client = new ChainClient({ chain: { ...BASE_SEPOLIA, rpcUrl: custom, rpcFallbacks: [backup] } });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
+  it('treats URLs differing only by a trailing slash as one endpoint', async () => {
+    const custom = 'https://rpc.example.com';
+    const backup = 'https://backup.example.com';
+    stubRpc({ [custom]: degraded, [backup]: healthy });
+    const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: custom, rpcFallbacks: [`${custom}/`, backup] });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+    expect(calls.map((c) => c.url)).toEqual([custom, backup]);
   });
 
   it('does not fail over on a contract revert', async () => {
@@ -151,6 +187,22 @@ describe('ChainClient RPC fallback', () => {
       const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: custom });
 
       await expect(client.healthCheck()).resolves.toBe(false);
+    });
+
+    it('reports unhealthy when chain id and gas price answer but eth_call fails', async () => {
+      const custom = 'https://rpc.example.com';
+      stubRpc({ [custom]: callsOnlyFail });
+      const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: custom });
+
+      await expect(client.healthCheck()).resolves.toBe(false);
+    });
+
+    it('probes with an eth_call to the configured contract', async () => {
+      stubRpc({ [BASE_SEPOLIA.rpcUrl]: healthy });
+      const client = new ChainClient({ chain: 'base-sepolia', rpcFallbacks: [] });
+
+      await expect(client.healthCheck()).resolves.toBe(true);
+      expect(calls.map((c) => c.method)).toEqual(['eth_call']);
     });
 
     it('reports healthy when a fallback can serve state methods', async () => {

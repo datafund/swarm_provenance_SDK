@@ -337,7 +337,7 @@ const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnod
 | `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
 | `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
-| `healthCheck()` | Read | No | Check RPC can serve state methods (probes `eth_gasPrice`) |
+| `healthCheck()` | Read | No | Check RPC can serve contract reads (probes a real `eth_call`) |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
 | `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
 | `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |

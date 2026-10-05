@@ -94,8 +94,9 @@ export class ChainClient {
     }
 
     const rpcUrl = config.rpcUrl ?? this.preset.rpcUrl;
-    const rpcFallbacks = config.rpcFallbacks ?? (config.rpcUrl ? [] : this.preset.rpcFallbacks ?? []);
-    const rpcUrls = [...new Set([rpcUrl, ...rpcFallbacks])];
+    const rpcFallbacks = config.rpcFallbacks ?? (config.rpcUrl ? [] : this.presetFallbacks());
+    // viem treats 'https://x' and 'https://x/' as one endpoint; so must the dedup
+    const rpcUrls = [...new Set([rpcUrl, ...rpcFallbacks].map((url) => url.replace(/\/+$/, '')))];
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
@@ -111,12 +112,36 @@ export class ChainClient {
       );
     }
 
-    // fallback() advances on transport errors and stops on reverts and user
-    // rejections. rank is left off: its liveness ping is eth_blockNumber, which
-    // a degraded endpoint still answers (issue #101).
+    // fallback() moves to the next URL on any error except a revert or a user
+    // rejection (viem's shouldThrow). retryCount 0: failover replaces retries;
+    // viem's default (3) would replay the whole URL list, 12 requests for 3 URLs.
+    // rank stays off: its liveness ping is eth_blockNumber, which the degraded
+    // endpoint in #101 still answered.
     this.publicClient = createPublicClient({
-      transport: rpcUrls.length === 1 ? http(rpcUrl) : fallback(rpcUrls.map((url) => http(url))),
+      transport:
+        rpcUrls.length === 1
+          ? http(rpcUrls[0])
+          : fallback(rpcUrls.map((url) => http(url)), { retryCount: 0 }),
     });
+  }
+
+  /**
+   * Fallbacks declared by the resolved preset. A custom preset spread from a
+   * built-in one with its own rpcUrl ({ ...BASE_SEPOLIA, rpcUrl }) inherits the
+   * built-in public fallbacks by accident; drop them, matching the rule that an
+   * explicit rpcUrl disables preset fallbacks.
+   */
+  private presetFallbacks(): string[] {
+    const builtin = CHAIN_PRESETS[this.preset.name];
+    if (
+      builtin &&
+      this.preset !== builtin &&
+      this.preset.rpcFallbacks === builtin.rpcFallbacks &&
+      this.preset.rpcUrl !== builtin.rpcUrl
+    ) {
+      return [];
+    }
+    return this.preset.rpcFallbacks ?? [];
   }
 
   // ─── Read Operations ─────────────────────────────────────────
@@ -467,15 +492,21 @@ export class ChainClient {
   }
 
   /**
-   * Check if the RPC connection is healthy.
-   * Returns true if connected, false on error (does not throw).
+   * Check that the RPC can serve contract reads against the configured contract.
+   * Returns true if it can, false on error (does not throw).
    *
-   * Probes with eth_gasPrice, a state method: eth_chainId is answered from cache
-   * by endpoints that cannot serve a single contract read.
+   * Probes with a real eth_call (getUserDataRecordsCount on the zero address),
+   * the operation every read depends on. In #101, sepolia.base.org answered
+   * eth_chainId and eth_blockNumber while every eth_call returned 503.
    */
   async healthCheck(): Promise<boolean> {
     try {
-      await this.publicClient.getGasPrice();
+      await this.publicClient.readContract({
+        address: this.contractAddress,
+        abi: DATA_PROVENANCE_ABI,
+        functionName: 'getUserDataRecordsCount',
+        args: [ZERO_ADDRESS],
+      });
       return true;
     } catch {
       return false;

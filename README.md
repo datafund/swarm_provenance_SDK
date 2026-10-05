@@ -264,10 +264,14 @@ const chain = new ChainClient({
 });
 ```
 
-Read calls fail over to the next RPC URL on transport errors (HTTP 5xx, timeouts, `-32011`-class
-RPC errors). Contract reverts do not fail over. The `base-sepolia` preset tries
-`base-sepolia-rpc.publicnode.com`, then `base-sepolia.gateway.tenderly.co`, then `sepolia.base.org`.
-Write transactions go through the signer's own transport, which these settings do not affect.
+Reads fail over to the next RPC URL on any error except a contract revert or a user rejection
+(that includes HTTP 4xx such as 401/429, so a bad API key on your primary is masked by the
+fallbacks; check `healthCheck()` against a client built with `rpcFallbacks: []` if that matters).
+Each URL is tried once per call. The `base-sepolia` preset tries `base-sepolia-rpc.publicnode.com`,
+then `base-sepolia.gateway.tenderly.co`, then `sepolia.base.org`. Setting `rpcUrl`, or a custom
+preset spread from a built-in one with a different `rpcUrl`, disables the built-in fallbacks.
+Sending transactions goes through the signer's own transport and does not fail over; waiting
+for the receipt uses the read client and does.
 
 ### Read Operations (no signer required)
 
@@ -304,7 +308,7 @@ await chain.getProvenanceChain(dataHash, 10);
 await chain.supportsTransformationLinks();  // => boolean
 
 // Health check and balance
-await chain.healthCheck();  // => boolean (never throws); probes eth_gasPrice, not eth_chainId
+await chain.healthCheck();  // => boolean (never throws); probes with a real eth_call to the contract
 await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 ```
 

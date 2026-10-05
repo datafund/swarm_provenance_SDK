@@ -142,8 +142,8 @@ export interface ChainClientConfig {
   /** Custom RPC URL (overrides preset; also disables the preset's fallbacks) */
   rpcUrl?: string;
   /**
-   * RPC URLs tried in order when the current one fails with a transport error
-   * (HTTP 5xx, timeouts, -32011-class RPC errors). Contract reverts never fail over.
+   * RPC URLs tried in order, each once, when the current one fails. Any error
+   * fails over except a contract revert or a user rejection (so 4xx does too).
    * Defaults to the preset's fallbacks unless `rpcUrl` is set. Pass `[]` to disable.
    */
   rpcFallbacks?: string[];

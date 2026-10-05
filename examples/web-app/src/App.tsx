@@ -11,6 +11,7 @@ import {
 } from '@datafund/swarm-provenance';
 import {
   ChainClient,
+  BASE_SEPOLIA,
   fromEip1193Provider,
   DataStatus,
   type ChainSigner,
@@ -280,7 +281,7 @@ function App() {
               params: [{
                 chainId: hexChainId,
                 chainName: 'Base Sepolia',
-                rpcUrls: ['https://base-sepolia-rpc.publicnode.com', 'https://sepolia.base.org'],
+                rpcUrls: [BASE_SEPOLIA.rpcUrl, ...(BASE_SEPOLIA.rpcFallbacks ?? [])],
                 nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
                 blockExplorerUrls: ['https://sepolia.basescan.org'],
               }],
