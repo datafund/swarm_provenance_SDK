@@ -337,7 +337,7 @@ const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnod
 | `getTransformationLinks(hash)` | Read | No | Get child transformation links (v2) |
 | `getTransformationParents(hash)` | Read | No | Get parent hashes (reverse traversal) |
 | `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
-| `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG |
+| `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG; records carry `parents` (undefined at maxDepth) and `transformationLinks` (children). BFS order, not topological |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC can serve contract reads (probes a real `eth_call`) |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |

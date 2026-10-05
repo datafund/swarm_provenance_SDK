@@ -1,10 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ChainClient } from '../../../src/chain/client.js';
 import {
   ChainConfigurationError,
+  ChainConnectionError,
   ChainTransactionError,
   ChainValidationError,
   DataAlreadyRegisteredError,
+  DataNotRegisteredError,
   SignerRequiredError,
 } from '../../../src/chain/errors.js';
 import { DataStatus } from '../../../src/chain/types.js';
@@ -132,6 +134,23 @@ describe('ChainClient', () => {
       expect(record.status).toBe(DataStatus.ACTIVE);
       expect(record.accessors).toEqual([MOCK_ADDRESS]);
       expect(record.transformationLinks).toEqual([{ newDataHash: `0x${'cd'.repeat(32)}`, description: 'transformed-v2' }]);
+    });
+
+    it('should not set parents (only getProvenanceChain knows them)', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: SAMPLE_HASH_0X,
+        owner: MOCK_ADDRESS,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const record = await client.getDataRecord(SAMPLE_HASH);
+
+      expect('parents' in record).toBe(false);
     });
 
     it('should throw DataNotRegisteredError for zero hash', async () => {
@@ -720,80 +739,92 @@ describe('ChainClient', () => {
   });
 
   describe('getProvenanceChain', () => {
-    it('should traverse the provenance DAG', async () => {
-      const hashA = SAMPLE_HASH_0X;
-      const hashB: Hex = `0x${'bb'.repeat(32)}`;
-      const hashC: Hex = `0x${'cc'.repeat(32)}`;
+    const hashA = SAMPLE_HASH_0X;
+    const hashB: Hex = `0x${'bb'.repeat(32)}`;
+    const hashC: Hex = `0x${'cc'.repeat(32)}`;
 
-      // getDataRecord for hashA
-      mockReadContract
-        .mockResolvedValueOnce({
-          dataHash: hashA,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(1000),
-          dataType: 'dataset',
-          transformationLinks: [{ newDataHash: hashB, description: 'step1' }],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashA → [hashB]
-        .mockResolvedValueOnce([hashB])
-        // getTransformationParents for hashA → []
-        .mockResolvedValueOnce([])
-        // getDataRecord for hashB
-        .mockResolvedValueOnce({
-          dataHash: hashB,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(2000),
-          dataType: 'filtered',
-          transformationLinks: [{ newDataHash: hashC, description: 'step2' }],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashB → [hashC]
-        .mockResolvedValueOnce([hashC])
-        // getTransformationParents for hashB → [hashA]
-        .mockResolvedValueOnce([hashA])
-        // getDataRecord for hashC
-        .mockResolvedValueOnce({
-          dataHash: hashC,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(3000),
-          dataType: 'final',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashC → []
-        .mockResolvedValueOnce([])
-        // getTransformationParents for hashC → [hashB]
-        .mockResolvedValueOnce([hashB]);
+    // clearAllMocks keeps implementations and queued once-values: reset on both
+    // sides so nothing leaks into or out of this suite
+    beforeEach(() => {
+      mockReadContract.mockReset();
+    });
+    afterEach(() => {
+      mockReadContract.mockReset();
+    });
+
+    /** On-chain fixture: hash -> children (transformationLinks) and parents. Unlisted hashes are unregistered. */
+    function mockDag(nodes: Record<string, { children: Hex[]; parents: Hex[] | Error; record?: Error }>): void {
+      mockReadContract.mockImplementation(({ functionName, args }: { functionName: string; args: [Hex] }) => {
+        const node = nodes[args[0]];
+        if (functionName === 'getDataRecord') {
+          if (node?.record) return Promise.reject(node.record);
+          return Promise.resolve({
+            dataHash: node ? args[0] : ZERO_HASH,
+            owner: MOCK_ADDRESS,
+            timestamp: BigInt(1000),
+            dataType: 'dataset',
+            transformationLinks: (node?.children ?? []).map((c) => ({ newDataHash: c, description: 'step' })),
+            accessors: [],
+            status: 0,
+          });
+        }
+        if (functionName === 'getTransformationParents') {
+          const parents = node?.parents ?? [];
+          return parents instanceof Error ? Promise.reject(parents) : Promise.resolve(parents);
+        }
+        return Promise.reject(new Error(`unexpected call: ${functionName}`));
+      });
+    }
+
+    const calledFunctions = () =>
+      (mockReadContract.mock.calls as Array<[{ functionName: string }]>).map(([req]) => req.functionName);
+
+    it('should traverse the provenance DAG and keep both edge directions', async () => {
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [hashC], parents: [hashA] },
+        [hashC]: { children: [], parents: [hashB] },
+      });
 
       const client = new ChainClient({ chain: 'base-sepolia' });
       const chain = await client.getProvenanceChain(SAMPLE_HASH);
 
-      expect(chain).toHaveLength(3);
-      expect(chain[0]!.dataHash).toBe(hashA);
-      expect(chain[1]!.dataHash).toBe(hashB);
-      expect(chain[2]!.dataHash).toBe(hashC);
+      expect(chain.map((r) => r.dataHash)).toEqual([hashA, hashB, hashC]);
+      // Parent edges fetched during traversal are kept, so the DAG can be rebuilt (#100)
+      expect(chain.map((r) => r.parents)).toEqual([[], [hashA], [hashB]]);
+    });
+
+    it('starting from the leaf, walks ancestors and the leaf carries its parent edge', async () => {
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [hashC], parents: [hashA] },
+        [hashC]: { children: [], parents: [hashB] },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(hashC);
+
+      expect(chain.map((r) => r.dataHash)).toEqual([hashC, hashB, hashA]);
+      expect(chain[0]!.parents).toEqual([hashB]);
+    });
+
+    it('takes children from transformationLinks: one RPC lookup per expanded node besides the record', async () => {
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [], parents: [hashA] },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await client.getProvenanceChain(SAMPLE_HASH);
+
+      expect(calledFunctions()).not.toContain('getChildHashes');
+      expect(calledFunctions()).toEqual([
+        'getDataRecord', 'getTransformationParents', 'getDataRecord', 'getTransformationParents',
+      ]);
     });
 
     it('should respect maxDepth', async () => {
-      // With maxDepth=0, should only return the starting node (depth clamped to 1)
-      mockReadContract
-        .mockResolvedValueOnce({
-          dataHash: SAMPLE_HASH_0X,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(1000),
-          dataType: 'dataset',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes
-        .mockResolvedValueOnce([])
-        // getTransformationParents
-        .mockResolvedValueOnce([]);
+      mockDag({ [hashA]: { children: [], parents: [] } });
 
       const client = new ChainClient({ chain: 'base-sepolia' });
       const chain = await client.getProvenanceChain(SAMPLE_HASH, 1);
@@ -802,38 +833,10 @@ describe('ChainClient', () => {
     });
 
     it('should handle cycles gracefully', async () => {
-      const hashA = SAMPLE_HASH_0X;
-      const hashB: Hex = `0x${'bb'.repeat(32)}`;
-
-      mockReadContract
-        // getDataRecord for hashA
-        .mockResolvedValueOnce({
-          dataHash: hashA,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(1000),
-          dataType: 'dataset',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashA → [hashB]
-        .mockResolvedValueOnce([hashB])
-        // getTransformationParents for hashA → []
-        .mockResolvedValueOnce([])
-        // getDataRecord for hashB
-        .mockResolvedValueOnce({
-          dataHash: hashB,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(2000),
-          dataType: 'filtered',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashB → [hashA] (cycle!)
-        .mockResolvedValueOnce([hashA])
-        // getTransformationParents for hashB → [hashA]
-        .mockResolvedValueOnce([hashA]);
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [hashA], parents: [hashA] },
+      });
 
       const client = new ChainClient({ chain: 'base-sepolia' });
       const chain = await client.getProvenanceChain(SAMPLE_HASH);
@@ -842,58 +845,114 @@ describe('ChainClient', () => {
       expect(chain).toHaveLength(2);
     });
 
-    it('should skip unregistered nodes during traversal', async () => {
-      const hashA = SAMPLE_HASH_0X;
-      const hashB: Hex = `0x${'bb'.repeat(32)}`;
-      const hashC: Hex = `0x${'cc'.repeat(32)}`;
+    it('fails closed when a linked hash reads as unregistered (inconsistent read)', async () => {
+      // hashB is linked as a child but reads as unregistered; the contract never
+      // links an unregistered hash, so this must not silently drop the branch
+      mockDag({
+        [hashA]: { children: [hashB, hashC], parents: [] },
+        [hashC]: { children: [], parents: [hashA] },
+      });
 
-      mockReadContract
-        // getDataRecord for hashA — exists
-        .mockResolvedValueOnce({
-          dataHash: hashA,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(1000),
-          dataType: 'dataset',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashA → [hashB, hashC]
-        .mockResolvedValueOnce([hashB, hashC])
-        // getTransformationParents for hashA → []
-        .mockResolvedValueOnce([])
-        // getDataRecord for hashB — NOT registered (zero hash)
-        .mockResolvedValueOnce({
-          dataHash: ZERO_HASH,
-          owner: '0x' + '00'.repeat(20),
-          timestamp: BigInt(0),
-          dataType: '',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getDataRecord for hashC — exists
-        .mockResolvedValueOnce({
-          dataHash: hashC,
-          owner: MOCK_ADDRESS,
-          timestamp: BigInt(3000),
-          dataType: 'final',
-          transformationLinks: [],
-          accessors: [],
-          status: 0,
-        })
-        // getChildHashes for hashC → []
-        .mockResolvedValueOnce([])
-        // getTransformationParents for hashC → [hashA]
-        .mockResolvedValueOnce([hashA]);
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(DataNotRegisteredError);
+    });
+
+    it('returns [] for an unregistered start hash', async () => {
+      mockDag({});
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      expect(await client.getProvenanceChain(SAMPLE_HASH)).toEqual([]);
+    });
+
+    it('leaves parents undefined on nodes at maxDepth, whose parents were not fetched', async () => {
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [], parents: [hashA] },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const chain = await client.getProvenanceChain(SAMPLE_HASH, 1);
+
+      expect(chain).toHaveLength(2);
+      expect(chain[0]!.parents).toEqual([]);
+      expect(chain[1]!.parents).toBeUndefined();
+      expect(calledFunctions()).toEqual(['getDataRecord', 'getTransformationParents', 'getDataRecord']);
+    });
+
+    it('fails closed when a parent lookup fails, instead of returning a lineage missing a branch', async () => {
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [], parents: new Error('rpc down') },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(ChainConnectionError);
+      // The error names the node and depth the traversal stopped at
+      await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(`failed at ${hashB} (depth 1)`);
+    });
+
+    it('fails closed when a record lookup fails mid-traversal, keeping the original as cause', async () => {
+      const rpcError = new Error('429 Too Many Requests');
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [], parents: [hashA], record: rpcError },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      const error = await client.getProvenanceChain(SAMPLE_HASH).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ChainConnectionError);
+      expect((error as Error).message).toContain(`failed at ${hashB} (depth 1)`);
+      expect(((error as Error).cause as Error).message).toContain('429 Too Many Requests');
+    });
+
+    it('returns [] for an unregistered start hash even if its parents lookup fails', async () => {
+      mockDag({});
+      const base = mockReadContract.getMockImplementation()!;
+      mockReadContract.mockImplementation((req: { functionName: string; args: [Hex] }) =>
+        req.functionName === 'getTransformationParents'
+          ? Promise.reject(new Error('rpc down'))
+          : (base(req) as Promise<unknown>),
+      );
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      expect(await client.getProvenanceChain(SAMPLE_HASH)).toEqual([]);
+    });
+
+    it('queues each node once even when both edge directions reach it', async () => {
+      mockDag({
+        [hashA]: { children: [hashB, hashC], parents: [] },
+        [hashB]: { children: [hashC], parents: [hashA] },
+        [hashC]: { children: [], parents: [hashA, hashB] },
+      });
 
       const client = new ChainClient({ chain: 'base-sepolia' });
       const chain = await client.getProvenanceChain(SAMPLE_HASH);
 
-      // Should have A and C, skipping unregistered B
-      expect(chain).toHaveLength(2);
-      expect(chain[0]!.dataHash).toBe(hashA);
-      expect(chain[1]!.dataHash).toBe(hashC);
+      expect(chain.map((r) => r.dataHash)).toEqual([hashA, hashB, hashC]);
+      expect(calledFunctions().filter((f) => f === 'getDataRecord')).toHaveLength(3);
+    });
+
+    it('rejects a NaN maxDepth instead of traversing without a limit', async () => {
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      await expect(client.getProvenanceChain(SAMPLE_HASH, NaN)).rejects.toThrow(/must not be NaN/);
+      await expect(client.getProvenanceChain(SAMPLE_HASH, NaN)).rejects.toThrow(ChainValidationError);
+      expect(mockReadContract).not.toHaveBeenCalled();
+    });
+
+    it('coerces maxDepth like before (numeric strings, null) and floors fractions', async () => {
+      mockDag({
+        [hashA]: { children: [hashB], parents: [] },
+        [hashB]: { children: [hashC], parents: [hashA] },
+        [hashC]: { children: [], parents: [hashB] },
+      });
+      const client = new ChainClient({ chain: 'base-sepolia' });
+
+      // 1.5 floors to 1: B (depth 1) is returned but not expanded, so C is not reached
+      expect(await client.getProvenanceChain(SAMPLE_HASH, 1.5)).toHaveLength(2);
+      // Untyped JS callers: the clamp always coerced these
+      expect(await client.getProvenanceChain(SAMPLE_HASH, '1' as unknown as number)).toHaveLength(2);
+      expect(await client.getProvenanceChain(SAMPLE_HASH, null as unknown as number)).toHaveLength(2); // clamps to 1
     });
   });
 

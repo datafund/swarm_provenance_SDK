@@ -11,6 +11,7 @@ import { CHAIN_PRESETS, PRESET_RPC_FALLBACKS, ZERO_BYTES32, ZERO_ADDRESS } from 
 import {
   ChainConfigurationError,
   ChainConnectionError,
+  ChainError,
   ChainTransactionError,
   ChainValidationError,
   DataAlreadyRegisteredError,
@@ -394,63 +395,93 @@ export class ChainClient {
    * Traverse the full provenance chain (DAG) from any node.
    * Performs BFS in both directions (ancestors via parents, descendants via children).
    *
+   * Edges: each record carries its child edges in `transformationLinks` and its
+   * parent edges in `parents`, so the DAG can be rebuilt without further RPC calls.
+   * Nodes at `maxDepth` are not expanded and have `parents` undefined. Edges on any
+   * node may point to hashes absent from the result (beyond `maxDepth`, or unregistered).
+   *
+   * Order: BFS order from the start node. This is neither topological nor
+   * chronological; sort by `timestamp` or walk the edges if you need either.
+   *
+   * Fails closed: an RPC error on any node rejects the whole call with
+   * ChainConnectionError rather than returning a lineage silently missing a branch.
+   * An unregistered start hash returns []; a linked hash that reads as
+   * unregistered rejects with DataNotRegisteredError (an inconsistent read).
+   *
    * @param dataHash - Starting hash
-   * @param maxDepth - Maximum traversal depth (default 10, max 50)
+   * @param maxDepth - Maximum traversal depth (default 10; floored and clamped to 1..50; NaN throws ChainValidationError)
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
-    const effectiveMaxDepth = Math.min(Math.max(maxDepth, 1), 50);
+    // Coerce like the clamp always did ('5' -> 5, null -> 0 -> clamped to 1), but reject NaN: it
+    // survives Math.min/max and makes `depth >= NaN` always false, i.e. no limit.
+    const requestedDepth = Number(maxDepth);
+    if (Number.isNaN(requestedDepth)) {
+      throw new ChainValidationError(`maxDepth must not be NaN (got ${String(maxDepth)})`);
+    }
+    const effectiveMaxDepth = Math.min(Math.max(Math.floor(requestedDepth), 1), 50);
     const startHash = normalizeHash(dataHash);
 
-    const visited = new Set<string>();
     const records: ChainProvenanceRecord[] = [];
-    // Queue: [hash, currentDepth]
+    // BFS queue of [hash, depth]. Hashes are marked when enqueued (BFS reaches
+    // each at its minimum depth first), so every node is queued once; `head`
+    // replaces O(n) shift().
+    const queued = new Set<string>([startHash.toLowerCase()]);
     const queue: Array<[Hex, number]> = [[startHash, 0]];
 
-    while (queue.length > 0) {
-      const [hash, depth] = queue.shift()!;
-      const hashLower = hash.toLowerCase();
+    for (let head = 0; head < queue.length; head++) {
+      const [hash, depth] = queue[head]!;
 
-      if (visited.has(hashLower)) continue;
-      visited.add(hashLower);
+      // Record and parents are independent: fetch both at once. Children come
+      // from the record (the contract's getChildHashes returns exactly
+      // transformationLinks[].newDataHash), so no third call.
+      const expand = depth < effectiveMaxDepth;
+      const [recordResult, parentsResult] = await Promise.allSettled([
+        this.getDataRecord(hash),
+        expand ? this.getTransformationParents(hash) : Promise.resolve(undefined),
+      ]);
 
-      let record: ChainProvenanceRecord;
-      try {
-        record = await this.getDataRecord(hash);
-      } catch (error) {
-        if (error instanceof DataNotRegisteredError) continue;
-        throw error;
+      if (recordResult.status === 'rejected') {
+        // Only the start hash may be unregistered. The contract registers every
+        // transformation's new hash, so a linked hash reading as unregistered
+        // means an inconsistent read (e.g. a lagging RPC): fail closed.
+        if (recordResult.reason instanceof DataNotRegisteredError && depth === 0) continue;
+        throw this.traversalError(hash, depth, recordResult.reason);
       }
+      const record = recordResult.value;
       records.push(record);
 
-      if (depth >= effectiveMaxDepth) continue;
-
-      // Forward: child hashes
-      try {
-        const children = await this.getChildHashes(hash);
-        for (const child of children) {
-          if (!visited.has(child.toLowerCase())) {
-            queue.push([child as Hex, depth + 1]);
-          }
-        }
-      } catch {
-        // Ignore errors in traversal — node may not have children
+      if (!expand) continue; // at maxDepth: parents not fetched, stays undefined
+      if (parentsResult.status === 'rejected') {
+        throw this.traversalError(hash, depth, parentsResult.reason);
       }
+      // expand is true, so the parents promise was getTransformationParents (string[])
+      const parents = parentsResult.value!;
+      record.parents = parents;
 
-      // Backward: parent hashes
-      try {
-        const parents = await this.getTransformationParents(hash);
-        for (const parent of parents) {
-          if (!visited.has(parent.toLowerCase())) {
-            queue.push([parent as Hex, depth + 1]);
-          }
+      const neighbours = [...record.transformationLinks.map((link) => link.newDataHash), ...parents];
+      for (const next of neighbours) {
+        const key = next.toLowerCase();
+        if (!queued.has(key)) {
+          queued.add(key);
+          queue.push([next as Hex, depth + 1]);
         }
-      } catch {
-        // Ignore errors in traversal — node may not have parents
       }
     }
 
     return records;
+  }
+
+  /**
+   * Fail-closed traversal error naming the node it stopped at. Chain errors
+   * other than connection errors (validation, not-registered) keep their class.
+   */
+  private traversalError(hash: Hex, depth: number, cause: unknown): Error {
+    if (cause instanceof ChainError && !(cause instanceof ChainConnectionError)) return cause;
+    const message = cause instanceof Error ? cause.message : String(cause);
+    const error = new ChainConnectionError(`getProvenanceChain failed at ${hash} (depth ${depth}): ${message}`);
+    error.cause = cause;
+    return error;
   }
 
   /**

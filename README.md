@@ -312,7 +312,8 @@ await chain.getChildHashes(dataHash);  // => string[]
 
 // Traverse full provenance chain (BFS, bidirectional)
 await chain.getProvenanceChain(dataHash, 10);
-// => ChainProvenanceRecord[] — ancestors + descendants up to maxDepth
+// => ChainProvenanceRecord[]: ancestors + descendants up to maxDepth, in BFS order (not topological).
+//    Edges: transformationLinks (children) and parents. Rejects if any lookup fails.
 
 // Detect v2 contract support
 await chain.supportsTransformationLinks();  // => boolean
@@ -427,6 +428,21 @@ message comes from Node itself.
 |---------|--------|----------|-------------------------------|
 | Base Sepolia (testnet) | `base-sepolia` | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` | publicnode → tenderly → sepolia.base.org |
 | Base (mainnet) | `base` | Not yet deployed | mainnet.base.org |
+
+### Behavior changes since v0.6.1
+
+- `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
+  `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
+  rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch
+  and returned the partial graph as if complete.
+- `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
+  disabled the depth limit. Fractional depths are floored.
+- Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
+- `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
+  (false for a wrong contract address; true if any fallback RPC serves the call).
+- The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);
+  presets and `CHAIN_PRESETS` are frozen and typed `Readonly`.
+- The CommonJS `/chain` entry throws a `CHAIN_CONFIGURATION` error naming `viem` when it is missing.
 
 ### Breaking Changes in v0.5.0
 
