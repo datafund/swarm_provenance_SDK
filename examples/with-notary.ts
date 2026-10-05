@@ -40,24 +40,23 @@ async function main() {
     console.log('Upload successful!');
     console.log('Reference:', result.reference);
 
-    if (result.signedDocument) {
-      console.log('\nSigned document:');
-      console.log('  Signatures:', result.signedDocument.signatures.length);
-
-      for (const sig of result.signedDocument.signatures) {
-        console.log(`\n  Signature:`);
-        console.log('    Type:', sig.type);
-        console.log('    Signer:', sig.signer);
-        console.log('    Timestamp:', sig.timestamp);
-        console.log('    Data hash:', sig.data_hash);
-      }
-    }
-
-    // Verify by downloading
+    // The signature is stored with the document: download to get and verify it.
+    // Pinning notaryAddress verifies independently of the gateway; here it comes
+    // from the same gateway, which is what download() does by default.
     console.log('\nVerifying by re-downloading...');
-    const downloaded = await client.download(result.reference);
+    const downloaded = await client.download(result.reference, { notaryAddress: notaryInfo.address });
 
-    console.log('Signature verified:', downloaded.verified);
+    for (const sig of downloaded.signatures ?? []) {
+      console.log('\n  Signature:');
+      console.log('    Type:', sig.type);
+      console.log('    Signer:', sig.signer);
+      console.log('    Timestamp:', sig.timestamp);
+      console.log('    Data hash:', sig.data_hash);
+    }
+    console.log('\nSignature verified:', downloaded.verified);
+    for (const check of downloaded.verification?.results ?? []) {
+      console.log(`  #${check.index}:`, check.valid ? `recovers to ${check.recoveredAddress}` : check.error);
+    }
   } catch (error) {
     if (error instanceof NotaryError) {
       console.error('Notary error:', error.message);

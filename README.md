@@ -49,28 +49,51 @@ console.log('Content:', new TextDecoder().decode(downloaded.file));
 
 ### x402 Payment Mode
 
-By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-limited. For higher throughput, configure x402 automatic USDC payments:
+By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-limited. For higher throughput, configure x402 automatic USDC payments.
+
+**Network:** payments default to **Base Sepolia** (`eip155:84532`, testnet USDC). Set
+`payment.network` / `payment.v1Network` for another network.
+
+**Read before enabling:** the SDK currently pays whatever the gateway's 402 response asks
+for. There is no amount cap and no recipient or asset pinning yet (#106), and the payment
+receipt is not returned to you (#111). Use a dedicated wallet holding only what you are
+prepared to spend, and only with a gateway you trust.
+
+**Server (Node.js):** load the key from the environment or a secret store, never from source code:
 
 ```typescript
 import { ProvenanceClient } from '@datafund/swarm-provenance';
-import { createWalletClient, http } from 'viem';
+import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
-import { publicActions } from 'viem';
 
-// Create a signer with readContract support
 const wallet = createWalletClient({
-  account: privateKeyToAccount('0x...'),
+  account: privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`),
   chain: baseSepolia,
   transport: http(),
 }).extend(publicActions);
 
-const client = new ProvenanceClient({
-  payment: { wallet },
-});
+const client = new ProvenanceClient({ payment: { wallet } });
 
 // Requests that receive 402 responses are automatically paid via USDC
 const result = await client.upload('Hello, World!');
+```
+
+**Browser:** use the user's injected wallet. Never put a private key in browser code:
+anything shipped to the browser is public.
+
+```typescript
+import { createWalletClient, custom, publicActions } from 'viem';
+import { baseSepolia } from 'viem/chains';
+
+const [account] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+const wallet = createWalletClient({
+  account,
+  chain: baseSepolia,
+  transport: custom(window.ethereum),
+}).extend(publicActions);
+
+const client = new ProvenanceClient({ payment: { wallet } });
 ```
 
 Payment modes:
@@ -106,11 +129,33 @@ await chain.anchor(contentHash, 'dataset');
 
 - **Simple API**: High-level `upload()` and `download()` methods handle the full workflow
 - **Automatic stamp management**: Acquires stamps from the pool automatically
-- **Notary signing**: Optional cryptographic signatures for data authenticity
-- **Content verification**: Automatic SHA256 hash verification on download
+- **Notary signing**: Optional gateway signature (EIP-191) over the data hash and a timestamp; `download()` verifies it against the notary address (see [What `verified` means](#what-verified-means))
+- **Content check**: Automatic SHA-256 check on download (self-consistency only, see [Security model](#security-model))
 - **Blockchain anchoring**: Register data hashes on-chain for immutable provenance
 - **Browser + Node.js**: Works in both environments with native `fetch`
 - **TypeScript first**: Full type definitions included
+
+## Security model
+
+What the SDK checks, and what it does not:
+
+- **`content_hash`** is recomputed on every download. It proves the content matches the hash
+  stored next to it, not who wrote either: anyone can compute it.
+- **Notary signatures** prove that the gateway's notary key signed this exact `data` at the
+  stated timestamp. By default the expected notary address comes from the gateway that served
+  the document; pass `notaryAddress` to `download()` to verify independently of the gateway.
+  See [What `verified` means](#what-verified-means).
+- **On-chain anchoring** (`/chain`) proves that an address registered a hash at a block time.
+  It does not prove anything about content the hash was not computed from.
+- **Keys:** in browsers use an injected wallet (`fromEip1193Provider`, or a viem client over
+  `window.ethereum`); on servers load keys from the environment or a secret store. A private
+  key in browser code is public.
+- **Default gateway is production:** `https://provenance-gateway.datafund.io`. Pass
+  `gatewayUrl` to use another (e.g. `https://provenance-gateway.dev.datafund.io` for testing).
+- **Data expires.** Swarm storage is rented: data stays available only while the postage stamp
+  it was uploaded with is valid. Pool stamps come with roughly a day left; extend the stamp
+  through the gateway (`PATCH /api/v1/stamps/{id}/extend`) if you need it longer. A Swarm
+  reference is not a permanent archive.
 
 ## API
 
@@ -258,7 +303,7 @@ The chain module provides on-chain data provenance via a DataProvenance smart co
 import { ChainClient } from '@datafund/swarm-provenance/chain';
 
 const chain = new ChainClient({
-  chain: 'base-sepolia',     // or 'base' for mainnet, or a custom ChainPreset
+  chain: 'base-sepolia',     // or a custom ChainPreset ('base' exists but has no contract yet: it throws)
   rpcUrl?: string,            // override RPC endpoint; a URL outside the preset's list disables its fallbacks
   rpcFallbacks?: string[],    // tried in order on any error but a revert; defaults to the preset's, [] disables
   signer?: ChainSigner,       // required for write operations
@@ -427,7 +472,7 @@ message comes from Node itself.
 | Network | Preset | Contract | RPC (primary, then fallbacks) |
 |---------|--------|----------|-------------------------------|
 | Base Sepolia (testnet) | `base-sepolia` | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` | publicnode → tenderly → sepolia.base.org |
-| Base (mainnet) | `base` | Not yet deployed | mainnet.base.org |
+| Base (mainnet) | `base` | Not yet deployed: `new ChainClient({ chain: 'base' })` throws `ChainConfigurationError` | mainnet.base.org |
 
 ### Behavior changes since v0.6.1
 

@@ -677,8 +677,10 @@ function App() {
                   )}
                   <p className="verification-explanation">
                     {downloadResult.verified
-                      ? `Signature is cryptographically valid and signer matches the gateway notary.`
-                      : `Signature verification failed. The signature may be invalid or the signer doesn't match the known notary.`}
+                      ? `The EIP-191 signature recovers to the notary address this gateway reports (${downloadResult.verification?.expectedSigner ?? 'unknown'}). To verify independently of the gateway, pin the notary address with the notaryAddress download option.`
+                      : downloadResult.verification?.expectedSignerSource === 'none'
+                        ? `Not verified: the gateway reports no notary address to verify against.`
+                        : `Signature verification failed: ${downloadResult.verification?.results.find((r) => !r.valid)?.error ?? 'invalid signature'}.`}
                   </p>
                 </div>
 
@@ -688,9 +690,10 @@ function App() {
                     <div className="detail-row">
                       <span className="label">Signer:</span>
                       <code className="value">{sig.signer}</code>
-                      {notaryInfo?.address && (
-                        <span className={sig.signer.toLowerCase() === notaryInfo.address.toLowerCase() ? 'badge success' : 'badge warning'}>
-                          {sig.signer.toLowerCase() === notaryInfo.address.toLowerCase() ? 'Matches Gateway Notary' : 'Unknown Signer'}
+                      {/* Badge from the recovered address, not the signer string the document declares */}
+                      {downloadResult.verification?.results[index] && (
+                        <span className={downloadResult.verification.results[index]!.valid ? 'badge success' : 'badge warning'}>
+                          {downloadResult.verification.results[index]!.valid ? 'Signed by Gateway Notary' : 'Not Verified'}
                         </span>
                       )}
                     </div>

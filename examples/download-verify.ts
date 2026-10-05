@@ -48,6 +48,11 @@ async function main() {
       console.log('    Type:', sig.type);
     }
     console.log('\nSignature verified:', result.verified);
+    // Without a pinned notaryAddress, the expected signer is the one this gateway reports
+    console.log('Verified against:', result.verification?.expectedSigner, `(${result.verification?.expectedSignerSource})`);
+    for (const check of result.verification?.results ?? []) {
+      if (!check.valid) console.log(`  Signature #${check.index}:`, check.error);
+    }
   } else {
     console.log('\nNo notary signatures on this document.');
   }
