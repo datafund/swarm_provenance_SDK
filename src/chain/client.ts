@@ -341,21 +341,28 @@ export class ChainClient {
    *
    * Edges: each record carries its child edges in `transformationLinks` and its
    * parent edges in `parents`, so the DAG can be rebuilt without further RPC calls.
-   * Nodes at `maxDepth` are not expanded and have `parents` undefined.
+   * Nodes at `maxDepth` are not expanded and have `parents` undefined. Edges on any
+   * node may point to hashes absent from the result (beyond `maxDepth`, or unregistered).
    *
    * Order: BFS order from the start node. This is neither topological nor
    * chronological; sort by `timestamp` or walk the edges if you need either.
    *
+   * Fails closed: an RPC error on any node rejects the whole call with
+   * ChainConnectionError rather than returning a lineage silently missing a branch.
+   * Unregistered hashes are skipped.
+   *
    * @param dataHash - Starting hash
-   * @param maxDepth - Maximum traversal depth (default 10, clamped to 1..50; NaN throws ChainValidationError)
+   * @param maxDepth - Maximum traversal depth (default 10; floored and clamped to 1..50; NaN throws ChainValidationError)
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
-    // NaN survives the clamp below and makes `depth >= NaN` always false: no depth limit
-    if (typeof maxDepth !== 'number' || Number.isNaN(maxDepth)) {
-      throw new ChainValidationError(`maxDepth must be a number, got ${String(maxDepth)}`);
+    // Coerce like the clamp always did ('5' -> 5, null -> 0), but reject NaN: it
+    // survives Math.min/max and makes `depth >= NaN` always false, i.e. no limit.
+    const requestedDepth = Number(maxDepth);
+    if (Number.isNaN(requestedDepth)) {
+      throw new ChainValidationError(`maxDepth must not be NaN (got ${String(maxDepth)})`);
     }
-    const effectiveMaxDepth = Math.min(Math.max(maxDepth, 1), 50);
+    const effectiveMaxDepth = Math.min(Math.max(Math.floor(requestedDepth), 1), 50);
     const startHash = normalizeHash(dataHash);
 
     const visited = new Set<string>();
@@ -381,29 +388,17 @@ export class ChainClient {
 
       if (depth >= effectiveMaxDepth) continue;
 
-      // Forward: child hashes
-      try {
-        const children = await this.getChildHashes(hash);
-        for (const child of children) {
-          if (!visited.has(child.toLowerCase())) {
-            queue.push([child as Hex, depth + 1]);
-          }
-        }
-      } catch {
-        // Ignore errors in traversal — node may not have children
-      }
+      // Children come from the record: the contract's getChildHashes returns
+      // exactly transformationLinks[].newDataHash, so no extra RPC call.
+      // Parents need one lookup; its errors propagate (fail closed).
+      const parents = await this.getTransformationParents(hash);
+      record.parents = parents;
 
-      // Backward: parent hashes
-      try {
-        const parents = await this.getTransformationParents(hash);
-        record.parents = parents;
-        for (const parent of parents) {
-          if (!visited.has(parent.toLowerCase())) {
-            queue.push([parent as Hex, depth + 1]);
-          }
+      const neighbours = [...record.transformationLinks.map((link) => link.newDataHash), ...parents];
+      for (const next of neighbours) {
+        if (!visited.has(next.toLowerCase())) {
+          queue.push([next as Hex, depth + 1]);
         }
-      } catch {
-        // Ignore errors in traversal — node may not have parents
       }
     }
 

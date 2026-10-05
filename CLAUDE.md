@@ -124,7 +124,7 @@ src/
 
 ## Testing Strategy
 
-- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation (272 tests)
+- **Unit tests** (`tests/unit/`): Mock fetch, test each module in isolation
 - **Integration tests** (`tests/integration/`): Real gateway, full round-trips
 - **E2E tests** (`examples/web-app/e2e/`): Playwright browser tests (11 tests)
 
