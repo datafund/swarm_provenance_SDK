@@ -43,7 +43,7 @@ async function waitFor<T>(fn: () => Promise<T>, retries = 5, delayMs = 2_000): P
 }
 
 // Unset by default so reads go through the preset and exercise its live failover
-const RPC_URL_OVERRIDE = process.env['CHAIN_RPC_URL'];
+const RPC_URL_OVERRIDE = process.env['CHAIN_RPC_URL'] || undefined; // '' counts as unset
 const RPC_URL = RPC_URL_OVERRIDE ?? BASE_SEPOLIA.rpcUrl;
 const CONTRACT_ADDRESS = process.env['CHAIN_CONTRACT'] as `0x${string}` | undefined;
 const PRIVATE_KEY = process.env['CHAIN_PRIVATE_KEY'] as Hex | undefined;

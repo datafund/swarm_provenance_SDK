@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { encodeFunctionResult } from 'viem';
 import { ChainClient } from '../../../src/chain/client.js';
-import { ChainConnectionError } from '../../../src/chain/errors.js';
-import { BASE_SEPOLIA } from '../../../src/chain/constants.js';
+import { ChainConfigurationError, ChainConnectionError } from '../../../src/chain/errors.js';
+import { BASE_SEPOLIA, PRESET_RPC_FALLBACKS } from '../../../src/chain/constants.js';
 import { DATA_PROVENANCE_ABI } from '../../../src/chain/abi.js';
 
 // Unlike client.test.ts, viem is NOT mocked here: these tests drive the real
@@ -70,7 +70,7 @@ function stubRpc(endpoints: Record<string, Responder>): void {
   );
 }
 
-const [FALLBACK_1, FALLBACK_2] = BASE_SEPOLIA.rpcFallbacks ?? [];
+const [FALLBACK_1, FALLBACK_2] = PRESET_RPC_FALLBACKS['base-sepolia'] ?? [];
 
 describe('ChainClient RPC fallback', () => {
   beforeEach(() => {
@@ -83,7 +83,7 @@ describe('ChainClient RPC fallback', () => {
 
   it('base-sepolia preset ships a primary plus fallbacks, with sepolia.base.org last', () => {
     expect(BASE_SEPOLIA.rpcUrl).toBe('https://base-sepolia-rpc.publicnode.com');
-    expect(BASE_SEPOLIA.rpcFallbacks).toEqual([
+    expect(PRESET_RPC_FALLBACKS['base-sepolia']).toEqual([
       'https://base-sepolia.gateway.tenderly.co',
       'https://sepolia.base.org',
     ]);
@@ -162,6 +162,34 @@ describe('ChainClient RPC fallback', () => {
     const client = new ChainClient({ chain: 'base-sepolia', rpcFallbacks: ['', ' ', backup] });
 
     await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
+  it('built-in fallbacks are not on the preset objects, and presets are frozen', () => {
+    expect('rpcFallbacks' in BASE_SEPOLIA).toBe(false);
+    expect(Object.isFrozen(BASE_SEPOLIA)).toBe(true);
+    expect(Object.isFrozen(PRESET_RPC_FALLBACKS['base-sepolia'])).toBe(true);
+  });
+
+  it('a custom preset whose primary is one of the public preset URLs gets only its own fallbacks', async () => {
+    stubRpc({ [FALLBACK_2!]: degraded, [BASE_SEPOLIA.rpcUrl]: healthy });
+    const chain = { ...BASE_SEPOLIA, rpcUrl: FALLBACK_2! };
+
+    await expect(new ChainClient({ chain }).getUserDataRecordsCount(USER)).rejects.toThrow(ChainConnectionError);
+    expect(new Set(calls.map((c) => c.url))).toEqual(new Set([FALLBACK_2]));
+  });
+
+  it('a custom preset listing the public URLs as its own rpcFallbacks keeps them', async () => {
+    const custom = 'https://private-rpc.example.com';
+    stubRpc({ [custom]: degraded, [FALLBACK_1!]: healthy });
+    const chain = { ...BASE_SEPOLIA, rpcUrl: custom, rpcFallbacks: [...PRESET_RPC_FALLBACKS['base-sepolia']!] };
+
+    await expect(new ChainClient({ chain }).getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
+  it('throws ChainConfigurationError when no RPC URL is left', () => {
+    expect(() => new ChainClient({ chain: { ...BASE_SEPOLIA, rpcUrl: '' }, rpcFallbacks: [''] })).toThrow(
+      ChainConfigurationError,
+    );
   });
 
   it("an empty rpcUrl means 'not set'", async () => {

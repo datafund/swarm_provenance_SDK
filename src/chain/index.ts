@@ -42,7 +42,7 @@ export {
 } from './errors.js';
 
 // Constants
-export { BASE_SEPOLIA, BASE_MAINNET, CHAIN_PRESETS } from './constants.js';
+export { BASE_SEPOLIA, BASE_MAINNET, CHAIN_PRESETS, PRESET_RPC_FALLBACKS } from './constants.js';
 
 // Validation utilities
 export { normalizeHash } from './validation.js';

@@ -12,6 +12,7 @@ import {
 import {
   ChainClient,
   BASE_SEPOLIA,
+  PRESET_RPC_FALLBACKS,
   fromEip1193Provider,
   DataStatus,
   type ChainSigner,
@@ -281,7 +282,7 @@ function App() {
               params: [{
                 chainId: hexChainId,
                 chainName: 'Base Sepolia',
-                rpcUrls: [BASE_SEPOLIA.rpcUrl, ...(BASE_SEPOLIA.rpcFallbacks ?? [])],
+                rpcUrls: [BASE_SEPOLIA.rpcUrl, ...(PRESET_RPC_FALLBACKS['base-sepolia'] ?? [])],
                 nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
                 blockExplorerUrls: ['https://sepolia.basescan.org'],
               }],

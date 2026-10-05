@@ -7,7 +7,7 @@ import {
   type Hex,
 } from 'viem';
 import { DATA_PROVENANCE_ABI } from './abi.js';
-import { CHAIN_PRESETS, ZERO_BYTES32, ZERO_ADDRESS } from './constants.js';
+import { CHAIN_PRESETS, PRESET_RPC_FALLBACKS, ZERO_BYTES32, ZERO_ADDRESS } from './constants.js';
 import {
   ChainConfigurationError,
   ChainConnectionError,
@@ -127,14 +127,11 @@ export class ChainClient {
    * Ordered RPC URLs: the primary, then fallbacks.
    *
    * - `config.rpcFallbacks`, when given, is used as is.
-   * - An explicit `config.rpcUrl` outside the preset's own URL list is treated as
-   *   a private endpoint: no preset fallbacks, so its reads never go to public
-   *   ones. An `rpcUrl` that is one of the preset's URLs keeps the list.
-   * - A custom preset whose fallback list equals a built-in preset's, but whose
-   *   chainId or primary differs from that built-in, inherited the list by
-   *   spreading (`{ ...BASE_SEPOLIA, rpcUrl }`): it gets none. Otherwise those
-   *   fallbacks could serve another chain or leak private-RPC reads.
-   *   To keep public fallbacks deliberately, pass `config.rpcFallbacks`.
+   * - A preset chosen by name brings its PRESET_RPC_FALLBACKS; a preset object
+   *   brings its own `rpcFallbacks`, exactly as written.
+   * - An explicit `config.rpcUrl` outside the preset's URL list is treated as a
+   *   private endpoint: no preset fallbacks, so its reads never go to public
+   *   ones. An `rpcUrl` that is one of the preset's URLs keeps the rest.
    *
    * Blank entries are dropped. Duplicates are compared ignoring a trailing
    * slash; the first spelling is passed to viem unchanged.
@@ -142,34 +139,28 @@ export class ChainClient {
   private resolveRpcUrls(config: ChainClientConfig): string[] {
     const norm = (url: string) => url.trim().replace(/\/+$/, '');
     const same = (a: string, b: string) => norm(a) === norm(b);
-    const sameList = (a: string[] = [], b: string[] = []) =>
-      a.length === b.length && a.every((url, i) => same(url, b[i]!));
 
     const preset = this.preset;
-    const presetFallbacks = preset.rpcFallbacks ?? [];
+    const presetFallbacks =
+      typeof config.chain === 'string' ? PRESET_RPC_FALLBACKS[config.chain] ?? [] : preset.rpcFallbacks ?? [];
+    const presetUrls = [preset.rpcUrl, ...presetFallbacks];
     const primary = config.rpcUrl?.trim() || preset.rpcUrl;
 
-    let fallbacks: string[];
+    let fallbacks: readonly string[];
     if (config.rpcFallbacks) {
       fallbacks = config.rpcFallbacks;
-    } else if (![preset.rpcUrl, ...presetFallbacks].some((url) => same(url, primary))) {
-      fallbacks = [];
+    } else if (presetUrls.some((url) => same(url, primary))) {
+      fallbacks = presetUrls; // the primary's own entry is removed as a duplicate below
     } else {
-      const inherited = Object.values(CHAIN_PRESETS).some(
-        (builtin) =>
-          builtin !== preset &&
-          presetFallbacks.length > 0 &&
-          sameList(presetFallbacks, builtin.rpcFallbacks) &&
-          (builtin.chainId !== preset.chainId || !same(builtin.rpcUrl, preset.rpcUrl)),
-      );
-      // Primary may be any URL of the preset's list; the rest (preset primary
-      // included) follow in preset order, the duplicate is removed below.
-      fallbacks = inherited ? [] : [preset.rpcUrl, ...presetFallbacks];
+      fallbacks = [];
     }
 
     const urls: string[] = [];
     for (const url of [primary, ...fallbacks]) {
       if (norm(url) && !urls.some((u) => same(u, url))) urls.push(url.trim());
+    }
+    if (urls.length === 0) {
+      throw new ChainConfigurationError(`No RPC URL configured for ${preset.name}: set rpcUrl or the preset's rpcUrl`);
     }
     return urls;
   }

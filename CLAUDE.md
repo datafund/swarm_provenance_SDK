@@ -318,7 +318,7 @@ const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnod
 
 - **Contract**: DataProvenance on Base Sepolia
 - **Address**: `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`
-- **RPC**: `base-sepolia-rpc.publicnode.com`, falling back to `base-sepolia.gateway.tenderly.co` then `sepolia.base.org` (`rpcFallbacks`). `sepolia.base.org` is last because it has had partial outages where `eth_chainId` answers but `eth_call` returns 503 (#101). Never health-probe with `eth_chainId`/`eth_blockNumber`.
+- **RPC**: `base-sepolia-rpc.publicnode.com`, falling back to `base-sepolia.gateway.tenderly.co` then `sepolia.base.org` (`PRESET_RPC_FALLBACKS`, applied only for `chain: 'base-sepolia'`, never via spread presets). `sepolia.base.org` is last because it has had partial outages where `eth_chainId` answers but `eth_call` returns 503 (#101). Never health-probe with `eth_chainId`/`eth_blockNumber`.
 - **Explorer**: https://sepolia.basescan.org/address/0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322
 
 ### Methods
