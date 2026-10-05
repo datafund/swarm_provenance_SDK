@@ -95,7 +95,7 @@ const chain = new ChainClient({ chain: 'base-sepolia', signer });
 const result = await chain.anchor(contentHash, 'dataset');
 
 // With private key (Node.js)
-const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
+const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
 const chain = new ChainClient({ chain: 'base-sepolia', signer });
 await chain.anchor(contentHash, 'dataset');
 ```
@@ -257,11 +257,17 @@ import { ChainClient } from '@datafund/swarm-provenance/chain';
 
 const chain = new ChainClient({
   chain: 'base-sepolia',     // or 'base' for mainnet, or a custom ChainPreset
-  rpcUrl?: string,            // override RPC endpoint
+  rpcUrl?: string,            // override RPC endpoint (also disables the preset's fallbacks)
+  rpcFallbacks?: string[],    // tried in order on transport errors; defaults to the preset's, [] disables
   signer?: ChainSigner,       // required for write operations
   retry?: RetryConfig,        // auto-retry on nonce errors (default: 2 retries, 1s backoff)
 });
 ```
+
+Read calls fail over to the next RPC URL on transport errors (HTTP 5xx, timeouts, `-32011`-class
+RPC errors). Contract reverts do not fail over. The `base-sepolia` preset tries
+`base-sepolia-rpc.publicnode.com`, then `base-sepolia.gateway.tenderly.co`, then `sepolia.base.org`.
+Write transactions go through the signer's own transport, which these settings do not affect.
 
 ### Read Operations (no signer required)
 
@@ -298,7 +304,7 @@ await chain.getProvenanceChain(dataHash, 10);
 await chain.supportsTransformationLinks();  // => boolean
 
 // Health check and balance
-await chain.healthCheck();  // => boolean (never throws)
+await chain.healthCheck();  // => boolean (never throws); probes eth_gasPrice, not eth_chainId
 await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 ```
 
@@ -362,7 +368,7 @@ import {
 const signer = await fromEip1193Provider(window.ethereum);
 
 // Private key (Node.js / scripts)
-const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
+const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
 
 // Existing viem WalletClient
 const signer = fromViemWalletClient(walletClient);
@@ -392,10 +398,10 @@ try {
 
 ### Supported Networks
 
-| Network | Preset | Contract |
-|---------|--------|----------|
-| Base Sepolia (testnet) | `base-sepolia` | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
-| Base (mainnet) | `base` | Not yet deployed |
+| Network | Preset | Contract | RPC (primary, then fallbacks) |
+|---------|--------|----------|-------------------------------|
+| Base Sepolia (testnet) | `base-sepolia` | `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322` | publicnode → tenderly → sepolia.base.org |
+| Base (mainnet) | `base` | Not yet deployed | mainnet.base.org |
 
 ### Breaking Changes in v0.5.0
 

@@ -14,7 +14,7 @@ import type { ChainSigner, Hex } from '../../src/chain/types.js';
  * Run with: pnpm test:integration
  *
  * Environment variables:
- *   CHAIN_RPC_URL      - RPC endpoint (default: https://sepolia.base.org)
+ *   CHAIN_RPC_URL      - RPC endpoint (default: https://base-sepolia-rpc.publicnode.com)
  *   CHAIN_CONTRACT     - Contract address (default: Base Sepolia preset)
  *   CHAIN_PRIVATE_KEY  - Private key for write tests (optional)
  *   CHAIN_TEST_HASH    - Known registered hash to verify (optional)
@@ -40,7 +40,7 @@ async function waitFor<T>(fn: () => Promise<T>, retries = 5, delayMs = 2_000): P
   throw new Error('unreachable');
 }
 
-const RPC_URL = process.env['CHAIN_RPC_URL'] ?? 'https://sepolia.base.org';
+const RPC_URL = process.env['CHAIN_RPC_URL'] ?? 'https://base-sepolia-rpc.publicnode.com';
 const CONTRACT_ADDRESS = process.env['CHAIN_CONTRACT'] as `0x${string}` | undefined;
 const PRIVATE_KEY = process.env['CHAIN_PRIVATE_KEY'] as Hex | undefined;
 const KNOWN_HASH = process.env['CHAIN_TEST_HASH'];

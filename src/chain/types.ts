@@ -119,6 +119,8 @@ export interface ChainPreset {
   chainId: number;
   name: string;
   rpcUrl: string;
+  /** RPC URLs tried in order when `rpcUrl` fails */
+  rpcFallbacks?: string[];
   contractAddress: Address;
   explorerUrl: string;
 }
@@ -137,8 +139,14 @@ export interface ChainClientConfig {
   chain: string | ChainPreset;
   /** Signer for write operations (optional for read-only) */
   signer?: ChainSigner;
-  /** Custom RPC URL (overrides preset) */
+  /** Custom RPC URL (overrides preset; also disables the preset's fallbacks) */
   rpcUrl?: string;
+  /**
+   * RPC URLs tried in order when the current one fails with a transport error
+   * (HTTP 5xx, timeouts, -32011-class RPC errors). Contract reverts never fail over.
+   * Defaults to the preset's fallbacks unless `rpcUrl` is set. Pass `[]` to disable.
+   */
+  rpcFallbacks?: string[];
   /** Custom contract address (overrides preset) */
   contractAddress?: Address;
   /** Timeout in ms for waiting for transaction receipts (default: 120_000) */

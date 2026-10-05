@@ -280,7 +280,7 @@ function App() {
               params: [{
                 chainId: hexChainId,
                 chainName: 'Base Sepolia',
-                rpcUrls: ['https://sepolia.base.org'],
+                rpcUrls: ['https://base-sepolia-rpc.publicnode.com', 'https://sepolia.base.org'],
                 nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
                 blockExplorerUrls: ['https://sepolia.basescan.org'],
               }],

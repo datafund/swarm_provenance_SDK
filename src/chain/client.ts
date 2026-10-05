@@ -1,5 +1,6 @@
 import {
   createPublicClient,
+  fallback,
   formatEther,
   http,
   type PublicClient,
@@ -93,6 +94,8 @@ export class ChainClient {
     }
 
     const rpcUrl = config.rpcUrl ?? this.preset.rpcUrl;
+    const rpcFallbacks = config.rpcFallbacks ?? (config.rpcUrl ? [] : this.preset.rpcFallbacks ?? []);
+    const rpcUrls = [...new Set([rpcUrl, ...rpcFallbacks])];
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
@@ -108,8 +111,11 @@ export class ChainClient {
       );
     }
 
+    // fallback() advances on transport errors and stops on reverts and user
+    // rejections. rank is left off: its liveness ping is eth_blockNumber, which
+    // a degraded endpoint still answers (issue #101).
     this.publicClient = createPublicClient({
-      transport: http(rpcUrl),
+      transport: rpcUrls.length === 1 ? http(rpcUrl) : fallback(rpcUrls.map((url) => http(url))),
     });
   }
 
@@ -463,10 +469,13 @@ export class ChainClient {
   /**
    * Check if the RPC connection is healthy.
    * Returns true if connected, false on error (does not throw).
+   *
+   * Probes with eth_gasPrice, a state method: eth_chainId is answered from cache
+   * by endpoints that cannot serve a single contract read.
    */
   async healthCheck(): Promise<boolean> {
     try {
-      await this.publicClient.getChainId();
+      await this.publicClient.getGasPrice();
       return true;
     } catch {
       return false;

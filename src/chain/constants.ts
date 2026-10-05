@@ -1,10 +1,16 @@
 import type { ChainPreset } from './types.js';
 
-/** Base Sepolia testnet preset (v3 contract with storageRef support) */
+/**
+ * Base Sepolia testnet preset (v3 contract with storageRef support).
+ *
+ * sepolia.base.org is kept as the last fallback: it has had partial outages where
+ * eth_chainId answers but every eth_call returns 503 (see issue #101).
+ */
 export const BASE_SEPOLIA: ChainPreset = {
   chainId: 84532,
   name: 'base-sepolia',
-  rpcUrl: 'https://sepolia.base.org',
+  rpcUrl: 'https://base-sepolia-rpc.publicnode.com',
+  rpcFallbacks: ['https://base-sepolia.gateway.tenderly.co', 'https://sepolia.base.org'],
   contractAddress: '0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322',
   explorerUrl: 'https://sepolia.basescan.org',
 };
