@@ -4,7 +4,10 @@
  * composed via `toClientEvmSigner(account, publicClient)` from @x402/evm.
  */
 export interface PaymentWallet {
-  address: `0x${string}`;
+  /** Signer address. A viem WalletClient has none here: its address is read from `account`. */
+  address?: `0x${string}`;
+  /** viem WalletClient account; used when `address` is absent */
+  account?: { address: `0x${string}` } | undefined;
   signTypedData(args: {
     domain: Record<string, unknown>;
     types: Record<string, unknown>;

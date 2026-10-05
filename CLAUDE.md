@@ -242,7 +242,7 @@ import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 
 const wallet = createWalletClient({
-  account: privateKeyToAccount('0x...'),
+  account: privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`), // server only
   chain: baseSepolia,
   transport: http(),
 }).extend(publicActions);
@@ -250,7 +250,9 @@ const wallet = createWalletClient({
 const client = new ProvenanceClient({ payment: { wallet } });
 ```
 
-The `PaymentWallet` interface requires `address`, `signTypedData`, and `readContract` — matching viem's `WalletClient.extend(publicActions)` or `@x402/evm`'s `toClientEvmSigner()`.
+Never hard-code keys in examples, and never use a raw key in browser code: browsers use an injected wallet (`custom(window.ethereum)`), see README "x402 Payment Mode".
+
+The `PaymentWallet` interface requires `signTypedData` and `readContract`, plus an address: top-level `address`, or `account.address` as on viem's `WalletClient.extend(publicActions)` (both typecheck; `tests/unit/payment-wallet-types.test.ts`). `@x402/evm`'s `toClientEvmSigner()` also fits.
 
 ## Related Projects
 

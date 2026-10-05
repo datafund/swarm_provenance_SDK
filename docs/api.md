@@ -123,7 +123,7 @@ Download and optionally verify provenance data from Swarm.
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `verify` | `boolean` | `true` | Verify notary signatures if present |
-| `notaryAddress` | `string` | gateway's `/notary/info` address | Notary address to trust. Pin it to verify independently of the gateway |
+| `notaryAddress` | `string` | gateway's `/api/v1/notary/info` address | Notary address to trust. Pin it to verify independently of the gateway |
 
 **Returns:** `DownloadResult`
 
@@ -131,7 +131,7 @@ Download and optionally verify provenance data from Swarm.
 interface DownloadResult {
   file: Uint8Array;            // Decoded original content
   metadata: ProvenanceMetadata;
-  verified?: boolean;          // true only if every signature verifies (below)
+  verified?: boolean;          // true if at least one signature verifies (below)
   verification?: SignatureVerification;
   signatures?: NotarySignature[];
 }

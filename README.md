@@ -67,8 +67,11 @@ import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 
+const key = process.env.PAYER_PRIVATE_KEY;
+if (!key?.startsWith('0x')) throw new Error('Set PAYER_PRIVATE_KEY (0x-prefixed hex)');
+
 const wallet = createWalletClient({
-  account: privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`),
+  account: privateKeyToAccount(key as `0x${string}`),
   chain: baseSepolia,
   transport: http(),
 }).extend(publicActions);
@@ -93,7 +96,13 @@ if (!provider) throw new Error('No injected wallet found');
 const walletClient = createWalletClient({ chain: baseSepolia, transport: custom(provider) });
 const [account] = await walletClient.requestAddresses();
 // The payment authorization is signed for the payment network: put the wallet on it
-await walletClient.switchChain({ id: baseSepolia.id });
+try {
+  await walletClient.switchChain({ id: baseSepolia.id });
+} catch (error) {
+  // 4902: the wallet does not know the chain yet
+  if ((error as { code?: number }).code !== 4902) throw error;
+  await walletClient.addChain({ chain: baseSepolia });
+}
 
 const wallet = createWalletClient({
   account: account!,

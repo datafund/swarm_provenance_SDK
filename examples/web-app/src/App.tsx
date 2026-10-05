@@ -34,11 +34,15 @@ function verificationMessage(result: { verified?: boolean; verification?: Signat
       ? `The EIP-191 signature recovers to the pinned notary address ${v.expectedSigner}.`
       : `The EIP-191 signature recovers to the notary address this gateway reports (${v?.expectedSigner}). To verify independently of the gateway, pin the notary address with the notaryAddress download option.`;
   }
-  // Per-signature errors first: a tampered signature must not hide behind a configuration message
-  const errors = (v?.results ?? []).filter((r) => !r.valid).map((r) => r.error ?? 'invalid signature');
-  const specific = errors.filter((e) => !e.startsWith('No expected signer'));
+  // Per-signature problems first: a tampered signature must not hide behind a
+  // configuration message. Without an expected signer every result is invalid,
+  // so only those whose data or scheme is already wrong say anything specific.
+  const noSigner = v?.expectedSignerSource === 'none';
+  const specific = (v?.results ?? [])
+    .filter((r) => !r.valid && (!noSigner || !r.dataHashValid))
+    .map((r) => r.error ?? 'invalid signature');
   if (specific.length > 0) return `Signature verification failed: ${specific.join('; ')}.`;
-  if (v?.expectedSignerSource === 'none') return 'Not verified: the gateway reports no notary address to verify against.';
+  if (noSigner) return v?.error ?? 'Not verified: the gateway reports no notary address to verify against.';
   return 'Signature verification failed.';
 }
 
