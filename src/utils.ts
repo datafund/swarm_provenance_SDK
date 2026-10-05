@@ -77,3 +77,8 @@ export function isValidSwarmReference(ref: string): boolean {
 export function normalizeReference(ref: string): string {
   return ref.trim().toLowerCase();
 }
+
+/** 0x followed by 40 hex characters (any case; no checksum check) */
+export function isAddress(value: unknown): boolean {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
+}

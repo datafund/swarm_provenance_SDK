@@ -1,0 +1,18 @@
+{
+  "data": "aGVsbG8gcHJvdmVuYW5jZSDigJQgw7xuw69jb2RlIOKckw==",
+  "content_hash": "a4c76bea0c769eec569a1b46460dd81f1dc90ffddbfdad752fb0a9b8a742d7e8",
+  "stamp_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "signatures": [
+    {
+      "type": "notary",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "timestamp": "2026-10-05T12:00:00+00:00",
+      "data_hash": "ff003d90b98fb943769b4d3538f49369dfe498ddaa90ac4c4cff129fd7bed54b",
+      "signature": "4e1c0811da9d0b9387993dc5007b2162d47badf70ee3b59ab3bda1e4e3946c7c6f603811830fb56cfb13c1a76f9b5d381f08e129c1b6e3ef67fc6a6676f1cc9e1c",
+      "hashed_fields": [
+        "data"
+      ],
+      "signed_message_format": "{data_hash}|{timestamp}"
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import type {
   GatewayRetryConfig,
   UploadOptions,
   DownloadOptions,
+  SignatureVerification,
   UploadResult,
   DownloadResult,
   DocumentUploadResult,
@@ -30,7 +31,8 @@ import {
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
-import { toBytes } from './utils.js';
+import { canonicalizeJsonText } from './canonical-json.js';
+import { toBytes, isAddress } from './utils.js';
 import { createX402Fetch } from './payment.js';
 
 const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
@@ -44,6 +46,12 @@ export class ProvenanceClient {
   private readonly timeout: number;
   private readonly paymentMode: PaymentMode;
   private readonly retryConfig: Required<GatewayRetryConfig>;
+  /** Notary address reported by /notary/info (see gatewayNotaryAddress) */
+  private cachedNotaryAddress: string | undefined;
+  /** In-flight /notary/info lookup, shared by concurrent downloads */
+  private notaryLookup: Promise<string | undefined> | undefined;
+  /** When a cached address was last re-checked after a failed verification */
+  private notaryRecheckedAt = 0;
   private x402Fetch: typeof fetch | undefined;
   private x402FetchPromise: Promise<typeof fetch> | undefined;
 
@@ -223,13 +231,17 @@ export class ProvenanceClient {
    * contains structured JSON instead of base64-encoded content.
    */
   async downloadDocument(reference: string, options: DownloadOptions = {}): Promise<DocumentDownloadResult> {
+    assertNotaryAddress(options);
     const response = await this.fetch(`/api/v1/data/${reference}`);
 
     if (!response.ok) {
       throw await this.handleError(response);
     }
 
-    const raw = (await response.json()) as Record<string, unknown>;
+    const text = await response.text();
+    const raw = JSON.parse(text) as Record<string, unknown>;
+    const wrapped = Boolean(raw['metadata'] && typeof raw['metadata'] === 'object');
+    const canonicalData = canonicalDataOf(text, wrapped);
 
     let documentData: Record<string, unknown>;
     let contentHash: string;
@@ -237,7 +249,7 @@ export class ProvenanceClient {
     let provenanceStandard: string | undefined;
     let signatures: NotarySignature[] | undefined;
 
-    if (raw['metadata'] && typeof raw['metadata'] === 'object') {
+    if (wrapped) {
       // Wrapped format: {metadata: {...}, signatures: [...]}
       const meta = raw['metadata'] as Record<string, unknown>;
       documentData = meta['data'] as Record<string, unknown>;
@@ -266,7 +278,7 @@ export class ProvenanceClient {
     }
 
     // Verify content hash
-    if (!verifyDocumentHash(metadata)) {
+    if (!verifyDocumentHash(metadata, canonicalData)) {
       throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
     }
 
@@ -278,23 +290,86 @@ export class ProvenanceClient {
       result.signatures = signatures;
     }
 
-    // Verify signatures if present and requested
-    if (signatures && signatures.length > 0) {
-      const shouldVerify = options.verify !== false;
-      if (shouldVerify) {
-        const notary = await this.notaryInfo();
-        // For document metadata, create a compatible metadata for signature verification
-        const sigMetadata: ProvenanceMetadata = {
-          data: JSON.stringify(documentData),
-          content_hash: contentHash,
-          stamp_id: stampId,
-        };
-        const verification = verifyAllSignatures(signatures, sigMetadata, notary.address);
-        result.verified = verification.allValid;
-      }
+    // Verify signatures if present and requested. The notary hashes the data
+    // object itself (#114: this used to pass JSON.stringify(data), a string).
+    if (signatures && signatures.length > 0 && options.verify !== false) {
+      Object.assign(result, await this.verifySignatures(signatures, metadata, canonicalData, options));
     }
 
     return result;
+  }
+
+  /**
+   * Check notary signatures against the expected signer: `options.notaryAddress`
+   * if given, else the address the gateway reports. Fails closed: with no
+   * usable address, or if the lookup fails, `verified` is false and the
+   * downloaded data is still returned.
+   */
+  private async verifySignatures(
+    signatures: NotarySignature[],
+    metadata: ProvenanceMetadata | DocumentMetadata,
+    canonicalData: string | undefined,
+    options: DownloadOptions
+  ): Promise<{ verified: boolean; verification: SignatureVerification }> {
+    const check = (expectedSigner: string | undefined, source: SignatureVerification['expectedSignerSource']) => {
+      // verified = at least one signature by the expected notary over this exact
+      // data (see verifyAllSignatures); every signature's result is reported.
+      const { anyValid, results } = verifyAllSignatures(signatures, metadata, expectedSigner, canonicalData);
+      const verification: SignatureVerification = { expectedSignerSource: source, results };
+      if (expectedSigner !== undefined) verification.expectedSigner = expectedSigner;
+      return { verified: anyValid, verification };
+    };
+
+    if (options.notaryAddress !== undefined) return check(options.notaryAddress, 'option');
+
+    const wasCached = this.cachedNotaryAddress !== undefined;
+    let address: string | undefined;
+    try {
+      address = await this.gatewayNotaryAddress();
+    } catch (error) {
+      const outcome = check(undefined, 'none');
+      outcome.verification.error = `Could not get the gateway notary address: ${error instanceof Error ? error.message : String(error)}`;
+      return outcome;
+    }
+    let outcome = check(address, address === undefined ? 'none' : 'gateway');
+
+    // A cached address may be stale (the notary key rotated): look it up again,
+    // at most once a minute, so unverifiable documents don't each cost a request
+    if (!outcome.verified && wasCached && Date.now() - this.notaryRecheckedAt > NOTARY_RECHECK_MS) {
+      this.notaryRecheckedAt = Date.now();
+      const previous = this.cachedNotaryAddress;
+      this.cachedNotaryAddress = undefined;
+      try {
+        const fresh = await this.gatewayNotaryAddress();
+        if (fresh !== address) outcome = check(fresh, fresh === undefined ? 'none' : 'gateway');
+      } catch {
+        // keep the first outcome (it already fails closed) and the address that
+        // was valid: a passing outage must not drop it
+      } finally {
+        this.cachedNotaryAddress ??= previous;
+      }
+    }
+    return outcome;
+  }
+
+  /**
+   * The gateway's notary address. Only a reported address is cached (per
+   * client): "no address" may be a passing outage, so it is asked again.
+   */
+  private gatewayNotaryAddress(): Promise<string | undefined> {
+    if (this.cachedNotaryAddress !== undefined) return Promise.resolve(this.cachedNotaryAddress);
+    this.notaryLookup ??= this.notaryInfo()
+      .then((notary) => {
+        // address may be null or absent when the notary is disabled. A malformed
+        // one is returned (so the error names it) but not cached.
+        const address = typeof notary.address === 'string' && notary.address ? notary.address : undefined;
+        if (address !== undefined && isAddress(address)) this.cachedNotaryAddress = address;
+        return address;
+      })
+      .finally(() => {
+        this.notaryLookup = undefined;
+      });
+    return this.notaryLookup;
   }
 
   private async resolveStampId(options: UploadOptions): Promise<string> {
@@ -399,6 +474,7 @@ export class ProvenanceClient {
    * Download and optionally verify provenance data from Swarm
    */
   async download(reference: string, options: DownloadOptions = {}): Promise<DownloadResult> {
+    assertNotaryAddress(options);
     const response = await this.fetch(`/api/v1/data/${reference}`);
 
     if (!response.ok) {
@@ -411,11 +487,13 @@ export class ProvenanceClient {
     // Parse response - gateway may return:
     // 1. Wrapped format: {metadata: {...}, signatures: [...]}
     // 2. Direct format: {data: "...", content_hash: "...", stamp_id: "...", signatures?: [...]}
-    const data = (await response.json()) as
+    const text = await response.text();
+    const data = JSON.parse(text) as
       | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
       | (ProvenanceMetadata & { signatures?: NotarySignature[] });
+    const wrapped = Boolean('metadata' in data && data.metadata && typeof data.metadata === 'object');
 
-    if ('metadata' in data && data.metadata && typeof data.metadata === 'object') {
+    if ('metadata' in data && wrapped) {
       // Wrapped format
       metadata = data.metadata;
       signatures = data.signatures;
@@ -455,14 +533,11 @@ export class ProvenanceClient {
       result.signatures = signatures;
     }
 
-    // Verify signatures if present and requested
-    if (signatures && signatures.length > 0) {
-      const shouldVerify = options.verify !== false;
-      if (shouldVerify) {
-        const notary = await this.notaryInfo();
-        const verification = verifyAllSignatures(signatures, metadata, notary.address);
-        result.verified = verification.allValid;
-      }
+    // Verify signatures if present and requested. Base64 `data` is a string,
+    // whose canonical form needs no lossless parse of the (possibly large) body.
+    if (signatures && signatures.length > 0 && options.verify !== false) {
+      const canonicalData = typeof metadata.data === 'string' ? undefined : canonicalDataOf(text, wrapped);
+      Object.assign(result, await this.verifySignatures(signatures, metadata, canonicalData, options));
     }
 
     return result;
@@ -589,5 +664,32 @@ export class ProvenanceClient {
     }
 
     return new GatewayConnectionError(message, response.status, code, suggestion);
+  }
+}
+
+/**
+ * Exact canonical JSON of the document's `data` field, taken from the response
+ * text so floats and large integers keep the form the notary hashed.
+ * Undefined if it cannot be extracted; callers then canonicalise the parsed value.
+ */
+function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
+  try {
+    return canonicalizeJsonText(text, wrapped ? ['metadata', 'data'] : ['data']);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Minimum interval between re-checks of a cached notary address (see verifySignatures) */
+const NOTARY_RECHECK_MS = 60_000;
+
+/** A pinned notaryAddress must be an address: a typo must not read as "unverified". */
+function assertNotaryAddress(options: DownloadOptions): void {
+  // Only checked when it will be used
+  if (options.verify !== false && options.notaryAddress !== undefined && !isAddress(options.notaryAddress)) {
+    throw new ProvenanceError(
+      `Invalid notaryAddress: expected 0x followed by 40 hex characters, got ${JSON.stringify(options.notaryAddress)}`,
+      'INVALID_INPUT'
+    );
   }
 }
