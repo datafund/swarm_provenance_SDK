@@ -110,9 +110,14 @@ export function buildDocumentMetadata(
  * anyone can compute it, so it does not bind the data to its author.
  */
 export function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: string): boolean {
-  const canonical = canonicalData ?? canonicalizeJsonValue(metadata.data);
-  if (sha256Hex(canonical) === metadata.content_hash) return true;
-  return sha256Hex(toBytes(JSON.stringify(metadata.data))) === metadata.content_hash;
+  if (metadata.data === undefined && canonicalData === undefined) return false;
+  try {
+    const canonical = canonicalData ?? canonicalizeJsonValue(metadata.data);
+    if (sha256Hex(canonical) === metadata.content_hash) return true;
+    return sha256Hex(toBytes(JSON.stringify(metadata.data))) === metadata.content_hash;
+  } catch {
+    return false; // data not representable as JSON, or nested too deep
+  }
 }
 
 /**

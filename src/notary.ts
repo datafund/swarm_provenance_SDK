@@ -30,10 +30,7 @@ const SIGNATURE = /^(?:0x)?([0-9a-fA-F]{128})([0-9a-fA-F]{2})$/;
  * arbitrary one would let a forger point it at any other message the notary
  * key ever signed (with no placeholders, data_hash would not be bound at all).
  */
-export function reconstructSignedMessage(
-  signature: NotarySignature,
-  _metadata?: ProvenanceMetadata | DocumentMetadata
-): string {
+export function reconstructSignedMessage(signature: NotarySignature): string {
   if (signature.signed_message_format !== NOTARY_MESSAGE_FORMAT) {
     throw new VerificationError(
       `Unsupported signed_message_format: ${JSON.stringify(signature.signed_message_format)}`,
@@ -56,6 +53,21 @@ export function computeNotaryDataHash(
   return sha256Hex(canonicalData ?? canonicalizeJsonValue(metadata.data));
 }
 
+/** Data-hash comparison without the scheme check; false (never throws) if `data` cannot be hashed. */
+function dataHashMatches(
+  signature: NotarySignature,
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'> | undefined,
+  canonicalData?: string
+): boolean {
+  try {
+    const canonical =
+      canonicalData ?? (metadata?.data === undefined ? undefined : canonicalizeJsonValue(metadata.data));
+    return canonical !== undefined && sha256Hex(canonical) === signature.data_hash;
+  } catch {
+    return false; // data not representable as JSON, or nested too deep
+  }
+}
+
 /**
  * Verify that the signature's data_hash matches the document's `data` field.
  * Only `hashed_fields: ['data']` (the gateway's scheme) is supported.
@@ -65,8 +77,7 @@ export function verifyDataHash(
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   canonicalData?: string
 ): boolean {
-  if (!isNotaryScheme(signature)) return false;
-  return computeNotaryDataHash(metadata, canonicalData) === signature.data_hash;
+  return isNotaryScheme(signature) && dataHashMatches(signature, metadata, canonicalData);
 }
 
 /**
@@ -117,8 +128,8 @@ function isNotaryScheme(signature: NotarySignature): boolean {
     signature !== null &&
     signature.type === NOTARY_SIGNATURE_TYPE &&
     Array.isArray(signature.hashed_fields) &&
-    signature.hashed_fields.length === 1 &&
-    signature.hashed_fields[0] === 'data' &&
+    signature.hashed_fields.length === NOTARY_HASHED_FIELDS.length &&
+    signature.hashed_fields.every((field, i) => field === NOTARY_HASHED_FIELDS[i]) &&
     signature.signed_message_format === NOTARY_MESSAGE_FORMAT &&
     typeof signature.data_hash === 'string' &&
     typeof signature.timestamp === 'string' &&
@@ -152,7 +163,7 @@ export function verifySignature(
     };
   }
 
-  const dataHashValid = verifyDataHash(signature, metadata, canonicalData);
+  const dataHashValid = dataHashMatches(signature, metadata, canonicalData);
   if (!dataHashValid) {
     return { valid: false, dataHashValid: false, error: 'Data hash mismatch' };
   }
@@ -191,16 +202,21 @@ export function verifySignature(
 }
 
 /**
- * Verify every signature on a document. `allValid` is true only if there is at
- * least one signature and every one verifies against `expectedSigner`; other
- * signature types cannot be checked, so their presence makes it false.
+ * Verify every signature on a document against `expectedSigner`.
+ *
+ * - `anyValid`: at least one signature by the expected signer covers this exact
+ *   data. This is what download() reports as `verified`: each valid signature
+ *   binds the data on its own, and the gateway appends its signature to any the
+ *   uploader supplied (other types, or an earlier notary key), which cannot be
+ *   checked against the same signer.
+ * - `allValid`: at least one signature, and every one valid.
  */
 export function verifyAllSignatures(
   signatures: NotarySignature[],
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   expectedSigner?: string,
   canonicalData?: string
-): { allValid: boolean; results: SignatureCheck[] } {
+): { allValid: boolean; anyValid: boolean; results: SignatureCheck[] } {
   const results = (Array.isArray(signatures) ? signatures : []).map((sig, index) => {
     const result = verifySignature(sig, metadata, expectedSigner, canonicalData);
     const item: SignatureCheck = { index, valid: result.valid, dataHashValid: result.dataHashValid };
@@ -209,5 +225,9 @@ export function verifyAllSignatures(
     return item;
   });
 
-  return { allValid: results.length > 0 && results.every((r) => r.valid), results };
+  return {
+    allValid: results.length > 0 && results.every((r) => r.valid),
+    anyValid: results.some((r) => r.valid),
+    results,
+  };
 }

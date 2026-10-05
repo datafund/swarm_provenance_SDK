@@ -207,3 +207,16 @@ describe('verifyAllSignatures', () => {
     expect(verifyAllSignatures([sig], doc).allValid).toBe(false);
   });
 });
+
+describe('fails closed instead of throwing (review round 1)', () => {
+  it('verifySignature on metadata without data returns invalid', () => {
+    const { sig } = fixture('base64-document');
+    expect(verifySignature(sig, {} as { data: string }, NOTARY)).toMatchObject({ valid: false, dataHashValid: false });
+  });
+
+  it('verifyAllSignatures reports anyValid separately from allValid', () => {
+    const { doc, sig } = fixture('base64-document');
+    const result = verifyAllSignatures([{ ...sig, signature: '' }, sig], doc, NOTARY);
+    expect(result).toMatchObject({ allValid: false, anyValid: true });
+  });
+});

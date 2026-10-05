@@ -163,11 +163,16 @@ const result = await client.download(reference, {
 
 #### What `verified` means
 
-`verified: true` means every signature on the document is an EIP-191 signature that
-recovers to the expected notary address over `sha256(canonical JSON of data) | timestamp`
-(the gateway's scheme). It fails closed: an empty, missing or malformed signature, a
-signature by any other key, changed data, or no expected address gives `false`.
-`verified` is `undefined` for unsigned documents or with `verify: false`.
+`verified: true` means at least one signature on the document is an EIP-191 signature
+that recovers to the expected notary address over `sha256(canonical JSON of data) | timestamp`
+(the gateway's scheme). Each such signature binds the exact data on its own; other
+signatures (an uploader's own, or one by an earlier notary key, which the gateway keeps
+when it appends its signature) do not affect it, and every signature's result is in
+`verification.results`. It fails closed: if no signature is a valid one by the expected
+notary (empty, missing or malformed signatures, other keys, changed data, or no expected
+address), `verified` is `false`. It is `undefined` when the document carries no signatures
+or with `verify: false`, so check `verified === true` rather than `!== false`.
+A malformed `notaryAddress` throws `ProvenanceError` (`INVALID_INPUT`).
 
 The expected address is `notaryAddress` if you pass it, otherwise the one the gateway
 reports at `/api/v1/notary/info` (`verification.expectedSignerSource` says which). The
@@ -269,7 +274,8 @@ const result = verifySignature(signature, metadata, expectedSigner);
 // => { valid, dataHashValid, signerValid?, recoveredAddress?, error? }
 // valid is false without an expectedSigner. For raw documents with floats or
 // integers beyond 2^53, pass the canonical text of `data` as a 4th argument:
-// canonicalizeJsonText(responseText, ['data']).
+// canonicalizeJsonText(responseText, ['data']), or ['metadata', 'data'] for a
+// wrapped {metadata: {...}, signatures: [...]} response.
 ```
 
 ## Blockchain Anchoring (`/chain`)

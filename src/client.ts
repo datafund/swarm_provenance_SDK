@@ -46,6 +46,8 @@ export class ProvenanceClient {
   private readonly timeout: number;
   private readonly paymentMode: PaymentMode;
   private readonly retryConfig: Required<GatewayRetryConfig>;
+  /** Cached notary address from /notary/info (cleared on failure) */
+  private notaryAddressPromise: Promise<string | undefined> | undefined;
   private x402Fetch: typeof fetch | undefined;
   private x402FetchPromise: Promise<typeof fetch> | undefined;
 
@@ -225,6 +227,7 @@ export class ProvenanceClient {
    * contains structured JSON instead of base64-encoded content.
    */
   async downloadDocument(reference: string, options: DownloadOptions = {}): Promise<DocumentDownloadResult> {
+    assertNotaryAddress(options);
     const response = await this.fetch(`/api/v1/data/${reference}`);
 
     if (!response.ok) {
@@ -309,18 +312,29 @@ export class ProvenanceClient {
       expectedSigner = options.notaryAddress;
       expectedSignerSource = 'option';
     } else {
-      const notary = await this.notaryInfo();
-      // address may be null or absent when the notary is disabled
-      if (typeof notary.address === 'string' && notary.address) {
-        expectedSigner = notary.address;
-        expectedSignerSource = 'gateway';
-      }
+      expectedSigner = await this.gatewayNotaryAddress();
+      if (expectedSigner !== undefined) expectedSignerSource = 'gateway';
     }
 
-    const { allValid, results } = verifyAllSignatures(signatures, metadata, expectedSigner, canonicalData);
+    // verified = at least one signature by the expected notary over this exact
+    // data (see verifyAllSignatures); every signature's result is reported.
+    const { anyValid, results } = verifyAllSignatures(signatures, metadata, expectedSigner, canonicalData);
     const verification: SignatureVerification = { expectedSignerSource, results };
     if (expectedSigner !== undefined) verification.expectedSigner = expectedSigner;
-    return { verified: allValid, verification };
+    return { verified: anyValid, verification };
+  }
+
+  /** The gateway's notary address, fetched once per client; undefined if it reports none. */
+  private gatewayNotaryAddress(): Promise<string | undefined> {
+    this.notaryAddressPromise ??= this.notaryInfo().then(
+      // address may be null or absent when the notary is disabled
+      (notary) => (typeof notary.address === 'string' && notary.address ? notary.address : undefined),
+      (error: unknown) => {
+        this.notaryAddressPromise = undefined; // retry on the next download
+        throw error;
+      },
+    );
+    return this.notaryAddressPromise;
   }
 
   private async resolveStampId(options: UploadOptions): Promise<string> {
@@ -425,6 +439,7 @@ export class ProvenanceClient {
    * Download and optionally verify provenance data from Swarm
    */
   async download(reference: string, options: DownloadOptions = {}): Promise<DownloadResult> {
+    assertNotaryAddress(options);
     const response = await this.fetch(`/api/v1/data/${reference}`);
 
     if (!response.ok) {
@@ -442,7 +457,6 @@ export class ProvenanceClient {
       | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
       | (ProvenanceMetadata & { signatures?: NotarySignature[] });
     const wrapped = Boolean('metadata' in data && data.metadata && typeof data.metadata === 'object');
-    const canonicalData = canonicalDataOf(text, wrapped);
 
     if ('metadata' in data && wrapped) {
       // Wrapped format
@@ -484,8 +498,10 @@ export class ProvenanceClient {
       result.signatures = signatures;
     }
 
-    // Verify signatures if present and requested
+    // Verify signatures if present and requested. Base64 `data` is a string,
+    // whose canonical form needs no lossless parse of the (possibly large) body.
     if (signatures && signatures.length > 0 && options.verify !== false) {
+      const canonicalData = typeof metadata.data === 'string' ? undefined : canonicalDataOf(text, wrapped);
       Object.assign(result, await this.verifySignatures(signatures, metadata, canonicalData, options));
     }
 
@@ -626,5 +642,17 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
     return canonicalizeJsonText(text, wrapped ? ['metadata', 'data'] : ['data']);
   } catch {
     return undefined;
+  }
+}
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** A pinned notaryAddress must be an address: a typo must not read as "unverified". */
+function assertNotaryAddress(options: DownloadOptions): void {
+  if (options.notaryAddress !== undefined && !ADDRESS.test(options.notaryAddress)) {
+    throw new ProvenanceError(
+      `Invalid notaryAddress: expected 0x followed by 40 hex characters, got ${JSON.stringify(options.notaryAddress)}`,
+      'INVALID_INPUT'
+    );
   }
 }

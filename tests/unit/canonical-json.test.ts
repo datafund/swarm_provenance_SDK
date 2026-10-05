@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { canonicalizeJsonText, canonicalizeJsonValue } from '../../src/canonical-json.js';
+import { canonicalizeJsonText, canonicalizeJsonValue, MAX_JSON_DEPTH } from '../../src/canonical-json.js';
+import { verifyDocumentHash } from '../../src/metadata.js';
 
 const FIXTURES = new URL('../fixtures/notary/', import.meta.url);
 
@@ -64,5 +65,21 @@ describe('canonicalizeJsonValue', () => {
 
   it('rejects values JSON cannot represent', () => {
     expect(() => canonicalizeJsonValue(undefined)).toThrow(TypeError);
+  });
+});
+
+describe('nesting limit', () => {
+  it('rejects JSON nested deeper than MAX_JSON_DEPTH with SyntaxError, not a stack overflow', () => {
+    const deep = '['.repeat(20000) + ']'.repeat(20000);
+    expect(() => JSON.parse(deep) as unknown).not.toThrow();
+    expect(() => canonicalizeJsonText(deep)).toThrow(SyntaxError);
+    expect(canonicalizeJsonText('['.repeat(MAX_JSON_DEPTH) + ']'.repeat(MAX_JSON_DEPTH))).toBe(
+      '['.repeat(MAX_JSON_DEPTH) + ']'.repeat(MAX_JSON_DEPTH),
+    );
+  });
+
+  it('verifyDocumentHash returns false for over-deep data instead of throwing', () => {
+    const deep = JSON.parse('['.repeat(5000) + ']'.repeat(5000)) as unknown;
+    expect(verifyDocumentHash({ data: deep as Record<string, unknown>, content_hash: 'x', stamp_id: 's' })).toBe(false);
   });
 });

@@ -179,3 +179,66 @@ describe('downloadDocument() (#114)', () => {
     expect((await new ProvenanceClient().downloadDocument(REF)).verified).toBe(true);
   });
 });
+
+describe('review round 1 (#135)', () => {
+  it('a document with an uploader signature and a genuine notary signature verifies (gateway appends)', async () => {
+    serve(
+      edit('base64-document.json', (doc) => {
+        doc.signatures.unshift({ type: 'author', signer: OTHER.address, signature: '0xabc' });
+      }),
+    );
+    const result = await new ProvenanceClient().download(REF);
+    expect(result.verified).toBe(true);
+    expect(result.verification?.results.map((r) => r.valid)).toEqual([false, true]);
+  });
+
+  it('a signature by an earlier notary key does not stop the current notary signature verifying', async () => {
+    const doc = JSON.parse(read('base64-document.json')) as FixtureDoc;
+    const genuine = doc.signatures[0]!;
+    const earlier = {
+      ...genuine,
+      signer: OTHER.address,
+      signature: await OTHER.signMessage({ message: `${String(genuine['data_hash'])}|${String(genuine['timestamp'])}` }),
+    };
+    doc.signatures = [earlier, genuine];
+    serve(JSON.stringify(doc));
+    expect((await new ProvenanceClient().download(REF)).verified).toBe(true);
+  });
+
+  it('a document with no data field fails with CONTENT_HASH_MISMATCH, not a TypeError', async () => {
+    serve(JSON.stringify({ content_hash: '0'.repeat(64), stamp_id: 'c'.repeat(64) }));
+    await expect(new ProvenanceClient().downloadDocument(REF)).rejects.toMatchObject({
+      name: 'ProvenanceError',
+      code: 'CONTENT_HASH_MISMATCH',
+    });
+  });
+
+  it.each(['f39fd6e51aad88f6f4ce6ab8827279cfffb92266', '', 'notary.eth', '0x1234'])(
+    'rejects a malformed notaryAddress (%j) before fetching',
+    async (notaryAddress) => {
+      serve(read('base64-document.json'));
+      await expect(new ProvenanceClient().download(REF, { notaryAddress })).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it('fetches the gateway notary address once per client', async () => {
+    serve(read('base64-document.json'));
+    const client = new ProvenanceClient();
+    await client.download(REF);
+    await client.download(REF);
+    expect(calls.filter((p) => p === '/api/v1/notary/info')).toHaveLength(1);
+  });
+
+  it('does not cache a failed notary lookup', async () => {
+    serve(read('base64-document.json'));
+    routes['/api/v1/notary/info'] = { status: 500, body: '{"detail":"boom"}' };
+    const client = new ProvenanceClient({ retry: { maxRetries: 0 } });
+    await expect(client.download(REF)).rejects.toThrow();
+
+    serve(read('base64-document.json'));
+    expect((await client.download(REF)).verified).toBe(true);
+  });
+});

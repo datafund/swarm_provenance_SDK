@@ -28,9 +28,19 @@ type JsonNode =
   | { kind: 'literal'; text: 'true' | 'false' | 'null' };
 
 const NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+// eslint-disable-next-line no-control-regex
+const STRING_SPECIAL = /["\\\u0000-\u001f]/g;
+
+/**
+ * Nesting limit. The parser is recursive; this keeps it far below the JS stack
+ * limit. The gateway cannot sign anything this deep either (Python's json is
+ * limited by its ~1000-frame recursion limit).
+ */
+export const MAX_JSON_DEPTH = 1000;
 
 class LosslessParser {
   private pos = 0;
+  private depth = 0;
 
   constructor(private readonly text: string) {}
 
@@ -52,8 +62,12 @@ class LosslessParser {
   private value(): JsonNode {
     this.ws();
     const c = this.text[this.pos];
-    if (c === '{') return this.object();
-    if (c === '[') return this.array();
+    if (c === '{' || c === '[') {
+      if (++this.depth > MAX_JSON_DEPTH) this.fail(`Nesting deeper than ${MAX_JSON_DEPTH}`);
+      const node = c === '{' ? this.object() : this.array();
+      this.depth--;
+      return node;
+    }
     if (c === '"') return { kind: 'string', value: this.string() };
     for (const text of ['true', 'false', 'null'] as const) {
       if (this.text.startsWith(text, this.pos)) {
@@ -113,14 +127,16 @@ class LosslessParser {
     this.pos++; // opening quote
     let out = '';
     for (;;) {
+      // Copy the run up to the next quote, backslash or control character in one slice
+      STRING_SPECIAL.lastIndex = this.pos;
+      const special = STRING_SPECIAL.exec(this.text);
+      const end = special ? special.index : this.text.length;
+      out += this.text.slice(this.pos, end);
+      this.pos = end;
       const c = this.text[this.pos++];
       if (c === undefined) this.fail('Unterminated string');
       if (c === '"') return out;
       if (c < ' ') this.fail('Unescaped control character in string');
-      if (c !== '\\') {
-        out += c;
-        continue;
-      }
       const e = this.text[this.pos++];
       switch (e) {
         case '"': out += '"'; break;
@@ -168,20 +184,19 @@ const SHORT_ESCAPES: Record<string, string> = {
   '\t': '\\t',
 };
 
+// Everything Python's ensure_ascii escapes: quote, backslash, and all but printable ASCII
+// eslint-disable-next-line no-control-regex
+const NEEDS_ESCAPE = /["\\\u0000-\u001f\u007f-\uffff]/g;
+
 /** Python json.dumps string encoding with ensure_ascii=True. */
 function emitString(value: string): string {
-  let out = '"';
   // Per UTF-16 code unit: astral characters come out as surrogate pairs, which
   // is what Python emits for them; lone surrogates round-trip unchanged.
-  for (let i = 0; i < value.length; i++) {
-    const c = value[i]!;
-    const code = value.charCodeAt(i);
-    const short = SHORT_ESCAPES[c];
-    if (short) out += short;
-    else if (code < 0x20 || code > 0x7e) out += '\\u' + code.toString(16).padStart(4, '0');
-    else out += c;
-  }
-  return out + '"';
+  const escaped = value.replace(
+    NEEDS_ESCAPE,
+    (c) => SHORT_ESCAPES[c] ?? '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'),
+  );
+  return `"${escaped}"`;
 }
 
 /** Python repr() of a float, which json.dumps uses. */
@@ -251,6 +266,8 @@ export function canonicalizeJsonText(text: string, path: readonly string[] = [])
  * Throws TypeError for values JSON cannot represent (e.g. undefined, BigInt).
  */
 export function canonicalizeJsonValue(value: unknown): string {
+  // A string's canonical form needs no parse (base64 `data` can be megabytes)
+  if (typeof value === 'string') return emitString(value);
   const text = JSON.stringify(value);
   if (text === undefined) throw new TypeError('Value is not representable as JSON');
   return canonicalizeJsonText(text)!;
