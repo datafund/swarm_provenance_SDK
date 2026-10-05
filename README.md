@@ -83,14 +83,22 @@ const result = await client.upload('Hello, World!');
 anything shipped to the browser is public.
 
 ```typescript
-import { createWalletClient, custom, publicActions } from 'viem';
+import { ProvenanceClient } from '@datafund/swarm-provenance';
+import { createWalletClient, custom, publicActions, type EIP1193Provider } from 'viem';
 import { baseSepolia } from 'viem/chains';
 
-const [account] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+const provider = (window as { ethereum?: EIP1193Provider }).ethereum;
+if (!provider) throw new Error('No injected wallet found');
+
+const walletClient = createWalletClient({ chain: baseSepolia, transport: custom(provider) });
+const [account] = await walletClient.requestAddresses();
+// The payment authorization is signed for the payment network: put the wallet on it
+await walletClient.switchChain({ id: baseSepolia.id });
+
 const wallet = createWalletClient({
-  account,
+  account: account!,
   chain: baseSepolia,
-  transport: custom(window.ethereum),
+  transport: custom(provider),
 }).extend(publicActions);
 
 const client = new ProvenanceClient({ payment: { wallet } });
@@ -141,9 +149,11 @@ What the SDK checks, and what it does not:
 
 - **`content_hash`** is recomputed on every download. It proves the content matches the hash
   stored next to it, not who wrote either: anyone can compute it.
-- **Notary signatures** prove that the gateway's notary key signed this exact `data` at the
-  stated timestamp. By default the expected notary address comes from the gateway that served
-  the document; pass `notaryAddress` to `download()` to verify independently of the gateway.
+- **Notary signatures** prove that the notary key signed this exact `data` together with a
+  timestamp. The timestamp is the gateway's claim, not independent proof of time: whoever
+  holds the notary key can sign any timestamp. For time you can verify, anchor the hash
+  on-chain. By default the expected notary address comes from the gateway that served the
+  document; pass `notaryAddress` to `download()` to verify independently of the gateway.
   See [What `verified` means](#what-verified-means).
 - **On-chain anchoring** (`/chain`) proves that an address registered a hash at a block time.
   It does not prove anything about content the hash was not computed from.

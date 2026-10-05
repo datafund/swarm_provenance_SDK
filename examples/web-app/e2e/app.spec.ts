@@ -333,7 +333,7 @@ test.describe('Notary Integration', () => {
     await expect(page.getByText('Data Hash:')).toBeVisible();
 
     // Verify signer matches gateway notary badge
-    await expect(page.getByText('Matches Gateway Notary')).toBeVisible();
+    await expect(page.getByText('Signed by Gateway Notary')).toBeVisible();
   });
 });
 

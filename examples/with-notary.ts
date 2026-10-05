@@ -41,10 +41,11 @@ async function main() {
     console.log('Reference:', result.reference);
 
     // The signature is stored with the document: download to get and verify it.
-    // Pinning notaryAddress verifies independently of the gateway; here it comes
-    // from the same gateway, which is what download() does by default.
+    // By default download() trusts the notary address this gateway reports. To
+    // verify independently of the gateway, pin the notary you trust:
+    //   client.download(reference, { notaryAddress: '0x...' })
     console.log('\nVerifying by re-downloading...');
-    const downloaded = await client.download(result.reference, { notaryAddress: notaryInfo.address });
+    const downloaded = await client.download(result.reference);
 
     for (const sig of downloaded.signatures ?? []) {
       console.log('\n  Signature:');

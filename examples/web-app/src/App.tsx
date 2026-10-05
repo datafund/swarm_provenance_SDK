@@ -8,6 +8,7 @@ import {
   type DocumentUploadResult,
   type DocumentDownloadResult,
   type NotaryInfo,
+  type SignatureVerification,
 } from '@datafund/swarm-provenance';
 import {
   ChainClient,
@@ -24,6 +25,32 @@ import {
 } from '@datafund/swarm-provenance/chain';
 
 const client = new ProvenanceClient();
+
+/** What a download's signature check established, in words (see "What verified means" in the README). */
+function verificationMessage(result: { verified?: boolean; verification?: SignatureVerification }): string {
+  const v = result.verification;
+  if (result.verified) {
+    return v?.expectedSignerSource === 'option'
+      ? `The EIP-191 signature recovers to the pinned notary address ${v.expectedSigner}.`
+      : `The EIP-191 signature recovers to the notary address this gateway reports (${v?.expectedSigner}). To verify independently of the gateway, pin the notary address with the notaryAddress download option.`;
+  }
+  // Per-signature errors first: a tampered signature must not hide behind a configuration message
+  const errors = (v?.results ?? []).filter((r) => !r.valid).map((r) => r.error ?? 'invalid signature');
+  const specific = errors.filter((e) => !e.startsWith('No expected signer'));
+  if (specific.length > 0) return `Signature verification failed: ${specific.join('; ')}.`;
+  if (v?.expectedSignerSource === 'none') return 'Not verified: the gateway reports no notary address to verify against.';
+  return 'Signature verification failed.';
+}
+
+/** Per-signature badge, from the recovered address rather than the signer string the document declares. */
+function signatureBadge(verification: SignatureVerification | undefined, index: number) {
+  const check = verification?.results[index];
+  if (!check) return null;
+  const label = check.valid
+    ? verification.expectedSignerSource === 'option' ? 'Signed by Pinned Notary' : 'Signed by Gateway Notary'
+    : 'Not Verified';
+  return <span className={check.valid ? 'badge success' : 'badge warning'}>{label}</span>;
+}
 
 // EIP-1193 provider type for window.ethereum
 interface Eip1193Provider {
@@ -676,11 +703,7 @@ function App() {
                     </div>
                   )}
                   <p className="verification-explanation">
-                    {downloadResult.verified
-                      ? `The EIP-191 signature recovers to the notary address this gateway reports (${downloadResult.verification?.expectedSigner ?? 'unknown'}). To verify independently of the gateway, pin the notary address with the notaryAddress download option.`
-                      : downloadResult.verification?.expectedSignerSource === 'none'
-                        ? `Not verified: the gateway reports no notary address to verify against.`
-                        : `Signature verification failed: ${downloadResult.verification?.results.find((r) => !r.valid)?.error ?? 'invalid signature'}.`}
+                    {verificationMessage(downloadResult)}
                   </p>
                 </div>
 
@@ -690,12 +713,7 @@ function App() {
                     <div className="detail-row">
                       <span className="label">Signer:</span>
                       <code className="value">{sig.signer}</code>
-                      {/* Badge from the recovered address, not the signer string the document declares */}
-                      {downloadResult.verification?.results[index] && (
-                        <span className={downloadResult.verification.results[index]!.valid ? 'badge success' : 'badge warning'}>
-                          {downloadResult.verification.results[index]!.valid ? 'Signed by Gateway Notary' : 'Not Verified'}
-                        </span>
-                      )}
+                      {signatureBadge(downloadResult.verification, index)}
                     </div>
                     <div className="detail-row">
                       <span className="label">Type:</span>
@@ -752,12 +770,14 @@ function App() {
                       <span>Verification Failed</span>
                     </div>
                   )}
+                  <p className="verification-explanation">{verificationMessage(docDownloadResult)}</p>
                 </div>
                 {docDownloadResult.signatures.map((sig, index) => (
                   <div key={index} className="signature-details">
                     <div className="detail-row">
                       <span className="label">Signer:</span>
                       <code className="value">{sig.signer}</code>
+                      {signatureBadge(docDownloadResult.verification, index)}
                     </div>
                     <div className="detail-row">
                       <span className="label">Timestamp:</span>

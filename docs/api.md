@@ -144,10 +144,14 @@ interface SignatureVerification {
 }
 ```
 
-`verified` is `true` only if every signature is an EIP-191 signature that recovers to the
-expected notary over `sha256(canonical JSON of data)|timestamp`. It fails closed: empty,
-missing or malformed signatures, another signer, changed data, or no expected address give
-`false`. It is `undefined` for unsigned documents or with `verify: false`.
+`verified` is `true` only if at least one signature is an EIP-191 signature that recovers
+to the expected notary over `sha256(canonical JSON of data)|timestamp`; every signature's
+result is in `verification.results`. If none is, `verified` is `false`: that covers
+signature entries with an empty, missing or malformed `signature` value, other signers,
+changed data, and no expected address. `verified` is `undefined` when the document carries
+no signatures at all (missing or empty `signatures` list) or with `verify: false`, so
+check `verified === true`, never `verified !== false`. A malformed `notaryAddress` throws
+`ProvenanceError` with code `INVALID_INPUT`.
 
 #### `downloadDocument(reference, options?): Promise<DocumentDownloadResult>`
 
@@ -297,7 +301,7 @@ Error related to notary signing service.
 ### VerificationError
 
 Thrown by `recoverSigner()` for a malformed or unrecoverable signature
-(`INVALID_SIGNATURE`) and by `reconstructSignedMessage()` for an unsupported format.
+(`INVALID_SIGNATURE`).
 `download()` does not throw on a bad signature: it returns `verified: false`.
 
 ---
@@ -330,7 +334,8 @@ function buildDocumentMetadata(
 ): DocumentMetadata;
 
 // Verify document content hash (canonical JSON, or JSON.stringify from SDK 0.6.x).
-// canonicalData: canonicalizeJsonText(responseText, ['data']) for exact floats/big ints
+// canonicalData: canonicalizeJsonText(responseText, ['data']) (['metadata', 'data'] if wrapped)
+// for exact floats/big ints
 function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: string): boolean;
 ```
 
@@ -345,16 +350,18 @@ function verifySignature(
   signature: NotarySignature,
   metadata: { data: unknown },
   expectedSigner?: string,
-  canonicalData?: string        // canonicalizeJsonText(responseText, ['data'])
+  canonicalData?: string        // canonicalizeJsonText(responseText, ['data']),
+                                // or ['metadata', 'data'] for a wrapped response
 ): { valid: boolean; dataHashValid: boolean; signerValid?: boolean; recoveredAddress?: string; error?: string };
 
-// Verify all signatures: allValid requires at least one, and every one valid
+// Verify all signatures: anyValid = at least one valid (what download() reports);
+// allValid = at least one, and every one valid
 function verifyAllSignatures(
   signatures: NotarySignature[],
   metadata: { data: unknown },
   expectedSigner?: string,
   canonicalData?: string
-): { allValid: boolean; results: SignatureCheck[] };
+): { allValid: boolean; anyValid: boolean; results: SignatureCheck[] };
 
 // Verify data hash matches the document's data (hashed_fields ['data'] only)
 function verifyDataHash(signature: NotarySignature, metadata: { data: unknown }, canonicalData?: string): boolean;
