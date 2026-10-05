@@ -438,6 +438,11 @@ message comes from Node itself.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
+- `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
+  (false for a wrong contract address; true if any fallback RPC serves the call).
+- The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);
+  presets and `CHAIN_PRESETS` are frozen and typed `Readonly`.
+- The CommonJS `/chain` entry throws a `CHAIN_CONFIGURATION` error naming `viem` when it is missing.
 
 ### Breaking Changes in v0.5.0
 
