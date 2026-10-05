@@ -130,6 +130,11 @@ export interface ChainPreset {
   chainId: number;
   name: string;
   rpcUrl: string;
+  /**
+   * RPC URLs tried in order when `rpcUrl` fails (custom presets). The built-in
+   * presets keep theirs in PRESET_RPC_FALLBACKS, so spreads don't carry them.
+   */
+  rpcFallbacks?: string[];
   contractAddress: Address;
   explorerUrl: string;
 }
@@ -148,8 +153,20 @@ export interface ChainClientConfig {
   chain: string | ChainPreset;
   /** Signer for write operations (optional for read-only) */
   signer?: ChainSigner;
-  /** Custom RPC URL (overrides preset) */
+  /**
+   * Custom RPC URL (overrides the preset's). If it is one of the preset's own
+   * URLs, failover to the others stays on; any other URL disables the preset's
+   * fallbacks (pass `rpcFallbacks` to set your own).
+   */
   rpcUrl?: string;
+  /**
+   * RPC URLs tried in order when the current one fails. With more than one URL
+   * the whole list is tried at most twice per call; a single URL keeps viem's
+   * default retries (3). Any error fails over except a contract revert or a user
+   * rejection (so 4xx does too). Defaults to the preset's fallbacks unless
+   * `rpcUrl` names a URL outside the preset's list. Pass `[]` to disable.
+   */
+  rpcFallbacks?: string[];
   /** Custom contract address (overrides preset) */
   contractAddress?: Address;
   /** Timeout in ms for waiting for transaction receipts (default: 120_000) */

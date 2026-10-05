@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { ChainClient } from '../../src/chain/client.js';
 import { fromPrivateKey } from '../../src/chain/signer.js';
 import { DataStatus } from '../../src/chain/types.js';
+import { BASE_SEPOLIA } from '../../src/chain/constants.js';
 import {
   DataAlreadyRegisteredError,
   DataNotRegisteredError,
@@ -14,7 +15,8 @@ import type { ChainSigner, Hex } from '../../src/chain/types.js';
  * Run with: pnpm test:integration
  *
  * Environment variables:
- *   CHAIN_RPC_URL      - RPC endpoint (default: https://sepolia.base.org)
+ *   CHAIN_RPC_URL      - RPC endpoint (default: the base-sepolia preset with its fallbacks;
+ *                        with CHAIN_CONTRACT set, a single URL defaulting to the preset's primary)
  *   CHAIN_CONTRACT     - Contract address (default: Base Sepolia preset)
  *   CHAIN_PRIVATE_KEY  - Private key for write tests (optional)
  *   CHAIN_TEST_HASH    - Known registered hash to verify (optional)
@@ -40,7 +42,9 @@ async function waitFor<T>(fn: () => Promise<T>, retries = 5, delayMs = 2_000): P
   throw new Error('unreachable');
 }
 
-const RPC_URL = process.env['CHAIN_RPC_URL'] ?? 'https://sepolia.base.org';
+// Unset by default so reads go through the preset and exercise its live failover
+const RPC_URL_OVERRIDE = process.env['CHAIN_RPC_URL'] || undefined; // '' counts as unset
+const RPC_URL = RPC_URL_OVERRIDE ?? BASE_SEPOLIA.rpcUrl;
 const CONTRACT_ADDRESS = process.env['CHAIN_CONTRACT'] as `0x${string}` | undefined;
 const PRIVATE_KEY = process.env['CHAIN_PRIVATE_KEY'] as Hex | undefined;
 const KNOWN_HASH = process.env['CHAIN_TEST_HASH'];
@@ -58,7 +62,7 @@ function getChainConfig(signer?: ChainSigner) {
         },
         rpcUrl: RPC_URL,
       }
-    : { chain: 'base-sepolia', rpcUrl: RPC_URL };
+    : { chain: 'base-sepolia', ...(RPC_URL_OVERRIDE ? { rpcUrl: RPC_URL_OVERRIDE } : {}) };
 
   if (signer) {
     base.signer = signer;

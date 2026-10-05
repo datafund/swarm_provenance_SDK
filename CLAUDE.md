@@ -213,7 +213,7 @@ To release a new version:
 
 - `.github/workflows/ci.yml` — Runs on all PRs and pushes to `main`/`development`
 - Matrix: Node 18.x + 20.x
-- Steps: typecheck → lint → test → build → verify dist
+- Steps: typecheck → lint → test → build → verify dist → verify viem guard (CJS chain entry with viem present, absent, and bundled by tsup's esbuild)
 
 ## Gateway URLs
 
@@ -289,8 +289,10 @@ The `@datafund/swarm-provenance/chain` sub-path provides on-chain provenance anc
 ### Setup
 
 ```bash
-pnpm add viem  # Required only for chain features
+pnpm add viem  # or: npm install viem. Required only for chain features
 ```
+
+Missing `viem` (#99): `tsup.config.ts` `onSuccess` wraps (`scripts/viem-guard.ts`) the single `var viem = require('viem');` line of `dist/chain/index.cjs` in a try/catch that rewrites only MODULE_NOT_FOUND-for-viem into an actionable message (original kept as `cause`). It stays a literal `require('viem')` so bundlers inlining viem still work (a `require.resolve` probe broke them). Not an esbuild plugin: `treeshake: true` makes tsup emit CJS via rollup. The build fails if the line is not found exactly once. CI checks three cases: viem present, viem absent, and an esbuild bundle run without node_modules. ESM cannot be guarded: imports link before any code runs, and a top-level-await wrapper would break Vite client builds (default target excludes TLA) and esbuild bundles to CJS. The README "Troubleshooting" entry covers the ESM error text.
 
 ### Usage
 
@@ -311,13 +313,14 @@ await chain.recordAccess(swarmRef);        // → AccessResult
 
 // With private key (Node.js)
 import { fromPrivateKey } from '@datafund/swarm-provenance/chain';
-const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
+const signer = await fromPrivateKey('0x...', 'https://base-sepolia-rpc.publicnode.com');
 ```
 
 ### Contract
 
 - **Contract**: DataProvenance on Base Sepolia
 - **Address**: `0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322`
+- **RPC**: `base-sepolia-rpc.publicnode.com`, falling back to `base-sepolia.gateway.tenderly.co` then `sepolia.base.org` (`PRESET_RPC_FALLBACKS`, applied only for `chain: 'base-sepolia'`, never via spread presets). `sepolia.base.org` is last because it has had partial outages where `eth_chainId` answers but `eth_call` returns 503 (#101). Never health-probe with `eth_chainId`/`eth_blockNumber`.
 - **Explorer**: https://sepolia.basescan.org/address/0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322
 
 ### Methods
@@ -336,7 +339,7 @@ const signer = await fromPrivateKey('0x...', 'https://sepolia.base.org');
 | `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
 | `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG; records carry `parents` (undefined at maxDepth) and `transformationLinks` (children). BFS order, not topological |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
-| `healthCheck()` | Read | No | Check RPC connectivity |
+| `healthCheck()` | Read | No | Check RPC can serve contract reads (probes a real `eth_call`) |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
 | `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
 | `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |

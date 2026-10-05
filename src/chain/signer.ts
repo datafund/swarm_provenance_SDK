@@ -61,7 +61,7 @@ export function fromViemWalletClient(walletClient: {
  *
  * @example
  * ```ts
- * const signer = await fromPrivateKey('0xabc...', 'https://sepolia.base.org');
+ * const signer = await fromPrivateKey('0xabc...', 'https://base-sepolia-rpc.publicnode.com');
  * ```
  */
 export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<ChainSigner> {
@@ -71,10 +71,14 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
   try {
     viem = await import('viem');
     viemAccounts = await import('viem/accounts');
-  } catch {
-    throw new ChainConfigurationError(
-      'viem is required for private key signing. Install it: pnpm add viem'
+  } catch (error) {
+    // Once the chain entry has loaded, viem resolves, so this mostly catches a
+    // broken install: keep the original error for diagnosis.
+    const configError = new ChainConfigurationError(
+      'viem is required for private key signing. Install it: npm install viem (or pnpm add viem)'
     );
+    configError.cause = error;
+    throw configError;
   }
 
   const account = viemAccounts.privateKeyToAccount(privateKey);

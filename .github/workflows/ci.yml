@@ -49,3 +49,17 @@ jobs:
           test -f dist/chain/index.js
           test -f dist/chain/index.cjs
           test -f dist/chain/index.d.ts
+
+      - name: Verify viem guard (CJS chain entry, #99)
+        run: |
+          # viem present: the CJS chain entry loads
+          node -e "if (typeof require('./dist/chain/index.cjs').ChainClient !== 'function') process.exit(1)"
+          # viem absent (dist copied outside node_modules' reach): actionable message
+          mkdir -p "$RUNNER_TEMP/noviem" && cp -r dist "$RUNNER_TEMP/noviem/"
+          node -e "try { require(process.argv[1]); console.error('expected a throw'); process.exit(1) } catch (e) { if (!e.message.includes('npm install viem')) { console.error(e.message); process.exit(1) } }" "$RUNNER_TEMP/noviem/dist/chain/index.cjs"
+          # bundled with viem inlined: loads with no node_modules at runtime
+          echo "require('$GITHUB_WORKSPACE/dist/chain/index.cjs').ChainClient.name" > "$RUNNER_TEMP/entry.cjs"
+          mkdir -p "$RUNNER_TEMP/bundle"
+          # esbuild is not a direct devDependency; use the copy tsup depends on
+          node -e "const esbuild = require(require.resolve('esbuild', { paths: [require.resolve('tsup')] })); esbuild.buildSync({ entryPoints: [process.argv[1]], bundle: true, platform: 'node', outfile: process.argv[2], logLevel: 'error' })" "$RUNNER_TEMP/entry.cjs" "$RUNNER_TEMP/bundle/out.cjs"
+          (cd "$RUNNER_TEMP/bundle" && node out.cjs)
