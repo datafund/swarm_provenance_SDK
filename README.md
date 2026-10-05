@@ -398,11 +398,12 @@ try {
 | Base Sepolia (testnet) | `base-sepolia` | `0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a` |
 | Base (mainnet) | `base` | Not yet deployed |
 
-### Behavior changes in the next release (needs a minor version bump)
+### Behavior changes since v0.6.1
 
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
-  `ChainConnectionError` naming the node. Before, the failed branch was silently dropped
-  and the partial graph returned as if complete.
+  `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
+  rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch
+  and returned the partial graph as if complete.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).

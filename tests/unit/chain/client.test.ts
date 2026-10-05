@@ -6,6 +6,7 @@ import {
   ChainTransactionError,
   ChainValidationError,
   DataAlreadyRegisteredError,
+  DataNotRegisteredError,
   SignerRequiredError,
 } from '../../../src/chain/errors.js';
 import { DataStatus } from '../../../src/chain/types.js';
@@ -844,17 +845,23 @@ describe('ChainClient', () => {
       expect(chain).toHaveLength(2);
     });
 
-    it('should skip unregistered nodes during traversal', async () => {
-      // hashB is linked as a child but not registered
+    it('fails closed when a linked hash reads as unregistered (inconsistent read)', async () => {
+      // hashB is linked as a child but reads as unregistered; the contract never
+      // links an unregistered hash, so this must not silently drop the branch
       mockDag({
         [hashA]: { children: [hashB, hashC], parents: [] },
         [hashC]: { children: [], parents: [hashA] },
       });
 
       const client = new ChainClient({ chain: 'base-sepolia' });
-      const chain = await client.getProvenanceChain(SAMPLE_HASH);
+      await expect(client.getProvenanceChain(SAMPLE_HASH)).rejects.toThrow(DataNotRegisteredError);
+    });
 
-      expect(chain.map((r) => r.dataHash)).toEqual([hashA, hashC]);
+    it('returns [] for an unregistered start hash', async () => {
+      mockDag({});
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
+      expect(await client.getProvenanceChain(SAMPLE_HASH)).toEqual([]);
     });
 
     it('leaves parents undefined on nodes at maxDepth, whose parents were not fetched', async () => {
@@ -899,20 +906,31 @@ describe('ChainClient', () => {
       expect(((error as Error).cause as Error).message).toContain('429 Too Many Requests');
     });
 
-    it('skips an unregistered node even if its parents lookup fails', async () => {
-      // hashB: linked but unregistered (not in the fixture), and its parents call errors
-      mockDag({ [hashA]: { children: [hashB], parents: [] } });
+    it('returns [] for an unregistered start hash even if its parents lookup fails', async () => {
+      mockDag({});
       const base = mockReadContract.getMockImplementation()!;
       mockReadContract.mockImplementation((req: { functionName: string; args: [Hex] }) =>
-        req.functionName === 'getTransformationParents' && req.args[0] === hashB
+        req.functionName === 'getTransformationParents'
           ? Promise.reject(new Error('rpc down'))
           : (base(req) as Promise<unknown>),
       );
 
       const client = new ChainClient({ chain: 'base-sepolia' });
+      expect(await client.getProvenanceChain(SAMPLE_HASH)).toEqual([]);
+    });
+
+    it('queues each node once even when both edge directions reach it', async () => {
+      mockDag({
+        [hashA]: { children: [hashB, hashC], parents: [] },
+        [hashB]: { children: [hashC], parents: [hashA] },
+        [hashC]: { children: [], parents: [hashA, hashB] },
+      });
+
+      const client = new ChainClient({ chain: 'base-sepolia' });
       const chain = await client.getProvenanceChain(SAMPLE_HASH);
 
-      expect(chain.map((r) => r.dataHash)).toEqual([hashA]);
+      expect(chain.map((r) => r.dataHash)).toEqual([hashA, hashB, hashC]);
+      expect(calledFunctions().filter((f) => f === 'getDataRecord')).toHaveLength(3);
     });
 
     it('rejects a NaN maxDepth instead of traversing without a limit', async () => {
