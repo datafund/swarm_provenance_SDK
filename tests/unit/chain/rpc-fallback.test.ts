@@ -17,6 +17,8 @@ const COUNT_RESULT = encodeFunctionResult({
 
 interface RpcCall {
   url: string;
+  /** URL exactly as fetched, before trailing-slash normalisation */
+  raw: string;
   method: string;
 }
 
@@ -55,7 +57,7 @@ function stubRpc(endpoints: Record<string, Responder>): void {
       const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const url = raw.replace(/\/$/, ''); // viem normalises URLs with a trailing slash
       const req = JSON.parse(String(init?.body)) as { id: number; method: string };
-      calls.push({ url, method: req.method });
+      calls.push({ url, raw, method: req.method });
       const responder = endpoints[url];
       const res = responder?.(req.method) ?? { status: 404, body: {} };
       return Promise.resolve(
@@ -107,13 +109,49 @@ describe('ChainClient RPC fallback', () => {
     expect(calls.filter((c) => c.method === 'eth_call').at(-1)?.url).toBe(FALLBACK_2);
   });
 
-  it('surfaces ChainConnectionError when all URLs fail, trying each URL exactly once', async () => {
+  it('surfaces ChainConnectionError when all URLs fail, after two passes over the list', async () => {
     stubRpc({ [BASE_SEPOLIA.rpcUrl]: degraded, [FALLBACK_1!]: degraded, [FALLBACK_2!]: degraded });
     const client = new ChainClient({ chain: 'base-sepolia' });
 
     await expect(client.getUserDataRecordsCount(USER)).rejects.toThrow(ChainConnectionError);
-    // viem's default fallback retryCount (3) would replay the list: 12 requests
-    expect(calls.map((c) => c.url)).toEqual([BASE_SEPOLIA.rpcUrl, FALLBACK_1, FALLBACK_2]);
+    // retryCount 1: one retry pass; viem's default (3) would make 12 requests
+    const pass = [BASE_SEPOLIA.rpcUrl, FALLBACK_1, FALLBACK_2];
+    expect(calls.map((c) => c.url)).toEqual([...pass, ...pass]);
+  });
+
+  it('a renamed or cloned custom preset with its own rpcUrl does not inherit the public fallbacks', async () => {
+    const custom = 'https://private-rpc.example.com';
+    stubRpc({ [custom]: degraded, [FALLBACK_1!]: healthy, [FALLBACK_2!]: healthy });
+    const renamed = { ...BASE_SEPOLIA, name: 'my-sepolia', rpcUrl: custom };
+    const cloned = JSON.parse(JSON.stringify(renamed)) as typeof renamed;
+
+    for (const chain of [renamed, cloned]) {
+      await expect(new ChainClient({ chain }).getUserDataRecordsCount(USER)).rejects.toThrow(ChainConnectionError);
+    }
+    expect(new Set(calls.map((c) => c.url))).toEqual(new Set([custom]));
+  });
+
+  it('an explicit rpcUrl equal to the preset URL keeps the preset fallbacks', async () => {
+    stubRpc({ [BASE_SEPOLIA.rpcUrl]: degraded, [FALLBACK_1!]: healthy });
+    const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: BASE_SEPOLIA.rpcUrl });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
+  it("an empty rpcUrl means 'not set'", async () => {
+    stubRpc({ [BASE_SEPOLIA.rpcUrl]: healthy });
+    const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: '' });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+  });
+
+  it('passes a URL with a meaningful trailing slash to viem unchanged', async () => {
+    const custom = 'https://host.example.com/rpc/';
+    stubRpc({ 'https://host.example.com/rpc': healthy });
+    const client = new ChainClient({ chain: 'base-sepolia', rpcUrl: custom });
+
+    await expect(client.getUserDataRecordsCount(USER)).resolves.toBe(5);
+    expect(calls[0]?.raw).toBe(custom);
   });
 
   it('a custom preset spread from BASE_SEPOLIA with its own rpcUrl does not inherit the public fallbacks', async () => {

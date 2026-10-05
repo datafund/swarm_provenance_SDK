@@ -93,10 +93,7 @@ export class ChainClient {
       this.preset = config.chain;
     }
 
-    const rpcUrl = config.rpcUrl ?? this.preset.rpcUrl;
-    const rpcFallbacks = config.rpcFallbacks ?? (config.rpcUrl ? [] : this.presetFallbacks());
-    // viem treats 'https://x' and 'https://x/' as one endpoint; so must the dedup
-    const rpcUrls = [...new Set([rpcUrl, ...rpcFallbacks].map((url) => url.replace(/\/+$/, '')))];
+    const rpcUrls = this.resolveRpcUrls(config);
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
@@ -113,35 +110,54 @@ export class ChainClient {
     }
 
     // fallback() moves to the next URL on any error except a revert or a user
-    // rejection (viem's shouldThrow). retryCount 0: failover replaces retries;
-    // viem's default (3) would replay the whole URL list, 12 requests for 3 URLs.
-    // rank stays off: its liveness ping is eth_blockNumber, which the degraded
-    // endpoint in #101 still answered.
+    // rejection (viem's shouldThrow). retryCount 1: one more pass over the list
+    // (with viem's backoff) rides out a burst of 429s; viem's default (3) would
+    // make 12 requests for 3 failing URLs. rank stays off: its liveness ping is
+    // eth_blockNumber, which the degraded endpoint in #101 still answered.
     this.publicClient = createPublicClient({
       transport:
         rpcUrls.length === 1
           ? http(rpcUrls[0])
-          : fallback(rpcUrls.map((url) => http(url)), { retryCount: 0 }),
+          : fallback(rpcUrls.map((url) => http(url)), { retryCount: 1 }),
     });
   }
 
   /**
-   * Fallbacks declared by the resolved preset. A custom preset spread from a
-   * built-in one with its own rpcUrl ({ ...BASE_SEPOLIA, rpcUrl }) inherits the
-   * built-in public fallbacks by accident; drop them, matching the rule that an
-   * explicit rpcUrl disables preset fallbacks.
+   * Ordered RPC URLs: the primary, then fallbacks.
+   *
+   * - `config.rpcFallbacks`, when given, is used as is.
+   * - Otherwise the preset's fallbacks apply only while the primary is the
+   *   preset's own URL. An explicit `config.rpcUrl` that differs, or a custom
+   *   preset that changes a built-in preset's URL but carries its fallbacks
+   *   (spread, clone or rename; matched by chainId and value), gets none:
+   *   reads meant for a private endpoint never go to public ones.
+   *
+   * Duplicates are compared ignoring a trailing slash; the first spelling is
+   * kept and passed to viem unchanged.
    */
-  private presetFallbacks(): string[] {
-    const builtin = CHAIN_PRESETS[this.preset.name];
-    if (
-      builtin &&
-      this.preset !== builtin &&
-      this.preset.rpcFallbacks === builtin.rpcFallbacks &&
-      this.preset.rpcUrl !== builtin.rpcUrl
-    ) {
-      return [];
+  private resolveRpcUrls(config: ChainClientConfig): string[] {
+    const same = (a: string, b: string) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+    const primary = config.rpcUrl || this.preset.rpcUrl;
+
+    let fallbacks: string[];
+    if (config.rpcFallbacks) {
+      fallbacks = config.rpcFallbacks;
+    } else if (!same(primary, this.preset.rpcUrl)) {
+      fallbacks = [];
+    } else {
+      const builtin = Object.values(CHAIN_PRESETS).find((p) => p.chainId === this.preset.chainId);
+      const inheritsBuiltinFallbacks =
+        builtin !== undefined &&
+        !same(this.preset.rpcUrl, builtin.rpcUrl) &&
+        JSON.stringify(this.preset.rpcFallbacks ?? []) === JSON.stringify(builtin.rpcFallbacks ?? []);
+      fallbacks = inheritsBuiltinFallbacks ? [] : this.preset.rpcFallbacks ?? [];
     }
-    return this.preset.rpcFallbacks ?? [];
+
+    const urls: string[] = [];
+    for (const url of [primary, ...fallbacks]) {
+      if (!urls.some((u) => same(u, url))) urls.push(url);
+    }
+    return urls;
   }
 
   // ─── Read Operations ─────────────────────────────────────────
@@ -498,6 +514,10 @@ export class ChainClient {
    * Probes with a real eth_call (getUserDataRecordsCount on the zero address),
    * the operation every read depends on. In #101, sepolia.base.org answered
    * eth_chainId and eth_blockNumber while every eth_call returned 503.
+   *
+   * So it also returns false for a wrong or undeployed contract address. With
+   * fallbacks it returns true if any URL can serve the read; to check only the
+   * primary, use a client built with `rpcFallbacks: []`.
    */
   async healthCheck(): Promise<boolean> {
     try {

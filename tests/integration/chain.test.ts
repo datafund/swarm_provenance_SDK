@@ -15,7 +15,8 @@ import type { ChainSigner, Hex } from '../../src/chain/types.js';
  * Run with: pnpm test:integration
  *
  * Environment variables:
- *   CHAIN_RPC_URL      - RPC endpoint (default: the base-sepolia preset with its fallbacks)
+ *   CHAIN_RPC_URL      - RPC endpoint (default: the base-sepolia preset with its fallbacks;
+ *                        with CHAIN_CONTRACT set, a single URL defaulting to the preset's primary)
  *   CHAIN_CONTRACT     - Contract address (default: Base Sepolia preset)
  *   CHAIN_PRIVATE_KEY  - Private key for write tests (optional)
  *   CHAIN_TEST_HASH    - Known registered hash to verify (optional)
