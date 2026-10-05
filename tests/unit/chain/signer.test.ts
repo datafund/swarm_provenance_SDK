@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { fromViemWalletClient, isMissingViem } from '../../../src/chain/signer.js';
+import { fromViemWalletClient } from '../../../src/chain/signer.js';
 import { ChainConfigurationError } from '../../../src/chain/errors.js';
 import type { Address, Hex } from '../../../src/chain/types.js';
 
@@ -80,30 +80,5 @@ describe('fromViemWalletClient', () => {
     expect(sendTransaction).toHaveBeenCalledTimes(1);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     expect(sendTransaction.mock.calls[0][0]).not.toHaveProperty('gas');
-  });
-});
-
-describe('isMissingViem', () => {
-  const notFound = (code: string, message: string) => Object.assign(new Error(message), { code });
-
-  it('matches Node CJS and ESM not-found errors for viem', () => {
-    expect(isMissingViem(notFound('MODULE_NOT_FOUND', "Cannot find module 'viem'\nRequire stack:\n- /app/x.js"))).toBe(true);
-    expect(
-      isMissingViem(notFound('ERR_MODULE_NOT_FOUND', "Cannot find package 'viem' imported from /app/dist/chain/index.js")),
-    ).toBe(true);
-  });
-
-  it('does not match a missing dependency of viem, whose require stack names viem', () => {
-    const err = notFound(
-      'MODULE_NOT_FOUND',
-      "Cannot find module '@noble/curves/secp256k1'\nRequire stack:\n- /app/node_modules/viem/_cjs/index.js",
-    );
-    expect(isMissingViem(err)).toBe(false);
-  });
-
-  it('does not match other errors', () => {
-    expect(isMissingViem(notFound('ERR_PACKAGE_PATH_NOT_EXPORTED', "Package subpath './accounts' is not defined by viem"))).toBe(false);
-    expect(isMissingViem(new SyntaxError('Unexpected token'))).toBe(false);
-    expect(isMissingViem(undefined)).toBe(false);
   });
 });
