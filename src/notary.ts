@@ -2,7 +2,7 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { keccak_256 } from '@noble/hashes/sha3';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 import type { NotarySignature, ProvenanceMetadata, DocumentMetadata, SignatureCheck } from './types.js';
-import { sha256Hex } from './utils.js';
+import { sha256Hex, isAddress } from './utils.js';
 import { VerificationError } from './errors.js';
 import { canonicalizeJsonValue } from './canonical-json.js';
 
@@ -21,10 +21,7 @@ export const NOTARY_SIGNATURE_TYPE = 'notary';
 export const NOTARY_HASHED_FIELDS: readonly string[] = ['data'];
 export const NOTARY_MESSAGE_FORMAT = '{data_hash}|{timestamp}';
 
-/** 0x followed by 40 hex characters (any case; no checksum check) */
-export function isAddress(value: unknown): value is string {
-  return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
-}
+
 const SIGNATURE = /^(?:0x)?([0-9a-fA-F]{128})([0-9a-fA-F]{2})$/;
 
 /**
@@ -56,18 +53,16 @@ export function computeNotaryDataHash(
   return sha256Hex(canonicalData ?? canonicalizeJsonValue(metadata.data));
 }
 
-/** Data-hash comparison without the scheme check; false (never throws) if `data` cannot be hashed. */
-function dataHashMatches(
-  signature: NotarySignature,
+/** SHA-256 of the canonical data, or undefined (never throws) if `data` cannot be hashed. */
+function safeDataHash(
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'> | undefined,
   canonicalData?: string
-): boolean {
+): string | undefined {
   try {
-    const canonical =
-      canonicalData ?? (metadata?.data === undefined ? undefined : canonicalizeJsonValue(metadata.data));
-    return canonical !== undefined && sha256Hex(canonical) === signature.data_hash;
+    if (canonicalData !== undefined) return sha256Hex(canonicalData);
+    return metadata?.data === undefined ? undefined : sha256Hex(canonicalizeJsonValue(metadata.data));
   } catch {
-    return false; // data not representable as JSON, or nested too deep
+    return undefined; // data not representable as JSON, or nested too deep
   }
 }
 
@@ -80,7 +75,8 @@ export function verifyDataHash(
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   canonicalData?: string
 ): boolean {
-  return isNotaryScheme(signature) && dataHashMatches(signature, metadata, canonicalData);
+  const dataHash = safeDataHash(metadata, canonicalData);
+  return isNotaryScheme(signature) && dataHash !== undefined && signature.data_hash === dataHash;
 }
 
 /**
@@ -157,22 +153,36 @@ export function verifySignature(
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   expectedSigner?: string,
   canonicalData?: string
-): { valid: boolean; dataHashValid: boolean; signerValid?: boolean; recoveredAddress?: string; error?: string } {
-  if (!isNotaryScheme(signature)) {
-    return {
-      valid: false,
-      dataHashValid: false,
-      error: 'Unsupported or malformed signature (expected the gateway notary scheme)',
-    };
-  }
+): SignatureResult {
+  return checkSignature(signature, safeDataHash(metadata, canonicalData), expectedSigner);
+}
 
-  const dataHashValid = dataHashMatches(signature, metadata, canonicalData);
+type SignatureResult = {
+  valid: boolean;
+  dataHashValid: boolean;
+  signerValid?: boolean;
+  recoveredAddress?: string;
+  error?: string;
+};
+
+/** verifySignature against an already computed data hash (undefined: data could not be hashed). */
+function checkSignature(signature: NotarySignature, dataHash: string | undefined, expectedSigner?: string): SignatureResult {
+  // Compared regardless of scheme, so an unsupported signature over the right
+  // data is not reported as tampered data
+  const dataHashValid =
+    dataHash !== undefined && typeof signature === 'object' && signature !== null && signature.data_hash === dataHash;
+
+  if (!isNotaryScheme(signature)) {
+    return { valid: false, dataHashValid, error: 'Unsupported or malformed signature (expected the gateway notary scheme)' };
+  }
   if (!dataHashValid) {
     return { valid: false, dataHashValid: false, error: 'Data hash mismatch' };
   }
-
-  if (!isAddress(expectedSigner)) {
+  if (expectedSigner === undefined || expectedSigner === '') {
     return { valid: false, dataHashValid: true, error: 'No expected signer address to verify against' };
+  }
+  if (!isAddress(expectedSigner)) {
+    return { valid: false, dataHashValid: true, error: `Expected signer is not a valid address: ${JSON.stringify(expectedSigner)}` };
   }
 
   let recoveredAddress: string;
@@ -221,16 +231,9 @@ export function verifyAllSignatures(
   canonicalData?: string
 ): { allValid: boolean; anyValid: boolean; results: SignatureCheck[] } {
   // Canonicalise and hash the data once, not once per signature
-  let canonical = canonicalData;
-  if (canonical === undefined && metadata?.data !== undefined) {
-    try {
-      canonical = canonicalizeJsonValue(metadata.data);
-    } catch {
-      // leave undefined: each check then fails closed on the data hash
-    }
-  }
+  const dataHash = safeDataHash(metadata, canonicalData);
   const results = (Array.isArray(signatures) ? signatures : []).map((sig, index) => {
-    const result = verifySignature(sig, metadata, expectedSigner, canonical);
+    const result = checkSignature(sig, dataHash, expectedSigner);
     const item: SignatureCheck = { index, valid: result.valid, dataHashValid: result.dataHashValid };
     if (result.recoveredAddress !== undefined) item.recoveredAddress = result.recoveredAddress;
     if (result.error !== undefined) item.error = result.error;

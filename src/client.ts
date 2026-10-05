@@ -30,9 +30,9 @@ import {
   PaymentRateLimitError,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
-import { verifyAllSignatures, isAddress } from './notary.js';
+import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes } from './utils.js';
+import { toBytes, isAddress } from './utils.js';
 import { createX402Fetch } from './payment.js';
 
 const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
@@ -48,6 +48,10 @@ export class ProvenanceClient {
   private readonly retryConfig: Required<GatewayRetryConfig>;
   /** Notary address reported by /notary/info (see gatewayNotaryAddress) */
   private cachedNotaryAddress: string | undefined;
+  /** In-flight /notary/info lookup, shared by concurrent downloads */
+  private notaryLookup: Promise<string | undefined> | undefined;
+  /** When a cached address was last re-checked after a failed verification */
+  private notaryRecheckedAt = 0;
   private x402Fetch: typeof fetch | undefined;
   private x402FetchPromise: Promise<typeof fetch> | undefined;
 
@@ -329,8 +333,10 @@ export class ProvenanceClient {
     }
     let outcome = check(address, address === undefined ? 'none' : 'gateway');
 
-    // A cached address may be stale (the notary key rotated): look it up again once
-    if (!outcome.verified && wasCached) {
+    // A cached address may be stale (the notary key rotated): look it up again,
+    // at most once a minute, so unverifiable documents don't each cost a request
+    if (!outcome.verified && wasCached && Date.now() - this.notaryRecheckedAt > NOTARY_RECHECK_MS) {
+      this.notaryRecheckedAt = Date.now();
       this.cachedNotaryAddress = undefined;
       try {
         const fresh = await this.gatewayNotaryAddress();
@@ -346,13 +352,20 @@ export class ProvenanceClient {
    * The gateway's notary address. Only a reported address is cached (per
    * client): "no address" may be a passing outage, so it is asked again.
    */
-  private async gatewayNotaryAddress(): Promise<string | undefined> {
-    if (this.cachedNotaryAddress !== undefined) return this.cachedNotaryAddress;
-    const notary = await this.notaryInfo();
-    // address may be null or absent when the notary is disabled
-    const address = typeof notary.address === 'string' && notary.address ? notary.address : undefined;
-    if (address !== undefined) this.cachedNotaryAddress = address;
-    return address;
+  private gatewayNotaryAddress(): Promise<string | undefined> {
+    if (this.cachedNotaryAddress !== undefined) return Promise.resolve(this.cachedNotaryAddress);
+    this.notaryLookup ??= this.notaryInfo()
+      .then((notary) => {
+        // address may be null or absent when the notary is disabled. A malformed
+        // one is returned (so the error names it) but not cached.
+        const address = typeof notary.address === 'string' && notary.address ? notary.address : undefined;
+        if (address !== undefined && isAddress(address)) this.cachedNotaryAddress = address;
+        return address;
+      })
+      .finally(() => {
+        this.notaryLookup = undefined;
+      });
+    return this.notaryLookup;
   }
 
   private async resolveStampId(options: UploadOptions): Promise<string> {
@@ -663,9 +676,13 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
   }
 }
 
+/** Minimum interval between re-checks of a cached notary address (see verifySignatures) */
+const NOTARY_RECHECK_MS = 60_000;
+
 /** A pinned notaryAddress must be an address: a typo must not read as "unverified". */
 function assertNotaryAddress(options: DownloadOptions): void {
-  if (options.notaryAddress !== undefined && !isAddress(options.notaryAddress)) {
+  // Only checked when it will be used
+  if (options.verify !== false && options.notaryAddress !== undefined && !isAddress(options.notaryAddress)) {
     throw new ProvenanceError(
       `Invalid notaryAddress: expected 0x followed by 40 hex characters, got ${JSON.stringify(options.notaryAddress)}`,
       'INVALID_INPUT'

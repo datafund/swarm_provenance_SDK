@@ -283,3 +283,53 @@ describe('review round 1 (#135)', () => {
     expect(after.verification?.expectedSigner).toBe(NOTARY);
   });
 });
+
+describe('review round 3 (#135)', () => {
+  it('a malformed gateway notary address is named in the error and not cached', async () => {
+    serve(read('base64-document.json'), { enabled: true, available: true, address: NOTARY.slice(2) });
+    const client = new ProvenanceClient();
+    const result = await client.download(REF);
+    expect(result.verified).toBe(false);
+    expect(result.verification?.results[0]?.error).toMatch(/not a valid address/);
+
+    await client.download(REF);
+    expect(calls.filter((p) => p === '/api/v1/notary/info')).toHaveLength(2);
+  });
+
+  it('concurrent downloads share one notary lookup', async () => {
+    serve(read('base64-document.json'));
+    const client = new ProvenanceClient();
+    const results = await Promise.all([client.download(REF), client.download(REF), client.download(REF)]);
+    expect(results.every((r) => r.verified)).toBe(true);
+    expect(calls.filter((p) => p === '/api/v1/notary/info')).toHaveLength(1);
+  });
+
+  it('re-checks a cached notary address at most once a minute', async () => {
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const client = new ProvenanceClient();
+      serve(read('base64-document.json'));
+      await client.download(REF); // caches NOTARY
+
+      // Documents nothing verifies against: the first triggers a re-check, the next ones don't
+      serve(edit('base64-document.json', (doc) => (doc.signatures[0]!['signature'] = '')));
+      calls.length = 0;
+      await client.download(REF);
+      await client.download(REF);
+      expect(calls.filter((p) => p === '/api/v1/notary/info')).toHaveLength(1);
+
+      now.mockReturnValue(1_000_000 + 61_000);
+      await client.download(REF);
+      expect(calls.filter((p) => p === '/api/v1/notary/info')).toHaveLength(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('a malformed notaryAddress is ignored with verify: false', async () => {
+    serve(read('base64-document.json'));
+    const result = await new ProvenanceClient().download(REF, { verify: false, notaryAddress: 'placeholder' });
+    expect(result.verified).toBeUndefined();
+  });
+});

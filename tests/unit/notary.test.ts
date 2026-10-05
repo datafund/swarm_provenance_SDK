@@ -126,11 +126,16 @@ describe('verifySignature', () => {
 
   it('without an expected signer the result is invalid, even for a genuine signature', () => {
     const { doc, sig } = fixture('base64-document');
-    for (const expected of [undefined, '', 'not-an-address']) {
+    for (const expected of [undefined, '']) {
       const result = verifySignature(sig, doc, expected);
       expect(result.valid).toBe(false);
       expect(result.error).toMatch(/No expected signer/);
     }
+    // A malformed address is named as such, not reported as missing
+    expect(verifySignature(sig, doc, 'not-an-address')).toMatchObject({
+      valid: false,
+      error: 'Expected signer is not a valid address: "not-an-address"',
+    });
   });
 
   it.each([
@@ -218,5 +223,12 @@ describe('fails closed instead of throwing (review round 1)', () => {
     const { doc, sig } = fixture('base64-document');
     const result = verifyAllSignatures([{ ...sig, signature: '' }, sig], doc, NOTARY);
     expect(result).toMatchObject({ allValid: false, anyValid: true });
+  });
+});
+
+describe('review round 3', () => {
+  it('an unsupported scheme over the right data is not reported as tampered data', () => {
+    const { doc, sig } = fixture('base64-document');
+    expect(verifySignature({ ...sig, type: 'eip191' }, doc, NOTARY)).toMatchObject({ valid: false, dataHashValid: true });
   });
 });
