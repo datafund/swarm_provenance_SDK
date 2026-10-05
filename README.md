@@ -540,6 +540,20 @@ message comes from Node itself.
 - The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);
   presets and `CHAIN_PRESETS` are frozen and typed `Readonly`.
 - The CommonJS `/chain` entry throws a `CHAIN_CONFIGURATION` error naming `viem` when it is missing.
+- `download()` / `downloadDocument()` verify notary signatures cryptographically (#113).
+  `verified` is now `false` for documents 0.6.1 reported as verified: empty, missing or
+  invalid signatures, signatures by other keys, and any document when no notary address is
+  available. Results gain `verification`; `DownloadOptions` gains `notaryAddress`
+  (a malformed one throws `INVALID_INPUT`).
+- `verifySignature` / `verifyAllSignatures` are invalid without an expected signer;
+  `verifyAllSignatures([])` gives `allValid: false` (was `true`) and now also returns
+  `anyValid`. `verifyDataHash` accepts only `hashed_fields: ['data']`.
+- Raw documents (`raw: true`): `content_hash` is SHA-256 of canonical JSON (the gateway and
+  Python tools' convention) instead of `JSON.stringify(data)` (#114). This version still
+  accepts the old form; SDK 0.6.x rejects documents uploaded with this version.
+- `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
+  A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
+  to become an intersection type.
 
 ### Breaking Changes in v0.5.0
 
