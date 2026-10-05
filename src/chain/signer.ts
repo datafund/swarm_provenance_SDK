@@ -71,10 +71,15 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
   try {
     viem = await import('viem');
     viemAccounts = await import('viem/accounts');
-  } catch {
-    throw new ChainConfigurationError(
+  } catch (error) {
+    // Only a missing viem gets the install hint; anything else (broken install,
+    // version mismatch) is rethrown as-is rather than misreported.
+    if (!isMissingViem(error)) throw error;
+    const configError = new ChainConfigurationError(
       'viem is required for private key signing. Install it: npm install viem (or pnpm add viem)'
     );
+    configError.cause = error;
+    throw configError;
   }
 
   const account = viemAccounts.privateKeyToAccount(privateKey);
@@ -137,4 +142,17 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
       return txHash;
     },
   };
+}
+
+/**
+ * True for a module-not-found error about viem itself. Checks only the first
+ * line: Node appends a require stack, which names viem's path when one of
+ * viem's own dependencies is the missing module.
+ */
+export function isMissingViem(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  if (code !== 'MODULE_NOT_FOUND' && code !== 'ERR_MODULE_NOT_FOUND') return false;
+  const firstLine = String(message ?? '').split('\n')[0] ?? '';
+  return /\bviem\b/.test(firstLine);
 }

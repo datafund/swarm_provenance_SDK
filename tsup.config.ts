@@ -8,7 +8,10 @@ const VIEM_REQUIRE = "var viem = require('viem');";
  * #99: in the CJS chain entry, wrap the real `require('viem')` so a missing viem
  * throws an actionable message instead of Node's bare "Cannot find module".
  * It stays a literal require('viem'), so bundlers that inline viem follow it;
- * only MODULE_NOT_FOUND for viem itself is rewritten, anything else is rethrown.
+ * only MODULE_NOT_FOUND naming viem on the message's first line is rewritten
+ * (same rule as isMissingViem in src/chain/signer.ts; the require stack below
+ * names viem's path when one of viem's own dependencies is missing). Anything
+ * else is rethrown.
  * Same line, so line numbers and the source map are unchanged.
  *
  * Done after the build because treeshake makes tsup emit CJS via rollup, out of
@@ -17,7 +20,7 @@ const VIEM_REQUIRE = "var viem = require('viem');";
  */
 const VIEM_REQUIRE_GUARDED =
   "var viem = (() => { try { return require('viem'); } catch (e) { " +
-  "if (e && e.code === 'MODULE_NOT_FOUND' && /'viem'/.test(e.message)) { throw new Error(" +
+  "if (e && e.code === 'MODULE_NOT_FOUND' && /\\bviem\\b/.test(String(e.message).split('\\n')[0])) { throw new Error(" +
   JSON.stringify(
     "@datafund/swarm-provenance/chain requires the optional peer dependency 'viem'. Install it: npm install viem (or pnpm add viem)",
   ) +

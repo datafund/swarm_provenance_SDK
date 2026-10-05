@@ -60,5 +60,6 @@ jobs:
           # bundled with viem inlined: loads with no node_modules at runtime
           echo "require('$GITHUB_WORKSPACE/dist/chain/index.cjs').ChainClient.name" > "$RUNNER_TEMP/entry.cjs"
           mkdir -p "$RUNNER_TEMP/bundle"
-          pnpm exec esbuild "$RUNNER_TEMP/entry.cjs" --bundle --platform=node --outfile="$RUNNER_TEMP/bundle/out.cjs" --log-level=error
+          # esbuild is not a direct devDependency; use the copy tsup depends on
+          node -e "const esbuild = require(require.resolve('esbuild', { paths: [require.resolve('tsup')] })); esbuild.buildSync({ entryPoints: [process.argv[1]], bundle: true, platform: 'node', outfile: process.argv[2], logLevel: 'error' })" "$RUNNER_TEMP/entry.cjs" "$RUNNER_TEMP/bundle/out.cjs"
           (cd "$RUNNER_TEMP/bundle" && node out.cjs)
