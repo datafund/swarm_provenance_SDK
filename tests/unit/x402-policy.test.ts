@@ -532,3 +532,14 @@ describe('review round 1 (#140)', () => {
     expect(() => client({ network: null as never, v1Network: 'base', maxAmount: '1' })).toThrow(/must be a string/);
   });
 });
+
+describe('final review (#140)', () => {
+  it("a prototype-key v1Network ('constructor') is refused cleanly at payment time, not a TypeError", async () => {
+    accepts = [requirement({ network: 'constructor' })];
+    const error = await client({ network: 'eip155:137', v1Network: 'constructor', maxAmount: '1' })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).toMatch(/no known USDC/);
+  });
+});

@@ -156,7 +156,7 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
     throw new PaymentConfigurationError(`payment.asset must be a token address, got ${JSON.stringify(config.asset)}`);
   }
   const networks = new Map<string, string | undefined>();
-  for (const n of [network, v1Network]) networks.set(n, config.asset ?? USDC_BY_NETWORK[n]);
+  for (const n of [network, v1Network]) networks.set(n, config.asset ?? NETWORK_BY_ID.get(n)?.usdc);
 
   let payTo: Set<string> | undefined;
   if (config.payTo !== undefined) {
