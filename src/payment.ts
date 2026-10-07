@@ -20,7 +20,9 @@ const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 
 /** The checks every payment must pass before the SDK signs it (#106). */
 export interface PaymentPolicy {
-  /** Networks the SDK pays on, with the asset expected there (undefined: none known, so refuse) */
+  /** The network the SDK pays on per x402 version (2: CAIP-2, 1: name) */
+  networkByVersion: ReadonlyMap<number, string>;
+  /** Asset expected per network (undefined: none known, so refuse) */
   networks: ReadonlyMap<string, string | undefined>;
   maxAmount: string;
   maxAtomic: bigint;
@@ -83,7 +85,20 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
     );
   }
 
-  return { networks, maxAmount, maxAtomic, decimals, payTo, maxTimeoutSeconds, onBeforePayment: config.onBeforePayment };
+  const networkByVersion = new Map<number, string>([
+    [2, network],
+    [1, v1Network],
+  ]);
+  return {
+    networkByVersion,
+    networks,
+    maxAmount,
+    maxAtomic,
+    decimals,
+    payTo,
+    maxTimeoutSeconds,
+    onBeforePayment: config.onBeforePayment,
+  };
 }
 
 /** '1.50' with 6 decimals -> 1500000n. Rejects negatives, exponents and excess precision. */
@@ -149,8 +164,13 @@ export function checkPaymentRequest(
   if (amountConflict(requirement)) reasons.push('amount and maxAmountRequired disagree');
   if (request.scheme !== 'exact') reasons.push(`scheme ${JSON.stringify(request.scheme)} is not 'exact'`);
 
-  if (!policy.networks.has(request.network)) {
-    reasons.push(`network ${JSON.stringify(request.network)} is not configured (${[...policy.networks.keys()].join(', ')})`);
+  // The network must be the one configured for this x402 version: an option
+  // naming the other version's network has no registered scheme
+  const configured = policy.networkByVersion.get(request.x402Version);
+  if (request.network !== configured) {
+    reasons.push(
+      `network ${JSON.stringify(request.network)} is not the configured x402 v${request.x402Version} network ${JSON.stringify(configured ?? '(none)')}`
+    );
   } else {
     const expected = policy.networks.get(request.network);
     if (expected === undefined) {
@@ -182,13 +202,15 @@ export function checkPaymentRequest(
   return reasons;
 }
 
-/** Per request attempt: set when that attempt sends a signed payment */
+/** What happened to one request attempt, recorded by the SDK's own code and hooks */
 export interface PaymentAttemptState {
+  /** A signed payment was sent to the gateway */
   paid: boolean;
+  /** The payment was refused before signing (policy or onBeforePayment) */
+  refusal?: PaymentRefusedError;
+  /** The x402 library failed to create or sign the payment (nothing sent) */
+  creationFailure?: unknown;
 }
-
-/** Marker in refusals raised inside the x402 library (see requestFailure in client.ts) */
-export const REFUSAL_MARKER = '[provenance-sdk refused]';
 
 function isRequest(input: unknown): input is Request {
   return typeof Request !== 'undefined' && input instanceof Request;
@@ -204,13 +226,6 @@ function isRequest(input: unknown): input is Request {
  * Dynamically imports @x402/fetch and @x402/evm — throws PaymentConfigurationError
  * if they are not installed.
  */
-export async function createX402Fetch(
-  config: X402PaymentConfig,
-  policy: PaymentPolicy = resolvePaymentPolicy(config)
-): Promise<typeof fetch> {
-  return (await createX402Transport(config, policy)).fetchFor({ paid: false });
-}
-
 /**
  * The x402 machinery, set up once, handing out a paying fetch per request
  * attempt. Each attempt's fetch reports into its own state whether it sent a
@@ -265,42 +280,46 @@ export async function createX402Transport(
   const signer = hasAddress(wallet) ? wallet : { ...wallet, address };
 
   const network = config.network ?? 'eip155:84532';
-  const client = new x402Fetch.x402Client();
-  const scheme = new x402Evm.ExactEvmScheme(signer);
-  client.register(network, scheme);
-
-  // Also register for v1: the gateway currently returns x402Version 1 with simple
-  // network names (e.g. "base-sepolia") instead of CAIP-2 (e.g. "eip155:84532").
+  // The gateway currently answers with x402 v1 and simple network names
+  // (e.g. "base-sepolia"); v2 uses CAIP-2 (e.g. "eip155:84532"). Register both.
   const v1Network = config.v1Network ?? 'base-sepolia';
+  const scheme = new x402Evm.ExactEvmScheme(signer);
   const v1Scheme = new x402EvmV1.ExactEvmSchemeV1(signer);
-  client.registerV1(v1Network, v1Scheme);
 
-  // Final gate, inside the library, right before it signs: the selected option
-  // must still pass the policy (the 402 was already narrowed by policedFetch).
-  client.onBeforePaymentCreation((context) => {
-    const requirement = context.selectedRequirements as unknown as Record<string, unknown>;
-    const reasons = checkPaymentRequest(
-      toPaymentRequest(context.paymentRequired.x402Version, requirement),
-      requirement['extra'] as Record<string, unknown> | undefined,
-      policy,
-      requirement
-    );
-    return Promise.resolve(
-      reasons.length ? { abort: true as const, reason: `${REFUSAL_MARKER} ${reasons.join('; ')}` } : undefined
-    );
-  });
+  /** A fresh x402 client per attempt, so its hooks report into that attempt's state */
+  const clientFor = (state: PaymentAttemptState) => {
+    const client = new x402Fetch.x402Client();
+    client.register(network, scheme);
+    client.registerV1(v1Network, v1Scheme);
 
-  // @x402/core 2.23+ caps payments at $1 by default (#110). The policy is the
-  // cap: align the library's spend control with it, so it neither refuses
-  // payments the policy allows nor allows more. Older versions have no such API.
-  const setSpendControls = (client as unknown as { setSpendControls?: (controls: unknown) => unknown })
-    .setSpendControls;
-  if (typeof setSpendControls === 'function') {
-    const allowedAssets = [...policy.networks]
-      .filter((entry): entry is [string, string] => entry[1] !== undefined)
-      .map(([n, asset]) => ({ network: n, asset, maxAmountPerPayment: policy.maxAtomic.toString() }));
-    setSpendControls.call(client, { maxAmountPerPayment: false, allowedAssets });
-  }
+    // Final gate, inside the library, right before it signs: the selected
+    // option must still pass the policy (the 402 was already narrowed).
+    client.onBeforePaymentCreation((context) => {
+      const requirement = context.selectedRequirements as unknown as Record<string, unknown>;
+      const request = toPaymentRequest(context.paymentRequired.x402Version, requirement);
+      const reasons = checkPaymentRequest(request, requirement['extra'] as Record<string, unknown> | undefined, policy, requirement);
+      if (reasons.length === 0) return Promise.resolve();
+      state.refusal = new PaymentRefusedError(`Payment refused before signing: ${reasons.join('; ')}`, [{ request, reasons }]);
+      return Promise.resolve({ abort: true as const, reason: state.refusal.message });
+    });
+    client.onPaymentCreationFailure((context) => {
+      if (!state.refusal) state.creationFailure = context.error;
+      return Promise.resolve();
+    });
+
+    // @x402/core 2.23+ caps payments at $1 by default (#110). The policy is the
+    // cap: align the library's spend control with it, so it neither refuses
+    // payments the policy allows nor allows more. Older versions lack the API.
+    const setSpendControls = (client as unknown as { setSpendControls?: (controls: unknown) => unknown })
+      .setSpendControls;
+    if (typeof setSpendControls === 'function') {
+      const allowedAssets = [...policy.networks]
+        .filter((entry): entry is [string, string] => entry[1] !== undefined)
+        .map(([n, asset]) => ({ network: n, asset, maxAmountPerPayment: policy.maxAtomic.toString() }));
+      setSpendControls.call(client, { maxAmountPerPayment: false, allowedAssets });
+    }
+    return client;
+  };
 
   // The SDK's own transport, under the library's paying fetch: it enforces the
   // policy on every offered option before the library can choose one, and
@@ -316,10 +335,15 @@ export async function createX402Transport(
 
       const response = await fetch(request);
       if (paid || response.status !== 402) return response;
-      return policePaymentRequired(response, policy);
+      try {
+        return await policePaymentRequired(response, policy, request.signal);
+      } catch (error) {
+        if (error instanceof PaymentRefusedError) state.refusal = error;
+        throw error;
+      }
     };
 
-  return { fetchFor: (state) => x402Fetch.wrapFetchWithPayment(policedFetchFor(state), client) };
+  return { fetchFor: (state) => x402Fetch.wrapFetchWithPayment(policedFetchFor(state), clientFor(state)) };
 }
 
 /**
@@ -328,7 +352,7 @@ export async function createX402Transport(
  * payload in FastAPI's "detail" field, while @x402/fetch expects it at the top
  * level (v1) or in the PAYMENT-REQUIRED header (v2).
  */
-async function policePaymentRequired(response: Response, policy: PaymentPolicy): Promise<Response> {
+async function policePaymentRequired(response: Response, policy: PaymentPolicy, signal: AbortSignal): Promise<Response> {
   const headers = new Headers(response.headers);
   const header = headers.get('PAYMENT-REQUIRED');
   let paymentRequired: Record<string, unknown> | undefined;
@@ -370,11 +394,15 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy):
       option ?? undefined
     );
     if (reasons.length === 0 && policy.onBeforePayment) {
+      let verdict: boolean | void = undefined;
       try {
-        if ((await policy.onBeforePayment(request)) === false) reasons.push('onBeforePayment refused it');
+        // Bounded by the request's timeout: an unanswered approval must not hang the call
+        verdict = await untilAborted(Promise.resolve(policy.onBeforePayment(request)), signal);
       } catch (e) {
+        if (signal.aborted) throw e; // the timeout fired while waiting for approval
         reasons.push(`onBeforePayment threw: ${e instanceof Error ? e.message : String(e)}`);
       }
+      if (verdict === false && reasons.length === 0) reasons.push('onBeforePayment refused it');
     }
     if (reasons.length === 0 && option) {
       chosen = option;
@@ -411,4 +439,23 @@ function base64Encode(value: string): string {
 
 function hasAddress(wallet: PaymentWallet): wallet is PaymentWallet & { address: `0x${string}` } {
   return typeof (wallet as { address?: unknown }).address === 'string';
+}
+
+/** Settle like `promise`, or reject with an AbortError as soon as `signal` aborts. */
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('The operation was aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('The operation was aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }

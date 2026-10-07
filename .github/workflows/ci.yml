@@ -50,12 +50,15 @@ jobs:
           test -f dist/chain/index.cjs
           test -f dist/chain/index.d.ts
 
-      - name: Payment policy on the newest tested @x402 (peer range upper bound)
+      - name: Payment policy across the tested @x402 range
         run: |
-          # The lockfile pins @x402 2.5.0 (lower bound); 2.23+ adds a default $1 spend cap
-          # the policy must override (#110). Keep in sync with peerDependencies.
-          pnpm add -D @x402/fetch@2.28.0 @x402/evm@2.28.0
-          pnpm vitest run tests/unit/x402-policy.test.ts tests/unit/payment.test.ts
+          # The lockfile pins @x402 2.5.0 (lower bound). 2.23.0 is the first with the
+          # default $1 spend cap the policy must override (#110); 2.28.0 is the upper
+          # bound. Keep in sync with peerDependencies.
+          for v in 2.23.0 2.28.0; do
+            pnpm add -D @x402/fetch@$v @x402/evm@$v
+            pnpm vitest run tests/unit/x402-policy.test.ts tests/unit/payment.test.ts
+          done
           git checkout -- package.json pnpm-lock.yaml
           pnpm install --frozen-lockfile
 

@@ -29,7 +29,6 @@ import {
   NotaryError,
   PaymentRateLimitError,
   PaymentError,
-  PaymentRefusedError,
   type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
@@ -37,8 +36,8 @@ import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
 import { toBytes, isAddress } from './utils.js';
 import {
-  REFUSAL_MARKER,
   base64Decode,
+  untilAborted,
   createX402Transport,
   resolvePaymentPolicy,
   type PaymentAttemptState,
@@ -184,7 +183,7 @@ export class ProvenanceClient {
       );
     }
 
-    const data = (await response.json()) as GatewayAcquireStampResponse;
+    const data = await this.readJson<GatewayAcquireStampResponse>(response);
     return {
       batchId: data.batch_id,
       depth: data.depth,
@@ -486,7 +485,7 @@ export class ProvenanceClient {
       throw error;
     }
 
-    return (await response.json()) as GatewayUploadResponse;
+    return this.readJson<GatewayUploadResponse>(response);
   }
 
   /**
@@ -574,9 +573,9 @@ export class ProvenanceClient {
    * Make a fetch request to the gateway.
    *
    * x402 mode: writes go through the paying fetch; reads use the free tier
-   * unless `payForReads`. Each attempt is tagged, so the SDK knows whether it
-   * sent a payment: a paid attempt is never retried (the gateway may already
-   * have settled, #107) and its errors carry `payment`.
+   * unless `payForReads`. Each attempt gets its own paying fetch and state, so
+   * the SDK knows whether it sent a payment: a paid attempt is never retried
+   * (the gateway may already have settled, #107) and its errors carry `payment`.
    */
   private async fetch(path: string, init?: RequestInit): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
@@ -602,11 +601,15 @@ export class ProvenanceClient {
       const fetchFn: typeof fetch = transport ? transport.fetchFor(state) : fetch;
 
       try {
-        const response = await fetchFn(url, {
-          ...init,
-          headers,
-          signal: controller.signal,
-        });
+        // Bounded by the timeout even while a payment waits for approval or signing
+        const response = await untilAborted(
+          fetchFn(url, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          }),
+          controller.signal
+        );
         const paid = state.paid;
         if (paid) this.paidResponses.add(response);
 
@@ -636,7 +639,7 @@ export class ProvenanceClient {
 
         return response;
       } catch (error) {
-        throw this.requestFailure(error, paying, state.paid);
+        throw this.requestFailure(error, state);
       } finally {
         clearTimeout(timeoutId);
       }
@@ -647,9 +650,9 @@ export class ProvenanceClient {
   }
 
   /** Map a thrown fetch/x402 error to an SDK error, flagging a sent payment. */
-  private requestFailure(error: unknown, paying: boolean, paid: boolean): ProvenanceError {
+  private requestFailure(error: unknown, state: PaymentAttemptState): ProvenanceError {
     const flag = <E extends ProvenanceError>(e: E): E => {
-      if (paid) {
+      if (state.paid) {
         e.payment = { paymentSent: true };
         e.message += ' (a payment was sent with this request and may have been charged)';
       }
@@ -657,23 +660,42 @@ export class ProvenanceClient {
     };
     // Our own refusals, configuration errors and rate limits pass through
     if (error instanceof PaymentError) return error;
+    // A refusal recorded inside the library (its hook aborted signing): nothing signed
+    if (state.refusal) return state.refusal;
     const message = error instanceof Error ? error.message : String(error);
     if (error instanceof Error && error.name === 'AbortError') {
       return flag(new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT'));
     }
-    if (paying && message.includes(REFUSAL_MARKER)) {
-      // The final policy check inside the library aborted signing (nothing signed)
-      return new PaymentRefusedError(`Payment refused before signing: ${message.slice(message.indexOf(REFUSAL_MARKER) + REFUSAL_MARKER.length).trim()}`);
-    }
-    if (paying && paid) {
+    if (state.paid) {
       // The paid request went out; the library failed afterwards
       return flag(new PaymentError(`Payment sent, but the response could not be processed: ${message}`, 'PAYMENT_UNCONFIRMED'));
     }
-    if (paying && /payment/i.test(message)) {
-      // The x402 library failed to build or sign the payment; nothing was sent
+    if (state.creationFailure !== undefined) {
+      // The x402 library could not build or sign the payment; nothing was sent
       return new PaymentError(`Payment could not be created: ${message}`, 'PAYMENT_FAILED');
     }
-    return flag(new GatewayConnectionError(message || 'Failed to connect to gateway', undefined, 'CONNECTION_FAILED'));
+    return new GatewayConnectionError(message || 'Failed to connect to gateway', undefined, 'CONNECTION_FAILED');
+  }
+
+  /**
+   * Parse a successful response body. If it is not valid JSON and the request
+   * was paid, the error says so: the payment may have been taken (#107).
+   */
+  private async readJson<T>(response: Response): Promise<T> {
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      const failure = new GatewayConnectionError(
+        `Invalid response from gateway: ${error instanceof Error ? error.message : String(error)}`,
+        response.status,
+        'INVALID_RESPONSE'
+      );
+      if (this.paidResponses.has(response)) {
+        failure.payment = paymentAttempt(response);
+        failure.message += ' (a payment was sent with this request and may have been charged)';
+      }
+      throw failure;
+    }
   }
 
   /**

@@ -126,7 +126,8 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
     ['a non-USDC asset', { asset: '0x2222222222222222222222222222222222222222' }, /is not the expected/],
     ['a validity above the bound', { maxTimeoutSeconds: 3600 }, /exceeds maxTimeoutSeconds 600/],
     ['another scheme', { scheme: 'upto' }, /is not 'exact'/],
-    ['an unconfigured network', { network: 'base' }, /is not configured/],
+    ['an unconfigured network', { network: 'base' }, /is not the configured x402 v1 network/],
+    ['the other version\'s network name', { network: 'eip155:84532' }, /is not the configured x402 v1 network/],
     ['the permit2 transfer method', { extra: { name: 'USDC', version: '2', assetTransferMethod: 'permit2' } }, /transfer method/],
   ])('refuses a request %s before signing', async (_label, overrides, reason) => {
     accepts = [requirement(overrides)];
@@ -340,6 +341,51 @@ describe('free-tier reads in x402 mode', () => {
     try {
       const error = await client().download('c'.repeat(64)).catch((e: unknown) => e);
       expect((error as Error).message).toMatch(/payForReads/);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});
+
+describe('review round 3 (#138)', () => {
+  it('an option naming the other version\'s network is skipped and the payable one after it is paid', async () => {
+    accepts = [requirement({ network: 'eip155:84532' }), requirement()];
+    await client().upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it('the timeout bounds an approval that never answers', async () => {
+    const started = Date.now();
+    const error = await new ProvenanceClient({
+      gatewayUrl: 'http://gateway.test',
+      payment: { wallet, onBeforePayment: () => new Promise<boolean>(() => undefined) },
+      timeout: 50,
+      retry: { maxRetries: 0 },
+    })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+
+    expect((error as GatewayConnectionError).code).toBe('TIMEOUT');
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(payments()).toBe(0);
+  });
+
+  it('a paid 2xx with an unreadable body keeps the payment flag', async () => {
+    afterPayment = { status: 200, body: undefined };
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      // Read the headers without consuming the body, which gateway() still needs
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'POST', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('<html>proxy error</html>', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).payment).toEqual({ paymentSent: true });
+      expect(payments()).toBe(1);
     } finally {
       vi.stubGlobal('fetch', gateway);
     }
