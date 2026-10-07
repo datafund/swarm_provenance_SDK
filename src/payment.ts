@@ -17,6 +17,43 @@ export const USDC_BY_NETWORK: Readonly<Record<string, string>> = Object.freeze({
 const TESTNETS = new Set(['eip155:84532', 'base-sepolia']);
 const DEFAULT_TESTNET_MAX_AMOUNT = '1';
 
+/** Known networks: one name selects both x402 identifiers (#108) */
+const KNOWN_NETWORKS: Readonly<Record<string, { v2: `${string}:${string}`; v1: string }>> = {
+  'base-sepolia': { v2: 'eip155:84532', v1: 'base-sepolia' },
+  base: { v2: 'eip155:8453', v1: 'base' },
+};
+
+/**
+ * The x402 v2 (CAIP-2) and v1 network identifiers for a config. The gateway
+ * speaks v1 today, so both must name the same chain: a mismatch would fail
+ * every payment, so it is a configuration error.
+ */
+function resolveNetworks(config: X402PaymentConfig): { network: `${string}:${string}`; v1Network: string } {
+  const requested = config.network ?? 'base-sepolia';
+  const known = KNOWN_NETWORKS[requested];
+  const network = known ? known.v2 : (requested as `${string}:${string}`);
+  if (!known && !/^[a-z0-9-]+:[a-zA-Z0-9-]+$/.test(network)) {
+    throw new PaymentConfigurationError(
+      `payment.network must be 'base', 'base-sepolia' or a CAIP-2 ID such as 'eip155:8453', got ${JSON.stringify(requested)}`
+    );
+  }
+  const implied = Object.values(KNOWN_NETWORKS).find((n) => n.v2 === network)?.v1;
+  const v1Network = config.v1Network ?? implied;
+  if (v1Network === undefined) {
+    throw new PaymentConfigurationError(
+      `payment.v1Network is required for ${network}: the gateway names networks the x402 v1 way (e.g. 'base')`
+    );
+  }
+  const chainA = CHAIN_OF_NETWORK[network];
+  const chainB = CHAIN_OF_NETWORK[v1Network];
+  if (chainA !== undefined && chainB !== undefined && chainA !== chainB) {
+    throw new PaymentConfigurationError(
+      `payment.network ${requested} and payment.v1Network ${v1Network} are different chains; set one network: 'base' or 'base-sepolia'`
+    );
+  }
+  return { network, v1Network };
+}
+
 /** EVM chain ID behind each known network name (v2 CAIP-2 and v1 names) */
 const CHAIN_OF_NETWORK: Readonly<Record<string, number>> = {
   'eip155:84532': 84532,
@@ -45,8 +82,7 @@ export interface PaymentPolicy {
  * ProvenanceClient can reject a bad config at construction, before any request.
  */
 export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
-  const network = config.network ?? 'eip155:84532';
-  const v1Network = config.v1Network ?? 'base-sepolia';
+  const { network, v1Network } = resolveNetworks(config);
   const testnetOnly = TESTNETS.has(network) && TESTNETS.has(v1Network) && config.asset === undefined;
 
   if (config.maxAmount === undefined && !testnetOnly) {
@@ -72,14 +108,6 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
 
   if (config.asset !== undefined && !isAddress(config.asset)) {
     throw new PaymentConfigurationError(`payment.asset must be a token address, got ${JSON.stringify(config.asset)}`);
-  }
-  // One token address cannot be right on two chains
-  const chainA = CHAIN_OF_NETWORK[network];
-  const chainB = CHAIN_OF_NETWORK[v1Network];
-  if (config.asset !== undefined && chainA !== undefined && chainB !== undefined && chainA !== chainB) {
-    throw new PaymentConfigurationError(
-      `payment.asset is one token, but network ${network} and v1Network ${v1Network} are different chains`
-    );
   }
   const networks = new Map<string, string | undefined>();
   for (const n of [network, v1Network]) networks.set(n, config.asset ?? USDC_BY_NETWORK[n]);
