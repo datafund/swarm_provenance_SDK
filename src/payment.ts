@@ -1,6 +1,6 @@
 import type { PaymentRequest, PaymentWallet, X402PaymentConfig } from './types.js';
 import { PaymentConfigurationError, PaymentRefusedError } from './errors.js';
-import { isAddress } from './utils.js';
+import { isAddress, base64ToBytes, bytesToBase64 } from './utils.js';
 
 /**
  * USDC per network, as in @x402/evm's default asset table. x402 v2 names
@@ -64,6 +64,9 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
 
   let payTo: Set<string> | undefined;
   if (config.payTo !== undefined) {
+    if (!Array.isArray(config.payTo)) {
+      throw new PaymentConfigurationError('payment.payTo must be an array of addresses');
+    }
     const bad = config.payTo.filter((a) => !isAddress(a));
     if (config.payTo.length === 0 || bad.length > 0) {
       throw new PaymentConfigurationError(
@@ -106,7 +109,11 @@ export function formatAtomic(atomic: bigint, decimals: number): string {
   return fraction ? `${whole}.${fraction}` : whole;
 }
 
-/** One offered option from a 402, normalised across x402 v1 and v2 */
+/**
+ * One offered option from a 402, normalised across x402 v1 and v2. The amount
+ * is the field the scheme for that version actually signs: v1
+ * `maxAmountRequired`, v2 `amount` (see amountConflict for options carrying both).
+ */
 export function toPaymentRequest(x402Version: number, requirement: Record<string, unknown>): PaymentRequest {
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
   return {
@@ -114,20 +121,32 @@ export function toPaymentRequest(x402Version: number, requirement: Record<string
     network: str(requirement['network']),
     scheme: str(requirement['scheme']),
     asset: str(requirement['asset']),
-    // v2: amount; v1: maxAmountRequired
-    amount: str(requirement['amount'] ?? requirement['maxAmountRequired']),
+    amount: str(x402Version === 1 ? requirement['maxAmountRequired'] : requirement['amount']),
     payTo: str(requirement['payTo']),
     maxTimeoutSeconds: typeof requirement['maxTimeoutSeconds'] === 'number' ? requirement['maxTimeoutSeconds'] : NaN,
   };
+}
+
+/**
+ * An option carrying both amount fields with different values is refused: the
+ * policy must check exactly the value that gets signed, and a gateway should
+ * not send two.
+ */
+function amountConflict(requirement: Record<string, unknown> | undefined): boolean {
+  const a = requirement?.['amount'];
+  const m = requirement?.['maxAmountRequired'];
+  return a !== undefined && m !== undefined && a !== m;
 }
 
 /** Why a requested payment breaks the policy; empty if it may be signed. */
 export function checkPaymentRequest(
   request: PaymentRequest,
   extra: Record<string, unknown> | undefined,
-  policy: PaymentPolicy
+  policy: PaymentPolicy,
+  requirement?: Record<string, unknown>
 ): string[] {
   const reasons: string[] = [];
+  if (amountConflict(requirement)) reasons.push('amount and maxAmountRequired disagree');
   if (request.scheme !== 'exact') reasons.push(`scheme ${JSON.stringify(request.scheme)} is not 'exact'`);
 
   if (!policy.networks.has(request.network)) {
@@ -163,21 +182,13 @@ export function checkPaymentRequest(
   return reasons;
 }
 
-/**
- * Internal header tagging each client request attempt, so the SDK can tell
- * afterwards whether that attempt sent a payment. Stripped before sending.
- */
-export const ATTEMPT_HEADER = 'x-provenance-sdk-attempt';
-const paidAttempts = new Set<string>();
-
-/**
- * Whether the request attempt tagged `attemptId` sent a signed payment to the
- * gateway (the gateway may have settled it, whatever happened next). Each id is
- * reported once: the record is removed when read.
- */
-export function takePaidAttempt(attemptId: string): boolean {
-  return paidAttempts.delete(attemptId);
+/** Per request attempt: set when that attempt sends a signed payment */
+export interface PaymentAttemptState {
+  paid: boolean;
 }
+
+/** Marker in refusals raised inside the x402 library (see requestFailure in client.ts) */
+export const REFUSAL_MARKER = '[provenance-sdk refused]';
 
 function isRequest(input: unknown): input is Request {
   return typeof Request !== 'undefined' && input instanceof Request;
@@ -197,6 +208,18 @@ export async function createX402Fetch(
   config: X402PaymentConfig,
   policy: PaymentPolicy = resolvePaymentPolicy(config)
 ): Promise<typeof fetch> {
+  return (await createX402Transport(config, policy)).fetchFor({ paid: false });
+}
+
+/**
+ * The x402 machinery, set up once, handing out a paying fetch per request
+ * attempt. Each attempt's fetch reports into its own state whether it sent a
+ * payment, independent of how the library calls the inner fetch.
+ */
+export async function createX402Transport(
+  config: X402PaymentConfig,
+  policy: PaymentPolicy = resolvePaymentPolicy(config)
+): Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> {
   let x402Fetch: typeof import('@x402/fetch');
   let x402Evm: typeof import('@x402/evm');
 
@@ -259,10 +282,11 @@ export async function createX402Fetch(
     const reasons = checkPaymentRequest(
       toPaymentRequest(context.paymentRequired.x402Version, requirement),
       requirement['extra'] as Record<string, unknown> | undefined,
-      policy
+      policy,
+      requirement
     );
     return Promise.resolve(
-      reasons.length ? { abort: true as const, reason: `Payment refused: ${reasons.join('; ')}` } : undefined
+      reasons.length ? { abort: true as const, reason: `${REFUSAL_MARKER} ${reasons.join('; ')}` } : undefined
     );
   });
 
@@ -280,28 +304,22 @@ export async function createX402Fetch(
 
   // The SDK's own transport, under the library's paying fetch: it enforces the
   // policy on every offered option before the library can choose one, and
-  // marks responses to paid requests.
-  const policedFetch: typeof fetch = async (input, init) => {
-    let request: RequestInfo | URL = input;
-    let attemptId: string | null = null;
-    if (isRequest(input) && input.headers.has(ATTEMPT_HEADER)) {
-      attemptId = input.headers.get(ATTEMPT_HEADER);
-      const headers = new Headers(input.headers);
-      headers.delete(ATTEMPT_HEADER);
-      request = new Request(input, { headers });
-    }
-    const paid = isRequest(input) && (input.headers.has('PAYMENT-SIGNATURE') || input.headers.has('X-PAYMENT'));
-    // Record the payment only if the request can actually leave: an already
-    // aborted signal (e.g. the timeout fired while the wallet was signing) fails
-    // before anything is sent.
-    if (paid && attemptId && !(isRequest(input) && input.signal.aborted)) paidAttempts.add(attemptId);
+  // records in the attempt's state whether a payment went out.
+  const policedFetchFor =
+    (state: PaymentAttemptState): typeof fetch =>
+    async (input, init) => {
+      const request = isRequest(input) && init === undefined ? input : new Request(input, init);
+      const paid = request.headers.has('PAYMENT-SIGNATURE') || request.headers.has('X-PAYMENT');
+      // An already aborted request (e.g. the timeout fired while the wallet was
+      // signing) is rejected before anything is sent: not a payment.
+      if (paid && !request.signal.aborted) state.paid = true;
 
-    const response = await fetch(request, init);
-    if (paid || response.status !== 402) return response;
-    return policePaymentRequired(response, policy);
-  };
+      const response = await fetch(request);
+      if (paid || response.status !== 402) return response;
+      return policePaymentRequired(response, policy);
+    };
 
-  return x402Fetch.wrapFetchWithPayment(policedFetch, client);
+  return { fetchFor: (state) => x402Fetch.wrapFetchWithPayment(policedFetchFor(state), client) };
 }
 
 /**
@@ -316,6 +334,8 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy):
   let paymentRequired: Record<string, unknown> | undefined;
 
   if (header) {
+    // The body is not used: release the connection
+    await response.body?.cancel().catch(() => undefined);
     try {
       paymentRequired = JSON.parse(base64Decode(header)) as Record<string, unknown>;
     } catch {
@@ -343,7 +363,12 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy):
   let chosen: Record<string, unknown> | undefined;
   for (const option of accepts as Array<Record<string, unknown> | null>) {
     const request = toPaymentRequest(x402Version, option ?? {});
-    const reasons = checkPaymentRequest(request, option?.['extra'] as Record<string, unknown> | undefined, policy);
+    const reasons = checkPaymentRequest(
+      request,
+      option?.['extra'] as Record<string, unknown> | undefined,
+      policy,
+      option ?? undefined
+    );
     if (reasons.length === 0 && policy.onBeforePayment) {
       try {
         if ((await policy.onBeforePayment(request)) === false) reasons.push('onBeforePayment refused it');
@@ -375,13 +400,13 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy):
   return new Response(JSON.stringify(narrowed), { status: 402, statusText: response.statusText, headers });
 }
 
-function base64Decode(value: string): string {
-  const binary = atob(value);
-  return new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+/** base64 of UTF-8 text, as x402 encodes its headers */
+export function base64Decode(value: string): string {
+  return new TextDecoder().decode(base64ToBytes(value));
 }
 
 function base64Encode(value: string): string {
-  return btoa(Array.from(new TextEncoder().encode(value), (b) => String.fromCharCode(b)).join(''));
+  return bytesToBase64(new TextEncoder().encode(value));
 }
 
 function hasAddress(wallet: PaymentWallet): wallet is PaymentWallet & { address: `0x${string}` } {

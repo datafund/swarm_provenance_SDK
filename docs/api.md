@@ -17,7 +17,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `gatewayUrl` | `string` | `https://provenance-gateway.datafund.io` | Gateway URL |
 | `timeout` | `number` | `30000` | Request timeout in milliseconds |
 | `payment` | `'free' \| 'none' \| X402PaymentConfig` | `'free'` | Payment mode (see below) |
-| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503 (and 429 outside free mode). Paid (x402) requests are never retried |
+| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). An x402 attempt that sent a payment is never retried; unpaid attempts are |
 
 #### X402PaymentConfig
 

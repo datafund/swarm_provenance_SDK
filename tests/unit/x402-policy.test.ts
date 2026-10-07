@@ -50,11 +50,13 @@ interface Seen {
 
 let seen: Seen[];
 let accepts: Array<Record<string, unknown>>;
+/** x402 protocol of the stub's 402: v1 in the body (the gateway today), v2 in the PAYMENT-REQUIRED header */
+let protocol: 1 | 2;
 let afterPayment: { status: number; headers?: Record<string, string>; body?: unknown; hang?: boolean };
 /** Statuses to answer unpaid requests with before the 402 (e.g. a transient 503) */
 let beforePayment: number[];
 
-vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const request = new Request(input, init);
   // Like real fetch: an already-aborted request is rejected without being sent
   if (request.signal.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'));
@@ -66,6 +68,10 @@ vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
 
   if (!paid && beforePayment.length > 0) {
     return Promise.resolve(new Response('{"detail":"busy"}', { status: beforePayment.shift()! }));
+  }
+  if (!paid && protocol === 2) {
+    const header = Buffer.from(JSON.stringify({ x402Version: 2, error: 'Payment required', resource: { url: request.url }, accepts })).toString('base64');
+    return Promise.resolve(new Response('{}', { status: 402, headers: { 'PAYMENT-REQUIRED': header } }));
   }
   if (!paid) {
     // The gateway wraps the x402 payload in FastAPI's `detail`
@@ -88,7 +94,8 @@ vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
       headers: { 'content-type': 'application/json', ...afterPayment.headers },
     }),
   );
-});
+};
+vi.stubGlobal('fetch', gateway);
 
 function client(payment: Partial<X402PaymentConfig> = {}): ProvenanceClient {
   return new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet, ...payment } });
@@ -101,6 +108,7 @@ beforeEach(() => {
   accepts = [requirement()];
   afterPayment = { status: 200 };
   beforePayment = [];
+  protocol = 1;
 });
 afterAll(() => {
   vi.unstubAllGlobals();
@@ -137,6 +145,18 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
     expect(error).toBeInstanceOf(PaymentRefusedError);
     expect((error as Error).message).toMatch(/not in payment.payTo/);
     expect(payments()).toBe(0);
+  });
+
+  it('refuses a v1 option whose amount and maxAmountRequired disagree (v1 signs maxAmountRequired)', async () => {
+    accepts = [requirement({ amount: '1', maxAmountRequired: '500000000' })];
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).toMatch(/exceeds maxAmount|disagree/);
+    expect(payments()).toBe(0);
+  });
+
+  it('a non-array payTo is a configuration error', () => {
+    expect(() => client({ payTo: GATEWAY_PAYTO as unknown as string[] })).toThrow(PaymentConfigurationError);
   });
 
   it('pays a recipient inside payTo (case-insensitive)', async () => {
@@ -275,5 +295,53 @@ describe('maxAmount above the library default cap (#110)', () => {
     accepts = [requirement({ maxAmountRequired: '2000000' })];
     await client({ maxAmount: '5' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
+  });
+});
+
+describe('x402 v2: requirements in the PAYMENT-REQUIRED header', () => {
+  const v2 = (overrides: Record<string, unknown> = {}) => ({
+    scheme: 'exact',
+    network: 'eip155:84532',
+    amount: '10000',
+    asset: USDC_SEPOLIA,
+    payTo: GATEWAY_PAYTO,
+    maxTimeoutSeconds: 60,
+    extra: { name: 'USDC', version: '2' },
+    ...overrides,
+  });
+
+  it('pays an in-policy v2 request once', async () => {
+    protocol = 2;
+    accepts = [v2()];
+    await client().upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it('refuses a v2 request above maxAmount, and one using permit2', async () => {
+    protocol = 2;
+    for (const option of [v2({ amount: '2000000' }), v2({ extra: { name: 'USDC', version: '2', assetTransferMethod: 'permit2' } })]) {
+      accepts = [option];
+      await expect(client().upload('hello', { stampId: STAMP })).rejects.toThrow(PaymentRefusedError);
+    }
+    expect(payments()).toBe(0);
+  });
+
+  it('narrows the header to the approved option', async () => {
+    protocol = 2;
+    accepts = [v2({ amount: '99000000' }), v2()];
+    await client().upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+});
+
+describe('free-tier reads in x402 mode', () => {
+  it('a read rate limit points to payForReads', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 429 })));
+    try {
+      const error = await client().download('c'.repeat(64)).catch((e: unknown) => e);
+      expect((error as Error).message).toMatch(/payForReads/);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
   });
 });

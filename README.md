@@ -92,7 +92,8 @@ const wallet = createWalletClient({
 }).extend(publicActions);
 
 const client = new ProvenanceClient({
-  payment: { wallet, maxAmount: '0.10', payTo: ['0x...gateway payout address'] },
+  // Optionally also pin the recipient: payTo: ['<the gateway operator's payout address>']
+  payment: { wallet, maxAmount: '0.10' },
 });
 
 // Requests that receive 402 responses are paid in USDC, within the policy
