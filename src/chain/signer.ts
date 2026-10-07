@@ -137,11 +137,31 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
     async getChainId(): Promise<number> {
       return Number(await provider.request({ method: 'eth_chainId' }));
     },
-    async switchChain(chainId: number): Promise<void> {
-      // The wallet asks the user; a refusal or an unknown chain throws
-      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: `0x${chainId.toString(16)}` }] });
+    async switchChain(chainId: number, chain?: { name: string; rpcUrls: string[]; explorerUrl: string }): Promise<void> {
+      const hexChainId = `0x${chainId.toString(16)}`;
+      try {
+        // The wallet asks the user; a refusal throws
+        await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexChainId }] });
+      } catch (error) {
+        // 4902: the wallet does not know the chain (some wallets nest the code)
+        const e = error as { code?: number; data?: { originalError?: { code?: number } } };
+        if ((e.code ?? e.data?.originalError?.code) !== 4902 || !chain) throw error;
+        await provider.request({
+          method: 'wallet_addEthereumChain',
+          params: [
+            {
+              chainId: hexChainId,
+              chainName: chain.name,
+              rpcUrls: chain.rpcUrls,
+              blockExplorerUrls: [chain.explorerUrl],
+              nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+            },
+          ],
+        });
+        await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexChainId }] });
+      }
     },
-    async sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
+    async sendTransaction(tx: { to: Address; data: Hex; gas?: bigint; chainId?: number }): Promise<Hex> {
       const txHash = (await provider.request({
         method: 'eth_sendTransaction',
         params: [
@@ -149,6 +169,7 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
             from: address,
             to: tx.to,
             data: tx.data,
+            ...(tx.chainId ? { chainId: `0x${tx.chainId.toString(16)}` } : {}),
             ...(tx.gas ? { gas: `0x${tx.gas.toString(16)}` } : {}),
           },
         ],

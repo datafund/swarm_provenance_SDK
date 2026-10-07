@@ -112,7 +112,7 @@ describe('chain ID checks before writing (#115)', () => {
     mockWaitForTransactionReceipt.mockResolvedValue({ status: 'success', blockNumber: 1n, gasUsed: 1n, logs: [registeredLog()] });
 
     await new ChainClient({ chain: 'base-sepolia', signer: s }).anchor(HASH, 'dataset');
-    expect(switchChain).toHaveBeenCalledWith(84532);
+    expect(switchChain).toHaveBeenCalledWith(84532, expect.objectContaining({ name: 'base-sepolia' }));
     expect(s.sent).toBe(1);
   });
 
@@ -189,6 +189,15 @@ describe('writes report success only when something was recorded (#116)', () => 
 });
 
 describe('a receipt timeout keeps the transaction hash (#117)', () => {
+  it('the error keeps the CHAIN_CONNECTION code and what to wait for', async () => {
+    mockWaitForTransactionReceipt.mockRejectedValue(new Error('Timed out while waiting for transaction'));
+    const error = (await new ChainClient({ chain: 'base-sepolia', signer: signer() })
+      .batchAnchor([{ dataHash: HASH, dataType: 'a' }, { dataHash: 'cd'.repeat(32), dataType: 'b' }])
+      .catch((e: unknown) => e)) as ReceiptTimeoutError;
+    expect(error.code).toBe('CHAIN_CONNECTION');
+    expect(error.expected).toEqual({ event: 'DataRegistered', count: 2 });
+  });
+
   it('throws ReceiptTimeoutError with txHash and explorer URL', async () => {
     mockWaitForTransactionReceipt.mockRejectedValue(new Error('Timed out while waiting for transaction'));
     const error = await new ChainClient({ chain: 'base-sepolia', signer: signer() }).anchor(HASH, 'dataset').catch((e: unknown) => e);
@@ -238,5 +247,74 @@ describe('errors do not leak RPC URLs (#118)', () => {
     expect(Object.keys(error as object)).not.toContain('originalError');
     expect(JSON.stringify(error)).not.toContain('SECRET_API_KEY_123');
     expect((error as Error).message).not.toContain('SECRET_API_KEY_123');
+  });
+});
+
+describe('review round 1 (#139)', () => {
+  it('a wrong RPC chain is reported as such even when the read pre-check would fail first', async () => {
+    mockGetChainId.mockResolvedValue(1);
+    mockReadContract.mockReset();
+    mockReadContract.mockRejectedValue(new Error('returned no data ("0x")'));
+    const error = await new ChainClient({ chain: 'base-sepolia', signer: signer() }).anchor(HASH, 'dataset').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect(mockReadContract).not.toHaveBeenCalled();
+  });
+
+  it('a sped-up transaction reports the hash that landed', async () => {
+    const NEW: Hex = `0x${'cc'.repeat(32)}`;
+    mockWaitForTransactionReceipt.mockImplementation((args: { onReplaced?: (r: unknown) => void }) => {
+      args.onReplaced?.({ reason: 'repriced', transaction: { hash: NEW } });
+      return Promise.resolve({ status: 'success', blockNumber: 2n, gasUsed: 1n, transactionHash: NEW, logs: [registeredLog()] });
+    });
+    const result = await new ChainClient({ chain: 'base-sepolia', signer: signer() }).anchor(HASH, 'dataset');
+    expect(result.txHash).toBe(NEW);
+    expect(result.explorerUrl).toContain(NEW);
+  });
+
+  it('a transaction cancelled in the wallet is an error, not "no event"', async () => {
+    const NEW: Hex = `0x${'cc'.repeat(32)}`;
+    mockWaitForTransactionReceipt.mockImplementation((args: { onReplaced?: (r: unknown) => void }) => {
+      args.onReplaced?.({ reason: 'cancelled', transaction: { hash: NEW } });
+      return Promise.resolve({ status: 'success', blockNumber: 2n, gasUsed: 1n, transactionHash: NEW, logs: [] });
+    });
+    await expect(new ChainClient({ chain: 'base-sepolia', signer: signer() }).anchor(HASH, 'dataset')).rejects.toThrow(
+      /cancelled in the wallet/,
+    );
+  });
+
+  it('getProvenanceChain errors do not serialise their cause (it may carry the RPC URL)', async () => {
+    mockReadContract.mockReset();
+    mockReadContract.mockRejectedValue(new Error('HTTP request failed. URL: https://rpc.example/v2/SECRET_KEY_9'));
+    const error = await new ChainClient({ chain: 'base-sepolia' }).getProvenanceChain(HASH).catch((e: unknown) => e);
+    expect(JSON.stringify(error)).not.toContain('SECRET_KEY_9');
+    expect((error as Error).message).not.toContain('SECRET_KEY_9');
+  });
+
+  it('fromEip1193Provider adds an unknown chain (4902) and sends with chainId', async () => {
+    const calls: Array<{ method: string; params?: unknown[] }> = [];
+    let switched = 0;
+    const provider = {
+      request: (args: { method: string; params?: unknown[] }) => {
+        calls.push(args);
+        if (args.method === 'eth_requestAccounts') return Promise.resolve([ADDRESS]);
+        if (args.method === 'wallet_switchEthereumChain' && switched++ === 0) {
+          return Promise.reject(Object.assign(new Error('Unrecognized chain ID'), { code: 4902 }));
+        }
+        if (args.method === 'eth_sendTransaction') return Promise.resolve(TX);
+        return Promise.resolve(null);
+      },
+    };
+    const s = await fromEip1193Provider(provider);
+    await s.switchChain!(84532, { name: 'base-sepolia', rpcUrls: ['https://rpc'], explorerUrl: 'https://scan' });
+    await s.sendTransaction({ to: ADDRESS, data: '0x', chainId: 84532 });
+
+    expect(calls.map((c) => c.method)).toEqual([
+      'eth_requestAccounts',
+      'wallet_switchEthereumChain',
+      'wallet_addEthereumChain',
+      'wallet_switchEthereumChain',
+      'eth_sendTransaction',
+    ]);
+    expect((calls.at(-1)!.params![0] as { chainId: string }).chainId).toBe('0x14a34');
   });
 });

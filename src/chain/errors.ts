@@ -67,8 +67,12 @@ export class ReceiptTimeoutError extends ChainConnectionError {
     message: string,
     public readonly txHash: string,
     public readonly explorerUrl?: string,
+    /** What the write must emit to count as done: pass to waitForTransaction to keep that check */
+    public readonly expected?: { event: string; count?: number },
   ) {
-    super(message, 'CHAIN_RECEIPT_TIMEOUT');
+    // Same code as other connection errors, so code-based handling keeps matching;
+    // tell it apart by class (instanceof ReceiptTimeoutError) or txHash
+    super(message, 'CHAIN_CONNECTION');
     this.name = 'ReceiptTimeoutError';
     Object.setPrototypeOf(this, ReceiptTimeoutError.prototype);
   }
@@ -93,9 +97,13 @@ export function rpcErrorMessage(error: unknown): string {
   } else {
     text = String(error);
   }
+  return sanitizeErrorText(text);
+}
+
+/** Drop viem's verbose sections (URL, request body, arguments, ...) and redact URLs. */
+export function sanitizeErrorText(text: string): string {
   const cut = text.search(/\n\s*(URL:|Request body:|Request Arguments:|Raw Call Arguments:|Contract Call:|Docs:|Version:)/);
-  if (cut >= 0) text = text.slice(0, cut);
-  return redactUrls(text.trim());
+  return redactUrls((cut >= 0 ? text.slice(0, cut) : text).trim());
 }
 
 /** Replace every URL (and its credentials, path and query) with a placeholder */

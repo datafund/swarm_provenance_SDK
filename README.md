@@ -506,7 +506,7 @@ try {
     console.error(error.message);
   } else if (error instanceof ReceiptTimeoutError) {
     // Sent, but no receipt yet: it may still confirm. Do not resend; resume instead.
-    await chain.waitForTransaction(error.txHash as `0x${string}`, { event: 'DataRegistered' });
+    await chain.waitForTransaction(error.txHash as `0x${string}`, error.expected);
   } else if (error instanceof ChainTransactionError) {
     // Reverted, or succeeded without the contract's event (nothing recorded); error.txHash is set
     console.error('Transaction failed:', error.message);
@@ -517,9 +517,9 @@ try {
 
 **Write safety.** Before the first write a client checks that its RPC is on the preset's chain
 and that the contract address holds code; before every write it checks the signer's chain
-(`fromEip1193Provider` asks the wallet to switch). A write counts as done only if the receipt
+(`fromEip1193Provider` asks the wallet to switch, adding the chain if it does not know it, and sends with `chainId` so the wallet refuses another network). A write counts as done only if the receipt
 contains the contract's event (`DataRegistered`, `DataAccessed`, ...; one per item for batch
-writes). Pre-checks that fail on an RPC error are reported, not skipped. Chain error messages
+writes); a transaction sped up in the wallet reports the hash that landed, a cancelled one is an error. Pre-checks that fail on an RPC error are reported, not skipped. Chain error messages
 never include RPC URLs (they often embed API keys).
 
 ### Troubleshooting: `Cannot find package 'viem'`

@@ -70,7 +70,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 
 ## Chain Write Safety (#115-#118)
 
-- `ensureWriteTarget()` before every write: RPC `getChainId()` and contract `getBytecode()` once per client (cached; retried after a failure), signer `getChainId()` every write (`switchChain()` if the signer has it). Mismatch → `ChainConfigurationError`, nothing sent.
+- `prepareWrite()` first in every write method (before any read pre-check), which runs `ensureWriteTarget()`: RPC `getChainId()` and contract `getBytecode()` once per client (cached; retried after a failure), signer `getChainId()` every write (`switchChain()` if the signer has it). Mismatch → `ChainConfigurationError`, nothing sent.
 - `sendAndWait(data, { event, count })`: success requires `count` logs of `event` emitted by `contractAddress`, decoded with the embedded ABI (verified against live Base Sepolia logs). Event per write: anchor/anchorFor/batchAnchor `DataRegistered`, recordAccess `DataAccessed`, recordTransformation `DataTransformed`, mergeTransform `DataMerged`, setDataStatus `DataStatusChanged`, transferOwnership `DataOwnershipTransferred`, setDelegate `DelegateAuthorized`.
 - Pre-checks only proceed on `DataNotRegisteredError`; any other read error is thrown.
 - All chain error text goes through `rpcErrorMessage()` (drops viem URL/body sections, redacts URLs).
@@ -293,7 +293,7 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `NOT_IMPLEMENTED` | VerificationError | Feature not yet implemented |
 | `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config |
 | `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable (messages are URL-redacted via `rpcErrorMessage`) |
-| `CHAIN_RECEIPT_TIMEOUT` | ReceiptTimeoutError (a ChainConnectionError) | Tx sent, no receipt; has `txHash`, resume with `waitForTransaction()` |
+| `CHAIN_CONNECTION` | ReceiptTimeoutError (subclass) | Tx sent, no receipt; has `txHash` and `expected`: resume with `waitForTransaction(e.txHash, e.expected)` |
 | `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas, or no expected contract event in the receipt (`.originalError` non-enumerable) |
 | `CHAIN_VALIDATION` | ChainValidationError | Bad hash format, invalid input |
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
