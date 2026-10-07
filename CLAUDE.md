@@ -245,7 +245,9 @@ The gateway supports the x402 payment protocol for paid access with higher rate 
 | None | `payment: 'none'` | No payment header. Gets raw 402 responses. |
 | x402 paid | `payment: { wallet }` | Automatic USDC payments via `@x402/fetch`. No rate limits. |
 
-**Dependencies for x402 mode**: `@x402/fetch` and `@x402/evm` (optional peer deps, dynamically imported).
+**Dependencies for x402 mode**: `@x402/fetch` and `@x402/evm` (optional peer deps, dynamically imported). Peer range `>=2.5.0 <2.29.0`: the lockfile tests the lower bound, a CI step re-runs the payment tests on 2.28.0. Widen only after testing a newer version there.
+
+**Payment policy** (`src/payment.ts`, #106/#107/#110): the SDK's inner fetch (under `wrapFetchWithPayment`) reads every 402 first, refuses options outside the policy (`maxAmount`, USDC asset, `payTo`, `maxTimeoutSeconds`, scheme `exact`, EIP-3009 only, `onBeforePayment`) with `PaymentRefusedError`, and narrows `accepts` to the one approved option. `onBeforePaymentCreation` re-checks the library's selection before signing. On 2.23+ `setSpendControls` is aligned with `maxAmount`. GETs bypass the paying fetch; paid requests get `maxRetries = 0`; responses to paid requests are marked (`isPaidResponse`) so errors carry `payment`. `tests/unit/x402-policy.test.ts` drives the real libraries against a stubbed gateway.
 
 **Setup**:
 ```typescript

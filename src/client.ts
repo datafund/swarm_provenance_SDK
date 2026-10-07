@@ -28,12 +28,14 @@ import {
   StampError,
   NotaryError,
   PaymentRateLimitError,
+  PaymentError,
+  type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
 import { toBytes, isAddress } from './utils.js';
-import { createX402Fetch } from './payment.js';
+import { createX402Fetch, isPaidResponse, resolvePaymentPolicy } from './payment.js';
 
 const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
@@ -59,6 +61,8 @@ export class ProvenanceClient {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
     this.paymentMode = config.payment ?? 'free';
+    // Reject a bad payment policy now, not on the first paid request
+    if (typeof this.paymentMode === 'object') resolvePaymentPolicy(this.paymentMode);
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 2,
       baseDelayMs: config.retry?.baseDelayMs ?? 1000,
@@ -159,9 +163,9 @@ export class ProvenanceClient {
 
     if (!response.ok) {
       const error = await this.handleError(response);
-      throw new StampError(
-        error.suggestion ? `${error.message}. ${error.suggestion}` : error.message,
-        error.code,
+      throw withPayment(
+        new StampError(error.suggestion ? `${error.message}. ${error.suggestion}` : error.message, error.code),
+        error,
       );
     }
 
@@ -462,7 +466,7 @@ export class ProvenanceClient {
     if (!response.ok) {
       const error = await this.handleError(response);
       if (options.sign === 'notary') {
-        throw new NotaryError(error.message, error.code);
+        throw withPayment(new NotaryError(error.message, error.code), error);
       }
       throw error;
     }
@@ -564,16 +568,17 @@ export class ProvenanceClient {
     const url = `${this.gatewayUrl}${path}`;
 
     const isX402 = typeof this.paymentMode === 'object';
+    const method = (init?.method ?? 'GET').toUpperCase();
+    const isRead = method === 'GET' || method === 'HEAD';
 
-    // Choose fetch implementation
-    let fetchFn: typeof fetch;
-    if (isX402) {
-      fetchFn = await this.getX402Fetch();
-    } else {
-      fetchFn = fetch;
-    }
+    // Only writes go through the paying fetch: reads are never paid (#106)
+    const paying = isX402 && !isRead;
+    const fetchFn: typeof fetch = paying ? await this.getX402Fetch() : fetch;
+    // A paid request is never retried automatically: the gateway may already
+    // have settled the payment, and a retry would sign and pay again (#107)
+    const maxRetries = paying ? 0 : this.retryConfig.maxRetries;
 
-    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
@@ -609,7 +614,7 @@ export class ProvenanceClient {
         }
 
         // Retry on transient HTTP errors
-        if (attempt < this.retryConfig.maxRetries && this.isRetryableStatus(response.status)) {
+        if (attempt < maxRetries && this.isRetryableStatus(response.status)) {
           const delay = this.getRetryDelay(response, attempt);
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
@@ -617,8 +622,13 @@ export class ProvenanceClient {
 
         return response;
       } catch (error) {
-        if (error instanceof PaymentRateLimitError) {
+        // Rate limits and payment refusals/configuration errors pass through as-is
+        if (error instanceof PaymentError) {
           throw error;
+        }
+        if (paying && error instanceof Error && /payment/i.test(error.message)) {
+          // The x402 library failed to build or sign the payment; nothing was sent
+          throw new PaymentError(`Payment could not be created: ${error.message}`, 'PAYMENT_FAILED');
         }
         if (error instanceof Error && error.name === 'AbortError') {
           throw new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT');
@@ -663,7 +673,16 @@ export class ProvenanceClient {
       // Ignore JSON parse errors
     }
 
-    return new GatewayConnectionError(message, response.status, code, suggestion);
+    const error = new GatewayConnectionError(message, response.status, code, suggestion);
+    if (isPaidResponse(response)) {
+      // The request carried a signed payment: say so, with whatever the gateway reported
+      const payment = paymentAttempt(response);
+      error.payment = payment;
+      error.message += ` (a payment was sent with this request and may have been charged${
+        payment.transaction ? `; transaction ${payment.transaction}` : ''
+      })`;
+    }
+    return error;
   }
 }
 
@@ -692,4 +711,29 @@ function assertNotaryAddress(options: DownloadOptions): void {
       'INVALID_INPUT'
     );
   }
+}
+
+/** Payment details the gateway attached to a response for a paid request */
+function paymentAttempt(response: Response): PaymentAttempt {
+  const attempt: PaymentAttempt = { paymentSent: true };
+  let transaction = response.headers.get('X-Payment-Transaction') ?? undefined;
+  const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
+  if (!transaction && encoded) {
+    try {
+      const decoded = JSON.parse(atob(encoded)) as { transaction?: unknown };
+      if (typeof decoded.transaction === 'string' && decoded.transaction) transaction = decoded.transaction;
+    } catch {
+      // not decodable: leave the transaction unknown
+    }
+  }
+  if (transaction) attempt.transaction = transaction;
+  const status = response.headers.get('X-Payment-Status');
+  if (status) attempt.status = status;
+  return attempt;
+}
+
+/** Carry the payment flag over when a gateway error is re-thrown as another error type. */
+function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceError): E {
+  if (source.payment) target.payment = source.payment;
+  return target;
 }

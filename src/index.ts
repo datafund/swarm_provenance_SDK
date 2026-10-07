@@ -6,6 +6,7 @@ export type {
   ProvenanceClientConfig,
   PaymentWallet,
   X402PaymentConfig,
+  PaymentRequest,
   PaymentMode,
   GatewayRetryConfig,
   UploadOptions,
@@ -34,6 +35,8 @@ export {
   VerificationError,
   PaymentError,
   PaymentConfigurationError,
+  PaymentRefusedError,
+  type PaymentAttempt,
   PaymentRateLimitError,
 } from './errors.js';
 

@@ -50,6 +50,15 @@ jobs:
           test -f dist/chain/index.cjs
           test -f dist/chain/index.d.ts
 
+      - name: Payment policy on the newest tested @x402 (peer range upper bound)
+        run: |
+          # The lockfile pins @x402 2.5.0 (lower bound); 2.23+ adds a default $1 spend cap
+          # the policy must override (#110). Keep in sync with peerDependencies.
+          pnpm add -D @x402/fetch@2.28.0 @x402/evm@2.28.0
+          pnpm vitest run tests/unit/x402-policy.test.ts tests/unit/payment.test.ts
+          git checkout -- package.json pnpm-lock.yaml
+          pnpm install --frozen-lockfile
+
       - name: Verify viem guard (CJS chain entry, #99)
         run: |
           # viem present: the CJS chain entry loads
