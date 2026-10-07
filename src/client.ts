@@ -35,7 +35,7 @@ import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
 import { toBytes, isAddress } from './utils.js';
-import { createX402Fetch, isPaidResponse, resolvePaymentPolicy } from './payment.js';
+import { createX402Fetch, isPaidFailure, isPaidResponse, resolvePaymentPolicy } from './payment.js';
 
 const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
@@ -630,14 +630,20 @@ export class ProvenanceClient {
           // The x402 library failed to build or sign the payment; nothing was sent
           throw new PaymentError(`Payment could not be created: ${error.message}`, 'PAYMENT_FAILED');
         }
-        if (error instanceof Error && error.name === 'AbortError') {
-          throw new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT');
+        const failure =
+          error instanceof Error && error.name === 'AbortError'
+            ? new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT')
+            : new GatewayConnectionError(
+                error instanceof Error ? error.message : 'Failed to connect to gateway',
+                undefined,
+                'CONNECTION_FAILED'
+              );
+        if (isPaidFailure(error)) {
+          // No response, but the request carried a payment: the gateway may have settled it
+          failure.payment = { paymentSent: true };
+          failure.message += ' (a payment was sent with this request and may have been charged)';
         }
-        throw new GatewayConnectionError(
-          error instanceof Error ? error.message : 'Failed to connect to gateway',
-          undefined,
-          'CONNECTION_FAILED'
-        );
+        throw failure;
       } finally {
         clearTimeout(timeoutId);
       }

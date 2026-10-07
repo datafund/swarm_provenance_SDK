@@ -48,7 +48,7 @@ interface Seen {
 
 let seen: Seen[];
 let accepts: Array<Record<string, unknown>>;
-let afterPayment: { status: number; headers?: Record<string, string>; body?: unknown };
+let afterPayment: { status: number; headers?: Record<string, string>; body?: unknown; hang?: boolean };
 
 vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
   const request = new Request(input, init);
@@ -64,6 +64,12 @@ vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
         headers: { 'content-type': 'application/json' },
       }),
     );
+  }
+  if (afterPayment.hang) {
+    // Never answers: only the client's timeout (AbortSignal) ends the request
+    return new Promise<Response>((_resolve, reject) => {
+      request.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    });
   }
   return Promise.resolve(
     new Response(JSON.stringify(afterPayment.body ?? { reference: 'b'.repeat(64) }), {
@@ -185,6 +191,23 @@ describe('a paid request is never retried (#107)', () => {
     expect(error).toBeInstanceOf(GatewayConnectionError);
     expect((error as GatewayConnectionError).payment).toEqual({ paymentSent: true, transaction: '0xabc123' });
     expect((error as Error).message).toMatch(/may have been charged; transaction 0xabc123/);
+  });
+
+  it('a timeout after payment produces exactly one payment and an error that says so', async () => {
+    afterPayment = { status: 200, hang: true };
+    const error = await new ProvenanceClient({
+      gatewayUrl: 'http://gateway.test',
+      payment: { wallet },
+      timeout: 50,
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+
+    expect(payments()).toBe(1);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('TIMEOUT');
+    expect((error as GatewayConnectionError).payment).toEqual({ paymentSent: true });
   });
 
   it('the payment flag survives the NotaryError conversion (sign: notary)', async () => {

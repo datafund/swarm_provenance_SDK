@@ -158,8 +158,17 @@ export function checkPaymentRequest(
   return reasons;
 }
 
-/** Responses to requests that carried a payment (see isPaidResponse) */
+/** Responses to, and errors from, requests that carried a payment (see isPaidResponse/isPaidFailure) */
 const paidResponses = new WeakSet<Response>();
+const paidFailures = new WeakSet<object>();
+
+/**
+ * Whether this thrown error (timeout, connection reset) came from a request that
+ * carried a payment: it may have been settled although no response arrived.
+ */
+export function isPaidFailure(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && paidFailures.has(error);
+}
 
 /**
  * Whether this response answers a request that carried a payment, i.e. a
@@ -272,7 +281,13 @@ export async function createX402Fetch(config: X402PaymentConfig): Promise<typeof
   // marks responses to paid requests.
   const policedFetch: typeof fetch = async (input, init) => {
     const paid = isRequest(input) && (input.headers.has('PAYMENT-SIGNATURE') || input.headers.has('X-PAYMENT'));
-    const response = await fetch(input, init);
+    let response: Response;
+    try {
+      response = await fetch(input, init);
+    } catch (error) {
+      if (paid && typeof error === 'object' && error !== null) paidFailures.add(error);
+      throw error;
+    }
     if (paid) {
       paidResponses.add(response);
       return response;
