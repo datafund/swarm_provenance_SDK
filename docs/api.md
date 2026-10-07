@@ -16,6 +16,40 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 |----------|------|---------|-------------|
 | `gatewayUrl` | `string` | `https://provenance-gateway.datafund.io` | Gateway URL |
 | `timeout` | `number` | `30000` | Request timeout in milliseconds |
+| `payment` | `'free' \| 'none' \| X402PaymentConfig` | `'free'` | Payment mode (see below) |
+| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). An x402 attempt that sent a payment is never retried; unpaid attempts are |
+
+#### X402PaymentConfig
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `wallet` | `PaymentWallet` | required | Signs payment authorizations (viem `WalletClient` with an account, or `toClientEvmSigner()`) |
+| `network` | `` `${string}:${string}` `` | `'eip155:84532'` | x402 v2 network (CAIP-2) |
+| `v1Network` | `string` | `'base-sepolia'` | x402 v1 network name |
+| `maxAmount` | `string` | `'1'` on Base Sepolia with test USDC; **required** elsewhere | Largest single payment, in tokens (`'0.50'`) |
+| `payTo` | `string[]` | any | Allowed recipients |
+| `asset` | `string` | the network's USDC | Token to pay with |
+| `assetDecimals` | `number` | `6`; **required** with `asset` | Decimals of `asset` |
+| `maxTimeoutSeconds` | `number` | `600` | Longest authorization validity accepted |
+| `onBeforePayment` | `(p: PaymentRequest) => boolean \| void \| Promise<…>` | none | Return `false` (or throw) to refuse a payment. A payment may still not follow (signing fails, timeout) |
+| `payForReads` | `boolean` | `false` | Pay for GET/HEAD too; otherwise reads use the free tier |
+
+A payment outside this policy, of a scheme other than `exact`, or using a transfer method
+other than EIP-3009 is refused before anything is signed (`PaymentRefusedError`). An invalid
+config throws `PaymentConfigurationError` in the constructor. Reads use the free tier unless
+`payForReads`. An attempt that sent a payment is never retried; unpaid attempts retry as usual.
+
+```typescript
+interface PaymentRequest {
+  x402Version: number;
+  network: string;
+  scheme: string;
+  asset: string;
+  amount: string;            // smallest unit (integer string)
+  payTo: string;
+  maxTimeoutSeconds: number;
+}
+```
 
 ### Methods
 
@@ -285,6 +319,8 @@ Base error class.
 ```typescript
 class ProvenanceError extends Error {
   code?: string;
+  // Set when the failed request carried an x402 payment: it may have been charged
+  payment?: { paymentSent: true; transaction?: string; status?: string };
 }
 ```
 
@@ -297,6 +333,22 @@ class GatewayConnectionError extends ProvenanceError {
   statusCode?: number;
 }
 ```
+
+### PaymentRefusedError
+
+`code: 'PAYMENT_REFUSED'`. A payment the gateway asked for broke the payment policy or was
+vetoed by `onBeforePayment`; nothing was signed. `refusals` lists each offered option with
+its reasons.
+
+### PaymentConfigurationError
+
+`code: 'PAYMENT_CONFIGURATION'`. Invalid x402 config, or missing `@x402` packages.
+
+### PaymentError
+
+`code: 'PAYMENT_FAILED'` when the x402 library could not build or sign a payment (nothing was
+sent); `code: 'PAYMENT_UNCONFIRMED'` when the payment was sent but the response could not be
+processed (`payment` is set).
 
 ### StampError
 

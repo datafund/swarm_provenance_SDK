@@ -35,6 +35,52 @@ export interface X402PaymentConfig {
   network?: `${string}:${string}`;
   /** Simple network name for x402 v1 (default: 'base-sepolia') */
   v1Network?: string;
+  /**
+   * Largest single payment the SDK will sign, in whole tokens as a decimal
+   * string (e.g. '0.50' = 50 cents of USDC). Required on Base mainnet; on
+   * testnets it defaults to '1'. A 402 asking for more is refused before signing.
+   */
+  maxAmount?: string;
+  /** Recipients (`payTo`) the SDK may pay. If set, payments to any other address are refused. */
+  payTo?: string[];
+  /** Longest authorization validity the gateway may ask for, in seconds (default: 600). */
+  maxTimeoutSeconds?: number;
+  /**
+   * Token to pay with. Defaults to the network's USDC; required on networks
+   * without a known USDC (payments are refused otherwise).
+   */
+  asset?: string;
+  /** Decimals of `asset` (default: 6, as USDC) */
+  assetDecimals?: number;
+  /**
+   * Called before a payment is handed to the x402 library for signing, after the
+   * checks above passed. Return false (or throw) to refuse it. A payment may
+   * still not happen after this returns (signing fails, timeout), so do not
+   * count spend here.
+   */
+  onBeforePayment?: (payment: PaymentRequest) => boolean | void | Promise<boolean | void>;
+  /**
+   * Pay for reads (GET/HEAD) too. Default false: reads use the free tier
+   * (`X-Payment-Mode: free`, rate-limited) and only writes are paid.
+   */
+  payForReads?: boolean;
+}
+
+/** A payment the gateway asked for, as shown to `onBeforePayment` and in refusals */
+export interface PaymentRequest {
+  /** x402 protocol version of the 402 response */
+  x402Version: number;
+  /** Network as the gateway named it (CAIP-2 for v2, e.g. 'base-sepolia' for v1) */
+  network: string;
+  scheme: string;
+  /** Token contract */
+  asset: string;
+  /** Amount in the token's smallest unit (integer string) */
+  amount: string;
+  /** Recipient */
+  payTo: string;
+  /** Authorization validity the gateway asked for */
+  maxTimeoutSeconds: number;
 }
 
 /**

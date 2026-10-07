@@ -54,10 +54,26 @@ By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-l
 **Network:** payments default to **Base Sepolia** (`eip155:84532`, testnet USDC). Set
 `payment.network` / `payment.v1Network` for another network.
 
-**Read before enabling:** the SDK currently pays whatever the gateway's 402 response asks
-for. There is no amount cap and no recipient or asset pinning yet (#106), and the payment
-receipt is not returned to you (#111). Use a dedicated wallet holding only what you are
-prepared to spend, and only with a gateway you trust.
+**Payment policy.** Before signing, every payment the gateway asks for must pass these checks,
+or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing is signed:
+
+| Option | Default | Checks |
+|--------|---------|--------|
+| `maxAmount` | `'1'` on Base Sepolia with test USDC; **required everywhere else** | Largest single payment, in tokens (`'0.50'` = 50 cents of USDC) |
+| `payTo` | any | Allowed recipients |
+| `asset` + `assetDecimals` | the network's USDC (6) | Token to pay with; both required on networks without a known USDC |
+| `maxTimeoutSeconds` | `600` | Longest authorization validity the gateway may ask for |
+| `onBeforePayment` | none | `(payment) => boolean`: sees amount, asset, recipient, network; return `false` to refuse. A payment may still not happen after it (signing fails, timeout): do not count spend here |
+| `payForReads` | `false` | Also pay for reads; by default reads use the free tier (`X-Payment-Mode: free`, rate-limited) |
+
+Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Permit2
+approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
+A request that sent a payment is never retried automatically (unpaid attempts still retry
+on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
+(`{ paymentSent: true, transaction? }`). A timeout while the wallet is still approving the
+payment is not reported as paid: nothing was sent. The receipt for a
+successful payment is not returned yet (#111). Tested with `@x402/*` 2.5.0 to 2.28.x.
+x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
 **Server (Node.js):** load the key from the environment or a secret store, never from source code:
 
@@ -76,9 +92,12 @@ const wallet = createWalletClient({
   transport: http(),
 }).extend(publicActions);
 
-const client = new ProvenanceClient({ payment: { wallet } });
+const client = new ProvenanceClient({
+  // Optionally also pin the recipient: payTo: ['<the gateway operator's payout address>']
+  payment: { wallet, maxAmount: '0.10' },
+});
 
-// Requests that receive 402 responses are automatically paid via USDC
+// Requests that receive 402 responses are paid in USDC, within the policy
 const result = await client.upload('Hello, World!');
 ```
 
@@ -118,7 +137,7 @@ const client = new ProvenanceClient({ payment: { wallet } });
 Payment modes:
 - `'free'` (default) — sends `X-Payment-Mode: free` header, rate-limited
 - `'none'` — no payment header, gets raw 402 responses
-- `{ wallet }` — automatic x402 USDC payments via `@x402/fetch`
+- `{ wallet, maxAmount?, payTo?, ... }` — automatic x402 USDC payments via `@x402/fetch`, within the payment policy above
 
 ### Blockchain Anchoring
 
@@ -551,6 +570,13 @@ message comes from Node itself.
 - Raw documents (`raw: true`): `content_hash` is SHA-256 of canonical JSON (the gateway and
   Python tools' convention) instead of `JSON.stringify(data)` (#114). This version still
   accepts the old form; SDK 0.6.x rejects documents uploaded with this version.
+- x402 mode enforces a payment policy (#106): `maxAmount` (default `'1'` on Base Sepolia test
+  USDC, required elsewhere), USDC only (or `asset` + `assetDecimals`), `exact`/EIP-3009 only,
+  validity ≤ 600 s, optional `payTo` and `onBeforePayment`. Refusals throw
+  `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
+  back in), and attempts that sent a payment are not retried (#107); a failure after payment
+  carries `error.payment`. On `@x402/*` 2.23+ the library's $1 default cap is
+  replaced by `maxAmount` (#110). Peer range narrowed to the tested `>=2.5.0 <2.29.0`.
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.

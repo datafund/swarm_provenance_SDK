@@ -243,9 +243,11 @@ The gateway supports the x402 payment protocol for paid access with higher rate 
 |------|--------|----------|
 | Free (default) | `payment: 'free'` | Sends `X-Payment-Mode: free` header. Rate-limited (3 req/min). |
 | None | `payment: 'none'` | No payment header. Gets raw 402 responses. |
-| x402 paid | `payment: { wallet }` | Automatic USDC payments via `@x402/fetch`. No rate limits. |
+| x402 paid | `payment: { wallet, maxAmount?, ... }` | Writes paid in USDC via `@x402/fetch`, within the payment policy. Reads use the free tier (rate-limited) unless `payForReads`. |
 
-**Dependencies for x402 mode**: `@x402/fetch` and `@x402/evm` (optional peer deps, dynamically imported).
+**Dependencies for x402 mode**: `@x402/fetch` and `@x402/evm` (optional peer deps, dynamically imported). Peer range `>=2.5.0 <2.29.0`: the lockfile tests the lower bound, a CI step re-runs the payment tests on 2.23.0 (first with the $1 spend cap) and 2.28.0. Widen only after testing a newer version there.
+
+**Payment policy** (`src/payment.ts`, #106/#107/#110): the SDK's inner fetch (under `wrapFetchWithPayment`) reads every 402 first, refuses options outside the policy (`maxAmount`, USDC asset, `payTo`, `maxTimeoutSeconds`, scheme `exact`, EIP-3009 only, `onBeforePayment`) with `PaymentRefusedError`, and narrows `accepts` to the one approved option. `onBeforePaymentCreation` re-checks the library's selection before signing. On 2.23+ `setSpendControls` is aligned with `maxAmount`. Reads use the free tier unless `payForReads`. `createX402Transport()` sets up once and hands out `fetchFor(state)` per request attempt: a fresh x402 client whose hooks, and the SDK's inner fetch, record into that attempt's `PaymentAttemptState` (`paid` only when a payment header goes out with a live signal; `refusal`; `creationFailure`). `requestFailure()` classifies errors from that state, never from error text. Paid attempts are never retried and their errors carry `payment`; unpaid attempts retry normally. The client timeout bounds the whole attempt, including `onBeforePayment` and wallet signing (`untilAborted`). The policy checks the network configured for the 402's x402 version, and the amount field that version signs. `maxAmount` defaults only on Base Sepolia test USDC. `tests/unit/x402-policy.test.ts` drives the real libraries against a stubbed gateway.
 
 **Setup**:
 ```typescript
@@ -293,6 +295,9 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
 | `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object |
 | `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
+| `PAYMENT_REFUSED` | PaymentRefusedError | 402 outside the payment policy, or vetoed by `onBeforePayment`; nothing signed |
+| `PAYMENT_FAILED` | PaymentError | x402 library could not build or sign the payment; nothing sent |
+| `PAYMENT_UNCONFIRMED` | PaymentError | Payment sent, but the response could not be processed; `error.payment` is set |
 
 Note: `GatewayConnectionError` may include a `.suggestion` field with recovery hints from the gateway.
 Both `ProvenanceClient` and `ChainClient` accept a `retry` config (default: 2 retries, 1s exponential backoff) for transient failures (502/503/nonce errors).
