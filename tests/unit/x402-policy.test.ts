@@ -495,3 +495,35 @@ describe('one network setting (#108)', () => {
     expect(() => client(config as Partial<X402PaymentConfig>)).toThrow(message);
   });
 });
+
+describe('review round 1 (#140)', () => {
+  const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+  it("a config with only v1Network: 'base' (the old mainnet switch) still works", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    await client({ v1Network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it('any eip155 chain ID is compared, not only the Base names', () => {
+    expect(() => client({ network: 'eip155:137', v1Network: 'base', maxAmount: '1' })).toThrow(/different chains/);
+  });
+
+  it.each([['constructor'], ['__proto__'], ['toString']])('a prototype key %j is not a network', (network) => {
+    expect(() => client({ network: network as never, maxAmount: '1' })).toThrow(PaymentConfigurationError);
+  });
+
+  it.each([[''], ['eip155:8453'], ['Base Mainnet']])('rejects v1Network %j', (v1Network) => {
+    expect(() => client({ network: 'base', v1Network, maxAmount: '1' })).toThrow(/v1Network must be an x402 v1 network name/);
+  });
+
+  it('accepts any valid CAIP-2 ID (underscores included) and rejects malformed ones', () => {
+    expect(() => client({ network: 'starknet:SN_MAIN', v1Network: 'starknet', maxAmount: '1' })).not.toThrow();
+    expect(() => client({ network: 'a:b', v1Network: 'x', maxAmount: '1' })).toThrow(/CAIP-2/);
+  });
+
+  it('the mismatch error names the default when network was not set', () => {
+    expect(() => client({ network: undefined, v1Network: 'base', maxAmount: '1', asset: undefined } as never)).not.toThrow();
+    expect(() => client({ network: 'base-sepolia', v1Network: 'base', maxAmount: '1' })).toThrow(/payment.network base-sepolia/);
+  });
+});

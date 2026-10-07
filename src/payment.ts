@@ -3,25 +3,43 @@ import { PaymentConfigurationError, PaymentRefusedError } from './errors.js';
 import { isAddress, base64ToBytes, bytesToBase64 } from './utils.js';
 
 /**
- * USDC per network, as in @x402/evm's default asset table. x402 v2 names
- * networks in CAIP-2, v1 by name.
+ * The networks the SDK knows, one record each: the x402 v1 name, the v2
+ * CAIP-2 ID, the EVM chain ID, USDC (from @x402/evm's default asset table)
+ * and whether it is a testnet. Everything per-network derives from this.
  */
-export const USDC_BY_NETWORK: Readonly<Record<string, string>> = Object.freeze({
-  'eip155:84532': '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
-  'base-sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
-  'eip155:8453': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  base: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-});
+const NETWORKS = Object.freeze([
+  Object.freeze({
+    name: 'base-sepolia',
+    v2: 'eip155:84532' as const,
+    chainId: 84532,
+    usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    testnet: true,
+  }),
+  Object.freeze({
+    name: 'base',
+    v2: 'eip155:8453' as const,
+    chainId: 8453,
+    usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    testnet: false,
+  }),
+]);
 
-/** Networks where maxAmount may default: test tokens only. Everywhere else it is required. */
-const TESTNETS = new Set(['eip155:84532', 'base-sepolia']);
+/** USDC per network identifier (v1 name and v2 CAIP-2) */
+export const USDC_BY_NETWORK: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(NETWORKS.flatMap((n) => [[n.name, n.usdc], [n.v2, n.usdc]]))
+);
+
 const DEFAULT_TESTNET_MAX_AMOUNT = '1';
 
-/** Known networks: one name selects both x402 identifiers (#108) */
-const KNOWN_NETWORKS: Readonly<Record<string, { v2: `${string}:${string}`; v1: string }>> = {
-  'base-sepolia': { v2: 'eip155:84532', v1: 'base-sepolia' },
-  base: { v2: 'eip155:8453', v1: 'base' },
-};
+/** CAIP-2: namespace 3-8 of [-a-z0-9], reference 1-32 of [-_a-zA-Z0-9] */
+const CAIP2 = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
+
+/** EVM chain ID of a network identifier: from `eip155:<id>`, or a known v1 name */
+function chainIdOf(id: string): number | undefined {
+  const eip155 = /^eip155:(\d+)$/.exec(id);
+  if (eip155) return Number(eip155[1]);
+  return NETWORKS.find((n) => n.name === id)?.chainId;
+}
 
 /**
  * The x402 v2 (CAIP-2) and v1 network identifiers for a config. The gateway
@@ -29,38 +47,40 @@ const KNOWN_NETWORKS: Readonly<Record<string, { v2: `${string}:${string}`; v1: s
  * every payment, so it is a configuration error.
  */
 function resolveNetworks(config: X402PaymentConfig): { network: `${string}:${string}`; v1Network: string } {
-  const requested = config.network ?? 'base-sepolia';
-  const known = KNOWN_NETWORKS[requested];
-  const network = known ? known.v2 : (requested as `${string}:${string}`);
-  if (!known && !/^[a-z0-9-]+:[a-zA-Z0-9-]+$/.test(network)) {
+  if (config.v1Network !== undefined && (typeof config.v1Network !== 'string' || !/^[-a-z0-9]+$/.test(config.v1Network))) {
+    throw new PaymentConfigurationError(
+      `payment.v1Network must be an x402 v1 network name such as 'base', got ${JSON.stringify(config.v1Network)}`
+    );
+  }
+  // Only v1Network set (the old way to pick mainnet): follow it
+  const fromV1 = config.network === undefined && config.v1Network !== undefined
+    ? NETWORKS.find((n) => n.name === config.v1Network)?.v2
+    : undefined;
+  const requested = config.network ?? fromV1 ?? 'base-sepolia';
+  const known = NETWORKS.find((n) => n.name === requested);
+  const network = known ? known.v2 : requested;
+  if (!known && !(typeof network === 'string' && CAIP2.test(network))) {
     throw new PaymentConfigurationError(
       `payment.network must be 'base', 'base-sepolia' or a CAIP-2 ID such as 'eip155:8453', got ${JSON.stringify(requested)}`
     );
   }
-  const implied = Object.values(KNOWN_NETWORKS).find((n) => n.v2 === network)?.v1;
-  const v1Network = config.v1Network ?? implied;
+  const v1Network = config.v1Network ?? NETWORKS.find((n) => n.v2 === network)?.name;
   if (v1Network === undefined) {
     throw new PaymentConfigurationError(
       `payment.v1Network is required for ${network}: the gateway names networks the x402 v1 way (e.g. 'base')`
     );
   }
-  const chainA = CHAIN_OF_NETWORK[network];
-  const chainB = CHAIN_OF_NETWORK[v1Network];
+  const chainA = chainIdOf(network);
+  const chainB = chainIdOf(v1Network);
   if (chainA !== undefined && chainB !== undefined && chainA !== chainB) {
+    const networkSetting = config.network === undefined ? `the default network ${network}` : `payment.network ${requested}`;
     throw new PaymentConfigurationError(
-      `payment.network ${requested} and payment.v1Network ${v1Network} are different chains; set one network: 'base' or 'base-sepolia'`
+      `${networkSetting} and payment.v1Network ${v1Network} are different chains; set one network: 'base' or 'base-sepolia'`
     );
   }
-  return { network, v1Network };
+  return { network: network as `${string}:${string}`, v1Network };
 }
 
-/** EVM chain ID behind each known network name (v2 CAIP-2 and v1 names) */
-const CHAIN_OF_NETWORK: Readonly<Record<string, number>> = {
-  'eip155:84532': 84532,
-  'base-sepolia': 84532,
-  'eip155:8453': 8453,
-  base: 8453,
-};
 const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 
 /** The checks every payment must pass before the SDK signs it (#106). */
@@ -83,7 +103,8 @@ export interface PaymentPolicy {
  */
 export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
   const { network, v1Network } = resolveNetworks(config);
-  const testnetOnly = TESTNETS.has(network) && TESTNETS.has(v1Network) && config.asset === undefined;
+  const isTestnet = (id: string) => NETWORKS.some((n) => n.testnet && (n.name === id || n.v2 === id));
+  const testnetOnly = isTestnet(network) && isTestnet(v1Network) && config.asset === undefined;
 
   if (config.maxAmount === undefined && !testnetOnly) {
     throw new PaymentConfigurationError(
