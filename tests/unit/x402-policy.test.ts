@@ -44,18 +44,29 @@ interface Seen {
   method: string;
   path: string;
   paid: boolean;
+  /** X-Payment-Mode header, if sent */
+  mode?: string;
 }
 
 let seen: Seen[];
 let accepts: Array<Record<string, unknown>>;
 let afterPayment: { status: number; headers?: Record<string, string>; body?: unknown; hang?: boolean };
+/** Statuses to answer unpaid requests with before the 402 (e.g. a transient 503) */
+let beforePayment: number[];
 
 vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
   const request = new Request(input, init);
+  // Like real fetch: an already-aborted request is rejected without being sent
+  if (request.signal.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'));
   const paid = request.headers.has('X-PAYMENT') || request.headers.has('PAYMENT-SIGNATURE');
   const path = new URL(request.url).pathname;
-  seen.push({ method: request.method, path, paid });
+  const mode = request.headers.get('X-Payment-Mode') ?? undefined;
+  seen.push({ method: request.method, path, paid, ...(mode ? { mode } : {}) });
+  if (request.headers.has('x-provenance-sdk-attempt')) throw new Error('internal attempt header leaked to the gateway');
 
+  if (!paid && beforePayment.length > 0) {
+    return Promise.resolve(new Response('{"detail":"busy"}', { status: beforePayment.shift()! }));
+  }
   if (!paid) {
     // The gateway wraps the x402 payload in FastAPI's `detail`
     return Promise.resolve(
@@ -89,6 +100,7 @@ beforeEach(() => {
   seen = [];
   accepts = [requirement()];
   afterPayment = { status: 200 };
+  beforePayment = [];
 });
 afterAll(() => {
   vi.unstubAllGlobals();
@@ -158,17 +170,31 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
     expect(asked.map((p) => p.amount)).toEqual(['10000']);
   });
 
-  it('GET requests never go through the paying fetch', async () => {
+  it('GET requests use the free tier, not the paying fetch', async () => {
     const error = await client().download('c'.repeat(64)).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(GatewayConnectionError);
     expect((error as GatewayConnectionError).statusCode).toBe(402);
-    expect(seen).toEqual([{ method: 'GET', path: `/api/v1/data/${'c'.repeat(64)}`, paid: false }]);
+    expect(seen).toEqual([{ method: 'GET', path: `/api/v1/data/${'c'.repeat(64)}`, paid: false, mode: 'free' }]);
   });
 
-  it('requires maxAmount on Base mainnet, at construction', () => {
+  it('payForReads: true pays for a GET within the policy', async () => {
+    afterPayment = { status: 200, body: { data: 'aGk=', content_hash: 'x', stamp_id: STAMP } };
+    await client({ payForReads: true }).download('c'.repeat(64)).catch(() => undefined);
+    expect(payments()).toBe(1);
+    expect(seen[0]?.mode).toBeUndefined();
+  });
+
+  it('requires maxAmount everywhere except Base Sepolia test USDC, at construction', () => {
     expect(() => client({ network: 'eip155:8453', v1Network: 'base' })).toThrow(PaymentConfigurationError);
-    expect(() => client({ v1Network: 'base' })).toThrow(/maxAmount is required on Base mainnet/);
+    expect(() => client({ v1Network: 'base' })).toThrow(/maxAmount is required/);
+    expect(() => client({ network: 'eip155:137' })).toThrow(/maxAmount is required/);
     expect(() => client({ network: 'eip155:8453', v1Network: 'base', maxAmount: '0.25' })).not.toThrow();
+  });
+
+  it('a custom asset requires assetDecimals', () => {
+    const asset = '0x2222222222222222222222222222222222222222';
+    expect(() => client({ asset, maxAmount: '1' })).toThrow(/assetDecimals is required/);
+    expect(() => client({ asset, maxAmount: '1', assetDecimals: 18 })).not.toThrow();
   });
 
   it.each([['-1'], ['1e3'], ['0.1234567'], ['abc']])('rejects a malformed maxAmount %j at construction', (maxAmount) => {
@@ -177,6 +203,32 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
 });
 
 describe('a paid request is never retried (#107)', () => {
+  it('an unpaid write is still retried on a transient 503 (no payment was sent)', async () => {
+    beforePayment = [503];
+    await new ProvenanceClient({
+      gatewayUrl: 'http://gateway.test',
+      payment: { wallet },
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    }).upload('hello', { stampId: STAMP });
+    expect(seen.map((s) => s.paid)).toEqual([false, false, true]);
+    expect(payments()).toBe(1);
+  });
+
+  it('a timeout while the payment is still being approved is not reported as paid', async () => {
+    const error = await new ProvenanceClient({
+      gatewayUrl: 'http://gateway.test',
+      payment: { wallet, onBeforePayment: () => new Promise((resolve) => setTimeout(() => resolve(true), 100)) },
+      timeout: 30,
+      retry: { maxRetries: 0 },
+    })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+
+    expect((error as GatewayConnectionError).code).toBe('TIMEOUT');
+    expect((error as GatewayConnectionError).payment).toBeUndefined();
+    expect(payments()).toBe(0);
+  });
+
   it('a 502 after payment produces exactly one payment and an error that says so', async () => {
     afterPayment = { status: 502, headers: { 'X-Payment-Transaction': '0xabc123' }, body: { detail: 'Bee upload failed' } };
     const error = await new ProvenanceClient({

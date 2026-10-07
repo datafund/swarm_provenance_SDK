@@ -13,7 +13,8 @@ export const USDC_BY_NETWORK: Readonly<Record<string, string>> = Object.freeze({
   base: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
 });
 
-const MAINNETS = new Set(['eip155:8453', 'base']);
+/** Networks where maxAmount may default: test tokens only. Everywhere else it is required. */
+const TESTNETS = new Set(['eip155:84532', 'base-sepolia']);
 const DEFAULT_TESTNET_MAX_AMOUNT = '1';
 const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 
@@ -36,15 +37,19 @@ export interface PaymentPolicy {
 export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
   const network = config.network ?? 'eip155:84532';
   const v1Network = config.v1Network ?? 'base-sepolia';
-  const mainnet = MAINNETS.has(network) || MAINNETS.has(v1Network);
+  const testnetOnly = TESTNETS.has(network) && TESTNETS.has(v1Network) && config.asset === undefined;
 
-  if (config.maxAmount === undefined && mainnet) {
+  if (config.maxAmount === undefined && !testnetOnly) {
     throw new PaymentConfigurationError(
-      'payment.maxAmount is required on Base mainnet: the largest single payment to sign, e.g. maxAmount: "0.50"'
+      'payment.maxAmount is required except on Base Sepolia with test USDC: the largest single payment to sign, e.g. maxAmount: "0.50"'
     );
   }
   const maxAmount = config.maxAmount ?? DEFAULT_TESTNET_MAX_AMOUNT;
 
+  // A custom token's decimals cannot be assumed: '1' means 10^6 units only for USDC
+  if (config.asset !== undefined && config.assetDecimals === undefined) {
+    throw new PaymentConfigurationError('payment.assetDecimals is required with payment.asset');
+  }
   const decimals = config.assetDecimals ?? 6;
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
     throw new PaymentConfigurationError(`payment.assetDecimals must be an integer 0-36, got ${String(decimals)}`);
@@ -158,24 +163,20 @@ export function checkPaymentRequest(
   return reasons;
 }
 
-/** Responses to, and errors from, requests that carried a payment (see isPaidResponse/isPaidFailure) */
-const paidResponses = new WeakSet<Response>();
-const paidFailures = new WeakSet<object>();
+/**
+ * Internal header tagging each client request attempt, so the SDK can tell
+ * afterwards whether that attempt sent a payment. Stripped before sending.
+ */
+export const ATTEMPT_HEADER = 'x-provenance-sdk-attempt';
+const paidAttempts = new Set<string>();
 
 /**
- * Whether this thrown error (timeout, connection reset) came from a request that
- * carried a payment: it may have been settled although no response arrived.
+ * Whether the request attempt tagged `attemptId` sent a signed payment to the
+ * gateway (the gateway may have settled it, whatever happened next). Each id is
+ * reported once: the record is removed when read.
  */
-export function isPaidFailure(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && paidFailures.has(error);
-}
-
-/**
- * Whether this response answers a request that carried a payment, i.e. a
- * payment may have been settled for it even if the response is an error.
- */
-export function isPaidResponse(response: Response): boolean {
-  return paidResponses.has(response);
+export function takePaidAttempt(attemptId: string): boolean {
+  return paidAttempts.delete(attemptId);
 }
 
 function isRequest(input: unknown): input is Request {
@@ -192,9 +193,10 @@ function isRequest(input: unknown): input is Request {
  * Dynamically imports @x402/fetch and @x402/evm — throws PaymentConfigurationError
  * if they are not installed.
  */
-export async function createX402Fetch(config: X402PaymentConfig): Promise<typeof fetch> {
-  const policy = resolvePaymentPolicy(config);
-
+export async function createX402Fetch(
+  config: X402PaymentConfig,
+  policy: PaymentPolicy = resolvePaymentPolicy(config)
+): Promise<typeof fetch> {
   let x402Fetch: typeof import('@x402/fetch');
   let x402Evm: typeof import('@x402/evm');
 
@@ -280,19 +282,22 @@ export async function createX402Fetch(config: X402PaymentConfig): Promise<typeof
   // policy on every offered option before the library can choose one, and
   // marks responses to paid requests.
   const policedFetch: typeof fetch = async (input, init) => {
+    let request: RequestInfo | URL = input;
+    let attemptId: string | null = null;
+    if (isRequest(input) && input.headers.has(ATTEMPT_HEADER)) {
+      attemptId = input.headers.get(ATTEMPT_HEADER);
+      const headers = new Headers(input.headers);
+      headers.delete(ATTEMPT_HEADER);
+      request = new Request(input, { headers });
+    }
     const paid = isRequest(input) && (input.headers.has('PAYMENT-SIGNATURE') || input.headers.has('X-PAYMENT'));
-    let response: Response;
-    try {
-      response = await fetch(input, init);
-    } catch (error) {
-      if (paid && typeof error === 'object' && error !== null) paidFailures.add(error);
-      throw error;
-    }
-    if (paid) {
-      paidResponses.add(response);
-      return response;
-    }
-    if (response.status !== 402) return response;
+    // Record the payment only if the request can actually leave: an already
+    // aborted signal (e.g. the timeout fired while the wallet was signing) fails
+    // before anything is sent.
+    if (paid && attemptId && !(isRequest(input) && input.signal.aborted)) paidAttempts.add(attemptId);
+
+    const response = await fetch(request, init);
+    if (paid || response.status !== 402) return response;
     return policePaymentRequired(response, policy);
   };
 

@@ -26,17 +26,18 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `wallet` | `PaymentWallet` | required | Signs payment authorizations (viem `WalletClient` with an account, or `toClientEvmSigner()`) |
 | `network` | `` `${string}:${string}` `` | `'eip155:84532'` | x402 v2 network (CAIP-2) |
 | `v1Network` | `string` | `'base-sepolia'` | x402 v1 network name |
-| `maxAmount` | `string` | `'1'` on testnets; **required** on Base mainnet | Largest single payment, in tokens (`'0.50'`) |
+| `maxAmount` | `string` | `'1'` on Base Sepolia with test USDC; **required** elsewhere | Largest single payment, in tokens (`'0.50'`) |
 | `payTo` | `string[]` | any | Allowed recipients |
 | `asset` | `string` | the network's USDC | Token to pay with |
-| `assetDecimals` | `number` | `6` | Decimals of `asset` |
+| `assetDecimals` | `number` | `6`; **required** with `asset` | Decimals of `asset` |
 | `maxTimeoutSeconds` | `number` | `600` | Longest authorization validity accepted |
-| `onBeforePayment` | `(p: PaymentRequest) => boolean \| void \| Promise<…>` | none | Return `false` (or throw) to refuse a payment |
+| `onBeforePayment` | `(p: PaymentRequest) => boolean \| void \| Promise<…>` | none | Return `false` (or throw) to refuse a payment. A payment may still not follow (signing fails, timeout) |
+| `payForReads` | `boolean` | `false` | Pay for GET/HEAD too; otherwise reads use the free tier |
 
 A payment outside this policy, of a scheme other than `exact`, or using a transfer method
 other than EIP-3009 is refused before anything is signed (`PaymentRefusedError`). An invalid
-config throws `PaymentConfigurationError` in the constructor. Only non-GET requests go through
-the paying fetch.
+config throws `PaymentConfigurationError` in the constructor. Reads use the free tier unless
+`payForReads`. An attempt that sent a payment is never retried; unpaid attempts retry as usual.
 
 ```typescript
 interface PaymentRequest {
@@ -345,7 +346,9 @@ its reasons.
 
 ### PaymentError
 
-`code: 'PAYMENT_FAILED'` when the x402 library could not build or sign a payment (nothing was sent).
+`code: 'PAYMENT_FAILED'` when the x402 library could not build or sign a payment (nothing was
+sent); `code: 'PAYMENT_UNCONFIRMED'` when the payment was sent but the response could not be
+processed (`payment` is set).
 
 ### StampError
 

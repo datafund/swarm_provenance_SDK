@@ -53,10 +53,17 @@ export interface X402PaymentConfig {
   /** Decimals of `asset` (default: 6, as USDC) */
   assetDecimals?: number;
   /**
-   * Called before each payment is signed, after the checks above passed.
-   * Return false (or throw) to refuse the payment.
+   * Called before a payment is handed to the x402 library for signing, after the
+   * checks above passed. Return false (or throw) to refuse it. A payment may
+   * still not happen after this returns (signing fails, timeout), so do not
+   * count spend here.
    */
   onBeforePayment?: (payment: PaymentRequest) => boolean | void | Promise<boolean | void>;
+  /**
+   * Pay for reads (GET/HEAD) too. Default false: reads use the free tier
+   * (`X-Payment-Mode: free`, rate-limited) and only writes are paid.
+   */
+  payForReads?: boolean;
 }
 
 /** A payment the gateway asked for, as shown to `onBeforePayment` and in refusals */
