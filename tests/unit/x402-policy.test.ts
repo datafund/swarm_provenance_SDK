@@ -425,3 +425,15 @@ describe('review round 4 (#138)', () => {
     }
   });
 });
+
+describe('final review (#138)', () => {
+  it('a library failure while selecting the payment is a payment error, not a connection error', async () => {
+    // A wallet that cannot sign makes the library fail after the SDK approved the 402
+    const broken = { ...wallet, signTypedData: () => Promise.reject(new Error('wallet locked')) };
+    const error = await new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: broken } })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect((error as { code?: string }).code).toBe('PAYMENT_FAILED');
+    expect(payments()).toBe(0);
+  });
+});

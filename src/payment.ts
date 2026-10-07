@@ -230,6 +230,8 @@ export interface PaymentAttemptState {
   refusal?: PaymentRefusedError;
   /** The x402 library failed to create or sign the payment (nothing sent) */
   creationFailure?: unknown;
+  /** An approved 402 was handed to the library to select, sign and send */
+  handedToLibrary?: boolean;
 }
 
 function isRequest(input: unknown): input is Request {
@@ -357,7 +359,9 @@ export async function createX402Transport(
       const response = await fetch(request);
       if (paid || response.status !== 402) return response;
       try {
-        return await policePaymentRequired(response, policy, request.signal);
+        const approved = await policePaymentRequired(response, policy, request.signal);
+        state.handedToLibrary = true;
+        return approved;
       } catch (error) {
         if (error instanceof PaymentRefusedError) state.refusal = error;
         throw error;

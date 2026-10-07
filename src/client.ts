@@ -670,8 +670,9 @@ export class ProvenanceClient {
       // The paid request went out; the library failed afterwards
       return flag(new PaymentError(`Payment sent, but the response could not be processed: ${message}`, 'PAYMENT_UNCONFIRMED'));
     }
-    if (state.creationFailure !== undefined) {
-      // The x402 library could not build or sign the payment; nothing was sent
+    if (state.creationFailure !== undefined || state.handedToLibrary) {
+      // The x402 library failed after taking the approved 402 (selection,
+      // spend controls, signing) and before sending: nothing was paid
       return new PaymentError(`Payment could not be created: ${message}`, 'PAYMENT_FAILED');
     }
     return new GatewayConnectionError(message || 'Failed to connect to gateway', undefined, 'CONNECTION_FAILED');
