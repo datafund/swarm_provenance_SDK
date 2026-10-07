@@ -181,10 +181,19 @@ export interface ChainClientConfig {
 export interface ChainSigner {
   /** Get the signer's address */
   getAddress(): Promise<Address>;
+  /** Chain the signer sends transactions on; checked against the preset before every write */
+  getChainId(): Promise<number>;
+  /**
+   * Optional: ask the wallet to switch chains (EIP-1193 wallets); called on a
+   * mismatch. `chain` describes it, so a wallet that does not know it can add it.
+   */
+  switchChain?(chainId: number, chain?: { name: string; rpcUrls: string[]; explorerUrl: string }): Promise<void>;
   /** Send a transaction and return the tx hash */
   sendTransaction(tx: {
     to: Address;
     data: Hex;
     gas?: bigint;
+    /** Chain the tx must be signed for; EIP-1193 wallets refuse a mismatch */
+    chainId?: number;
   }): Promise<Hex>;
 }

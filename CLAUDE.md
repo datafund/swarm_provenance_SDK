@@ -68,6 +68,13 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 5. Return `document` as `Record<string, unknown>`
 6. Use `client.downloadDocument(reference)` for this mode
 
+## Chain Write Safety (#115-#118)
+
+- `const target = await this.ensureWriteTarget()` in every write method, after local validation and before any network call; `sendAndWait(data, expected, target)` requires that token, so a new write method cannot skip the check. `ensureWriteTarget()`: RPC `getChainId()` and contract `getBytecode()` once per client (cached; retried after a failure), signer `getChainId()` every write (`switchChain()` if the signer has it, one shared request at a time; chain details for adding an unknown chain only for built-in presets). Mismatch or declined switch → `ChainConfigurationError`; signer unreachable → `ChainConnectionError`; nothing sent.
+- `sendAndWait(data, { event, count })`: success requires `count` logs of `event` emitted by `contractAddress`, decoded with the embedded ABI (verified against live Base Sepolia logs). Event per write: anchor/anchorFor/batchAnchor `DataRegistered`, recordAccess `DataAccessed`, recordTransformation `DataTransformed`, mergeTransform `DataMerged`, setDataStatus `DataStatusChanged`, transferOwnership `DataOwnershipTransferred`, setDelegate `DelegateAuthorized`.
+- Pre-checks only proceed on `DataNotRegisteredError`; any other read error is thrown.
+- All chain error text goes through `rpcErrorMessage()` (drops viem URL/body sections, redacts URLs).
+
 ## Notary Signature Verification
 
 Scheme (gateway `app/services/provenance.py` + `signing.py`): `data_hash = sha256(canonical JSON of data)`, message `"{data_hash}|{timestamp}"`, EIP-191 personal_sign by the notary key; signature hex may lack `0x`.
@@ -287,8 +294,9 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `NOTARY_NOT_ENABLED` | NotaryError | Notary service disabled |
 | `NOT_IMPLEMENTED` | VerificationError | Feature not yet implemented |
 | `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config |
-| `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable |
-| `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas (`.originalError` has full details) |
+| `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable (messages are URL-redacted via `rpcErrorMessage`) |
+| `CHAIN_CONNECTION` | ReceiptTimeoutError (subclass) | Tx sent, no receipt; has `txHash` and `expected`: resume with `waitForTransaction(e.txHash, e.expected)` |
+| `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas, or no expected contract event in the receipt (`.originalError` non-enumerable) |
 | `CHAIN_VALIDATION` | ChainValidationError | Bad hash format, invalid input |
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
@@ -360,6 +368,7 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 | `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG; records carry `parents` (undefined at maxDepth) and `transformationLinks` (children). BFS order, not topological |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC can serve contract reads (probes a real `eth_call`) |
+| `waitForTransaction(txHash, { event?, count?, timeout? })` | Read | No | Wait for a sent tx and check it emitted the expected event |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
 | `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
 | `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |

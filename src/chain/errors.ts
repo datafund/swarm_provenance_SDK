@@ -37,15 +37,80 @@ export class ChainConnectionError extends ChainError {
  * Transaction errors (reverted, out of gas, etc.)
  */
 export class ChainTransactionError extends ChainError {
+  /**
+   * The underlying error, for debugging. Not enumerable, so logging or
+   * JSON-serialising this error does not expose its details (viem errors carry
+   * the RPC URL, which may embed a provider API key).
+   */
+  declare public readonly originalError?: Error;
+
   constructor(
     message: string,
     public readonly txHash?: string,
-    public readonly originalError?: Error,
+    originalError?: Error,
   ) {
     super(message, 'CHAIN_TRANSACTION');
     this.name = 'ChainTransactionError';
+    Object.defineProperty(this, 'originalError', { value: originalError, enumerable: false });
     Object.setPrototypeOf(this, ChainTransactionError.prototype);
   }
+}
+
+/**
+ * A transaction was sent but its receipt could not be obtained (timeout, or the
+ * RPC failed while waiting). It may still confirm: use
+ * `ChainClient.waitForTransaction(txHash)` to keep waiting. Do not resend
+ * blindly, writes are not idempotent.
+ */
+export class ReceiptTimeoutError extends ChainConnectionError {
+  constructor(
+    message: string,
+    public readonly txHash: string,
+    public readonly explorerUrl?: string,
+    /** What the write must emit to count as done: pass to waitForTransaction to keep that check */
+    public readonly expected?: { event: string; count?: number },
+  ) {
+    // Same code as other connection errors (CHAIN_CONNECTION), so code-based
+    // handling keeps matching; tell it apart by class or txHash
+    super(message);
+    this.name = 'ReceiptTimeoutError';
+    Object.setPrototypeOf(this, ReceiptTimeoutError.prototype);
+  }
+}
+
+/**
+ * Error text safe to show and log: viem's verbose sections (URL, request
+ * body, ...) are dropped and any URL left in the text is redacted, since RPC
+ * URLs often embed a provider API key (#118).
+ */
+export function rpcErrorMessage(error: unknown): string {
+  let text: string;
+  if (error instanceof Error) {
+    // viem errors: shortMessage plus details (e.g. the node's reason), without the URL sections
+    const { shortMessage, details, status } = error as { shortMessage?: unknown; details?: unknown; status?: unknown };
+    text =
+      typeof shortMessage === 'string' && shortMessage
+        ? shortMessage + (typeof details === 'string' && details && !shortMessage.includes(details) ? ` ${details}` : '')
+        : error.message;
+    // Keep the HTTP status: it tells a rate limit (429) from bad credentials (401) or an outage
+    if (typeof status === 'number' && !text.includes(String(status))) text += ` (HTTP ${status})`;
+  } else if (typeof error === 'object' && error !== null && typeof (error as { message?: unknown }).message === 'string') {
+    text = (error as { message: string }).message;
+  } else {
+    text = String(error);
+  }
+  return sanitizeErrorText(text);
+}
+
+/** Drop viem's verbose sections (URL, request body, arguments, ...) and redact URLs. */
+export function sanitizeErrorText(text: string): string {
+  const cut = text.search(/\n\s*(URL:|Request body:|Request Arguments:|Raw Call Arguments:|Contract Call:|Docs:|Version:)/);
+  return redactUrls((cut >= 0 ? text.slice(0, cut) : text).trim());
+}
+
+/** Replace every URL (and its credentials, path and query) with a placeholder */
+export function redactUrls(text: string): string {
+  return text.replace(/\b(?:https?|wss?):\/\/[^\s"'<>)]+/gi, '<rpc url>');
 }
 
 /**

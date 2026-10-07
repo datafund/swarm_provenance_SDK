@@ -11,10 +11,15 @@ import {
 } from '../../../src/chain/errors.js';
 import { DataStatus } from '../../../src/chain/types.js';
 import type { Address, Hex, ChainSigner } from '../../../src/chain/types.js';
+import { encodeAbiParameters, encodeEventTopics, type AbiEvent } from 'viem';
+import { DATA_PROVENANCE_ABI } from '../../../src/chain/abi.js';
+import { BASE_SEPOLIA } from '../../../src/chain/constants.js';
 
-// Mock viem's createPublicClient and its readContract/waitForTransactionReceipt
+// Mock viem's createPublicClient: reads, receipts, and the chain/code checks done before writes
 const mockReadContract = vi.fn();
 const mockWaitForTransactionReceipt = vi.fn();
+const mockGetChainId = vi.fn();
+const mockGetBytecode = vi.fn();
 
 vi.mock('viem', async () => {
   const actual = await vi.importActual('viem');
@@ -23,9 +28,33 @@ vi.mock('viem', async () => {
     createPublicClient: () => ({
       readContract: mockReadContract,
       waitForTransactionReceipt: mockWaitForTransactionReceipt,
+      getChainId: mockGetChainId,
+      getBytecode: mockGetBytecode,
     }),
   };
 });
+
+/** Logs as the deployed contract emits them, so writes count as done (#116) */
+function eventLogs(eventName: string, count = 1, address: string = BASE_SEPOLIA.contractAddress) {
+  const event = DATA_PROVENANCE_ABI.find((item) => item.type === 'event' && item.name === eventName) as AbiEvent;
+  const args: Record<string, unknown> = Object.fromEntries(
+    event.inputs.map((input): [string, unknown] => [input.name ?? '', SAMPLE_VALUES[input.type] ?? SAMPLE_VALUES['bytes32']]),
+  );
+  const topics = encodeEventTopics({ abi: [event], eventName, args } as never) as Hex[];
+  const unindexed = event.inputs.filter((i) => !i.indexed);
+  const data = encodeAbiParameters(unindexed, unindexed.map((i): unknown => args[i.name ?? '']));
+  return Array.from({ length: count }, () => ({ address, topics, data }));
+}
+
+const SAMPLE_VALUES: Record<string, unknown> = {
+  bytes32: `0x${'ab'.repeat(32)}`,
+  'bytes32[]': [`0x${'ab'.repeat(32)}`],
+  address: '0x1234567890abcdef1234567890abcdef12345678',
+  string: 'x',
+  bool: true,
+  uint8: 0,
+  uint256: 0n,
+};
 
 const MOCK_ADDRESS: Address = '0x1234567890abcdef1234567890abcdef12345678';
 const MOCK_TX_HASH: Hex = `0x${'bb'.repeat(32)}`;
@@ -36,6 +65,7 @@ const ZERO_HASH: Hex = `0x${'00'.repeat(32)}`;
 function createMockSigner(): ChainSigner {
   return {
     getAddress: () => Promise.resolve(MOCK_ADDRESS),
+    getChainId: () => Promise.resolve(84532),
     sendTransaction: () => Promise.resolve(MOCK_TX_HASH),
   };
 }
@@ -43,6 +73,12 @@ function createMockSigner(): ChainSigner {
 describe('ChainClient', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks keeps queued once-values: drop them so a failing test cannot leak into the next
+    mockReadContract.mockReset();
+    mockWaitForTransactionReceipt.mockReset();
+    // Default: RPC on Base Sepolia, contract deployed
+    mockGetChainId.mockResolvedValue(84532);
+    mockGetBytecode.mockResolvedValue('0x6080');
   });
 
   describe('constructor', () => {
@@ -189,6 +225,7 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(12345),
         gasUsed: BigInt(50000),
       });
@@ -259,6 +296,7 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(12345),
         gasUsed: BigInt(50000),
       });
@@ -281,6 +319,7 @@ describe('ChainClient', () => {
     it('should record access and return result', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataAccessed'),
         blockNumber: BigInt(12346),
         gasUsed: BigInt(30000),
       });
@@ -378,6 +417,7 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(100),
         gasUsed: BigInt(60000),
       });
@@ -399,6 +439,7 @@ describe('ChainClient', () => {
       mockReadContract.mockResolvedValueOnce([ZERO_HASH, '0x' + '00'.repeat(20), BigInt(0), '', ZERO_HASH, 0]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataTransformed'),
         blockNumber: BigInt(101),
         gasUsed: BigInt(55000),
       });
@@ -415,10 +456,14 @@ describe('ChainClient', () => {
 
     it('should throw on duplicate transformation', async () => {
       const newHash = 'cd'.repeat(32);
-      // getTransformationLinks returns existing link
-      mockReadContract.mockResolvedValueOnce([
-        { newDataHash: `0x${newHash}`, description: 'already done' },
-      ]);
+      // getTransformationLinks returns an existing link; verifyOnChain (run in parallel) says not registered
+      mockReadContract.mockImplementation(({ functionName }: { functionName: string }) =>
+        Promise.resolve(
+          functionName === 'getTransformationLinks'
+            ? [{ newDataHash: `0x${newHash}`, description: 'already done' }]
+            : [ZERO_HASH, '0x' + '00'.repeat(20), 0n, '', ZERO_HASH, 0],
+        ),
+      );
 
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
@@ -443,22 +488,14 @@ describe('ChainClient', () => {
       ).rejects.toThrow('already registered on-chain');
     });
 
-    it('should proceed if pre-checks fail', async () => {
-      // Both read calls fail (e.g. RPC timeout) — should still proceed with tx
+    it('surfaces a failed pre-check instead of sending blind (#116)', async () => {
       mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
-      mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
-      mockWaitForTransactionReceipt.mockResolvedValueOnce({
-        status: 'success',
-        blockNumber: BigInt(101),
-        gasUsed: BigInt(55000),
-      });
-
-      const newHash = 'cd'.repeat(32);
       const signer = createMockSigner();
+      const send = vi.spyOn(signer, 'sendTransaction');
       const client = new ChainClient({ chain: 'base-sepolia', signer });
-      const result = await client.recordTransformation(SAMPLE_HASH, newHash, 'filtered PII');
 
-      expect(result.originalHash).toBe(SAMPLE_HASH_0X);
+      await expect(client.recordTransformation(SAMPLE_HASH, 'cd'.repeat(32), 'filtered PII')).rejects.toThrow(ChainConnectionError);
+      expect(send).not.toHaveBeenCalled();
     });
   });
 
@@ -466,6 +503,7 @@ describe('ChainClient', () => {
     it('should set status', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataStatusChanged'),
         blockNumber: BigInt(102),
         gasUsed: BigInt(40000),
       });
@@ -483,6 +521,7 @@ describe('ChainClient', () => {
     it('should transfer ownership', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataOwnershipTransferred'),
         blockNumber: BigInt(103),
         gasUsed: BigInt(45000),
       });
@@ -507,6 +546,7 @@ describe('ChainClient', () => {
     it('should set delegate', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DelegateAuthorized'),
         blockNumber: BigInt(104),
         gasUsed: BigInt(35000),
       });
@@ -524,6 +564,7 @@ describe('ChainClient', () => {
     it('should batch anchor multiple hashes', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered', 2),
         blockNumber: BigInt(105),
         gasUsed: BigInt(120000),
       });
@@ -544,6 +585,7 @@ describe('ChainClient', () => {
     it('should batch record access', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataAccessed', 2),
         blockNumber: BigInt(106),
         gasUsed: BigInt(80000),
       });
@@ -560,6 +602,7 @@ describe('ChainClient', () => {
     it('should batch set status', async () => {
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataStatusChanged', 2),
         blockNumber: BigInt(107),
         gasUsed: BigInt(90000),
       });
@@ -590,6 +633,7 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(200),
         gasUsed: BigInt(50000),
       });
@@ -597,6 +641,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer, gasLimit: 500_000 });
@@ -621,6 +666,7 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(201),
         gasUsed: BigInt(50000),
       });
@@ -628,6 +674,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer });
@@ -1087,6 +1134,7 @@ describe('ChainClient', () => {
       mockReadContract.mockResolvedValueOnce([ZERO_HASH, '0x' + '00'.repeat(20), BigInt(0), '', ZERO_HASH, 0]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataMerged'),
         blockNumber: BigInt(200),
         gasUsed: BigInt(100000),
       });
@@ -1115,6 +1163,7 @@ describe('ChainClient', () => {
       mockReadContract.mockResolvedValueOnce([ZERO_HASH, '0x' + '00'.repeat(20), BigInt(0), '', ZERO_HASH, 0]);
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataMerged'),
         blockNumber: BigInt(201),
         gasUsed: BigInt(100000),
       });
@@ -1157,25 +1206,16 @@ describe('ChainClient', () => {
       ).rejects.toThrow('already registered on-chain');
     });
 
-    it('should proceed if pre-checks fail', async () => {
-      // Both read calls fail — should proceed with transaction
+    it('surfaces a failed pre-check instead of sending blind (#116)', async () => {
       mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
-      mockReadContract.mockRejectedValueOnce(new Error('RPC timeout'));
-      mockWaitForTransactionReceipt.mockResolvedValueOnce({
-        status: 'success',
-        blockNumber: BigInt(202),
-        gasUsed: BigInt(100000),
-      });
-
       const signer = createMockSigner();
+      const send = vi.spyOn(signer, 'sendTransaction');
       const client = new ChainClient({ chain: 'base-sepolia', signer });
-      const result = await client.mergeTransform(
-        [SAMPLE_HASH, 'cd'.repeat(32)],
-        'ee'.repeat(32),
-        'merged',
-      );
 
-      expect(result.txHash).toBe(MOCK_TX_HASH);
+      await expect(client.mergeTransform([SAMPLE_HASH, 'cd'.repeat(32)],
+        'ee'.repeat(32),
+        'merged',)).rejects.toThrow(ChainConnectionError);
+      expect(send).not.toHaveBeenCalled();
     });
   });
 
@@ -1240,6 +1280,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockRejectedValue(verboseError);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
@@ -1274,6 +1315,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockRejectedValue(shortError);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
@@ -1308,6 +1350,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockRejectedValue(revertError);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
@@ -1340,6 +1383,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockRejectedValue(rpcError);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
@@ -1371,6 +1415,7 @@ describe('ChainClient', () => {
       const sendTransaction = vi.fn().mockRejectedValue(longError);
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({ chain: 'base-sepolia', signer, retry: { maxRetries: 0 } });
@@ -1407,12 +1452,14 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(300),
         gasUsed: BigInt(50000),
       });
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({
@@ -1443,12 +1490,14 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(301),
         gasUsed: BigInt(50000),
       });
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({
@@ -1479,12 +1528,14 @@ describe('ChainClient', () => {
 
       mockWaitForTransactionReceipt.mockResolvedValueOnce({
         status: 'success',
+        logs: eventLogs('DataRegistered'),
         blockNumber: BigInt(302),
         gasUsed: BigInt(50000),
       });
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({
@@ -1514,6 +1565,7 @@ describe('ChainClient', () => {
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({
@@ -1542,6 +1594,7 @@ describe('ChainClient', () => {
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
         sendTransaction,
       };
       const client = new ChainClient({
@@ -1575,6 +1628,7 @@ describe('ChainClient', () => {
 
         mockWaitForTransactionReceipt.mockResolvedValueOnce({
           status: 'success',
+          logs: eventLogs('DataRegistered'),
           blockNumber: BigInt(12345),
           gasUsed: BigInt(55000),
         });
@@ -1601,6 +1655,7 @@ describe('ChainClient', () => {
 
         mockWaitForTransactionReceipt.mockResolvedValueOnce({
           status: 'success',
+          logs: eventLogs('DataRegistered'),
           blockNumber: BigInt(12345),
           gasUsed: BigInt(50000),
         });
@@ -1628,6 +1683,7 @@ describe('ChainClient', () => {
 
         mockWaitForTransactionReceipt.mockResolvedValueOnce({
           status: 'success',
+          logs: eventLogs('DataRegistered'),
           blockNumber: BigInt(100),
           gasUsed: BigInt(60000),
         });
@@ -1653,6 +1709,7 @@ describe('ChainClient', () => {
 
         mockWaitForTransactionReceipt.mockResolvedValueOnce({
           status: 'success',
+          logs: eventLogs('DataRegistered'),
           blockNumber: BigInt(100),
           gasUsed: BigInt(60000),
         });
@@ -1706,6 +1763,7 @@ describe('ChainClient', () => {
       it('should batch anchor with storageRefs', async () => {
         mockWaitForTransactionReceipt.mockResolvedValueOnce({
           status: 'success',
+          logs: eventLogs('DataRegistered', 2),
           blockNumber: BigInt(200),
           gasUsed: BigInt(100000),
         });
@@ -1723,6 +1781,7 @@ describe('ChainClient', () => {
       it('should batch anchor without storageRefs (backward compatible)', async () => {
         mockWaitForTransactionReceipt.mockResolvedValueOnce({
           status: 'success',
+          logs: eventLogs('DataRegistered', 2),
           blockNumber: BigInt(200),
           gasUsed: BigInt(80000),
         });
