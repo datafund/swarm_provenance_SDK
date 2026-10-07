@@ -207,8 +207,8 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
 
   it('requires maxAmount everywhere except Base Sepolia test USDC, at construction', () => {
     expect(() => client({ network: 'eip155:8453', v1Network: 'base' })).toThrow(PaymentConfigurationError);
-    expect(() => client({ v1Network: 'base' })).toThrow(/maxAmount is required/);
-    expect(() => client({ network: 'eip155:137' })).toThrow(/maxAmount is required/);
+    expect(() => client({ network: 'base' })).toThrow(/maxAmount is required/);
+    expect(() => client({ network: 'eip155:137', v1Network: 'polygon' })).toThrow(/maxAmount is required/);
     expect(() => client({ network: 'eip155:8453', v1Network: 'base', maxAmount: '0.25' })).not.toThrow();
   });
 
@@ -397,10 +397,12 @@ describe('review round 4 (#138)', () => {
     expect(() => client({ maxAmount: '1', assetDecimals: 18 })).toThrow(/only valid together with payment.asset/);
   });
 
-  it('one asset across two different chains is rejected', () => {
+  it('network and v1Network on different chains are rejected (one asset cannot fit both)', () => {
     const asset = '0x2222222222222222222222222222222222222222';
-    expect(() => client({ network: 'eip155:8453', asset, assetDecimals: 6, maxAmount: '1' })).toThrow(/different chains/);
-    expect(() => client({ network: 'eip155:8453', v1Network: 'base', asset, assetDecimals: 6, maxAmount: '1' })).not.toThrow();
+    expect(() =>
+      client({ network: 'eip155:8453', v1Network: 'base-sepolia', asset, assetDecimals: 6, maxAmount: '1' }),
+    ).toThrow(/drop v1Network|different chains/);
+    expect(() => client({ network: 'eip155:8453', asset, assetDecimals: 6, maxAmount: '1' })).not.toThrow();
   });
 
   it('an undecodable PAYMENT-REQUIRED header falls back to the v1 body', async () => {
@@ -449,5 +451,95 @@ describe('Web Crypto requirement', () => {
     } finally {
       if (original) Object.defineProperty(globalThis, 'crypto', original);
     }
+  });
+});
+
+describe('one network setting (#108)', () => {
+  const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+  it("network: 'base' pays the gateway's v1 'base' request in mainnet USDC", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    await client({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it("network: 'base' still refuses Base Sepolia requests", async () => {
+    accepts = [requirement()];
+    await expect(client({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP })).rejects.toThrow(
+      /not the configured x402 v1 network "base"/,
+    );
+  });
+
+  it("network: 'base' without maxAmount is a configuration error", () => {
+    expect(() => client({ network: 'base' })).toThrow(/maxAmount is required/);
+  });
+
+  it('a known CAIP-2 network implies its v1 name', async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    await client({ network: 'eip155:8453', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it('a gateway on another network is a specific refusal, not a connection error', async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).toMatch(/not the configured x402 v1 network "base-sepolia"/);
+  });
+
+  it.each([
+    [{ network: 'base', v1Network: 'base-sepolia', maxAmount: '1' }, /drop v1Network/],
+    [{ network: 'eip155:137', maxAmount: '1' }, /v1Network is required/],
+    [{ network: 'mainnet', maxAmount: '1' }, /must be 'base', 'base-sepolia' or a CAIP-2 ID/],
+  ])('rejects %j at construction', (config, message) => {
+    expect(() => client(config as Partial<X402PaymentConfig>)).toThrow(message);
+  });
+});
+
+describe('review round 1 (#140)', () => {
+  const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+  it("a config with only v1Network: 'base' (the old mainnet switch) still works", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    await client({ v1Network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it('any eip155 chain ID is compared, not only the Base names', () => {
+    expect(() => client({ network: 'eip155:137', v1Network: 'base', maxAmount: '1' })).toThrow(/different chains/);
+  });
+
+  it.each([['constructor'], ['__proto__'], ['toString']])('a prototype key %j is not a network', (network) => {
+    expect(() => client({ network: network as never, maxAmount: '1' })).toThrow(PaymentConfigurationError);
+  });
+
+  it.each([[''], ['eip155:8453'], ['Base Mainnet']])('rejects v1Network %j', (v1Network) => {
+    expect(() => client({ network: 'base', v1Network, maxAmount: '1' })).toThrow(/v1Network must be an x402 v1 network name/);
+  });
+
+  it('accepts any valid CAIP-2 ID (underscores included) and rejects malformed ones', () => {
+    expect(() => client({ network: 'starknet:SN_MAIN', v1Network: 'starknet', maxAmount: '1' })).not.toThrow();
+    expect(() => client({ network: 'a:b', v1Network: 'x', maxAmount: '1' })).toThrow(/CAIP-2/);
+  });
+
+  it('rejects a v1Network that contradicts a known network, or a lone unknown v1Network', () => {
+    expect(() => client({ network: 'base', v1Network: 'base-mainnet', maxAmount: '0.1' })).toThrow(/drop v1Network/);
+    expect(() => client({ network: 'base-sepolia', v1Network: 'base', maxAmount: '1' })).toThrow(/drop v1Network/);
+    expect(() => client({ v1Network: 'polygon', maxAmount: '1' })).toThrow(/payment.network is required/);
+  });
+
+  it('a non-string network is rejected, not treated as the default', () => {
+    expect(() => client({ network: null as never, v1Network: 'base', maxAmount: '1' })).toThrow(/must be a string/);
+  });
+});
+
+describe('final review (#140)', () => {
+  it("a prototype-key v1Network ('constructor') is refused cleanly at payment time, not a TypeError", async () => {
+    accepts = [requirement({ network: 'constructor' })];
+    const error = await client({ network: 'eip155:137', v1Network: 'constructor', maxAmount: '1' })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).toMatch(/no known USDC/);
   });
 });

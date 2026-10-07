@@ -51,8 +51,19 @@ console.log('Content:', new TextDecoder().decode(downloaded.file));
 
 By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-limited. For higher throughput, configure x402 automatic USDC payments.
 
-**Network:** payments default to **Base Sepolia** (`eip155:84532`, testnet USDC). Set
-`payment.network` / `payment.v1Network` for another network.
+**Network:** payments default to **Base Sepolia** (testnet USDC, no real value). One setting picks
+the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then required) or
+`'base-sepolia'`. It selects both identifiers the x402 protocol uses (v1 `base`, v2 `eip155:8453`),
+so it must match the gateway's network: if the gateway asks for payment on another network, the
+request fails with `PaymentRefusedError` naming both, before anything is signed.
+
+```typescript
+// Base mainnet: the wallet must be on Base too (viem `base` chain, or the
+// injected wallet switched to chain 8453), since payments are signed for it
+import { base } from 'viem/chains';
+const wallet = createWalletClient({ account, chain: base, transport: http() }).extend(publicActions);
+const client = new ProvenanceClient({ payment: { wallet, network: 'base', maxAmount: '0.10' } });
+```
 
 **Payment policy.** Before signing, every payment the gateway asks for must pass these checks,
 or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing is signed:
@@ -586,6 +597,12 @@ message comes from Node itself.
 - Raw documents (`raw: true`): `content_hash` is SHA-256 of canonical JSON (the gateway and
   Python tools' convention) instead of `JSON.stringify(data)` (#114). This version still
   accepts the old form; SDK 0.6.x rejects documents uploaded with this version.
+- x402 network (#108): `payment.network: 'base' | 'base-sepolia'` selects both x402 identifiers;
+  a known CAIP-2 ID implies its v1 name, and a lone known `v1Network` implies `network`.
+  **A config with only `network: 'eip155:8453'` now pays in mainnet USDC on the gateway's v1
+  path too** (it used to pair with Base Sepolia for v1, so it never paid on mainnet). `network`
+  and `v1Network` that disagree, or a lone unknown `v1Network`, are configuration errors. The
+  default stays Base Sepolia.
 - x402 mode enforces a payment policy (#106): `maxAmount` (default `'1'` on Base Sepolia test
   USDC, required elsewhere), USDC only (or `asset` + `assetDecimals`), `exact`/EIP-3009 only,
   validity ≤ 600 s, optional `payTo` and `onBeforePayment`. Refusals throw

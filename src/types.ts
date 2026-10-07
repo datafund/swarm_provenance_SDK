@@ -31,9 +31,14 @@ export interface PaymentWalletMethods {
 export interface X402PaymentConfig {
   /** Wallet that signs x402 payment authorizations */
   wallet: PaymentWallet;
-  /** CAIP-2 network identifier for x402 v2 (default: 'eip155:84532' for Base Sepolia) */
-  network?: `${string}:${string}`;
-  /** Simple network name for x402 v1 (default: 'base-sepolia') */
+  /**
+   * Network to pay on (default: 'base-sepolia'). `'base'` (mainnet) or
+   * `'base-sepolia'` selects both the x402 v2 (CAIP-2) and v1 identifiers; a
+   * CAIP-2 ID (e.g. 'eip155:8453') also works, and implies the v1 name for
+   * known chains. Base mainnet requires `maxAmount`.
+   */
+  network?: 'base' | 'base-sepolia' | `${string}:${string}`;
+  /** x402 v1 network name; only needed for chains other than Base / Base Sepolia */
   v1Network?: string;
   /**
    * Largest single payment the SDK will sign, in whole tokens as a decimal
