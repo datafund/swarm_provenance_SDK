@@ -3,7 +3,7 @@ import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
-import type { PaymentWallet } from '../../src/types.js';
+import { GATEWAY_URL, WRITES_ALLOWED } from './env.js';
 
 /**
  * x402 payment mode integration tests against the real gateway.
@@ -16,7 +16,7 @@ import type { PaymentWallet } from '../../src/types.js';
  * Each upload costs a small amount of USDC — tests are kept minimal.
  */
 
-const GATEWAY_URL = process.env['PROVENANCE_GATEWAY_URL'] ?? 'https://provenance-gateway.datafund.io';
+
 const PRIVATE_KEY = process.env['CHAIN_PRIVATE_KEY'];
 
 function createX402Client(): ProvenanceClient {
@@ -29,7 +29,8 @@ function createX402Client(): ProvenanceClient {
 
   return new ProvenanceClient({
     gatewayUrl: GATEWAY_URL,
-    payment: { wallet: wallet as unknown as PaymentWallet },
+    // maxAmount: Base Sepolia test USDC; the policy refuses anything above it
+    payment: { wallet, maxAmount: '1' },
   });
 }
 
@@ -68,7 +69,7 @@ describe('x402 Payment Integration', () => {
   });
 
   describe('x402 upload and download', () => {
-    it('should upload and download content via x402 payment', async () => {
+    it.skipIf(!WRITES_ALLOWED)('should upload and download content via x402 payment', async () => {
       if (!PRIVATE_KEY) return;
 
       const client = createX402Client();
@@ -89,21 +90,6 @@ describe('x402 Payment Integration', () => {
     });
   });
 
-  describe('x402 bypasses rate limits', () => {
-    it('should handle multiple sequential requests without 429', async () => {
-      if (!PRIVATE_KEY) return;
-
-      const client = createX402Client();
-
-      // Fire 4 requests in sequence — free tier limit is 3/min
-      const results = [];
-      for (let i = 0; i < 4; i++) {
-        const healthy = await client.health();
-        results.push(healthy);
-      }
-
-      // All should succeed (no PaymentRateLimitError)
-      expect(results).toEqual([true, true, true, true]);
-    });
-  });
+  // Reads are deliberately not paid (#106): GETs never go through the paying
+  // fetch, so x402 mode no longer pays its way past read rate limits.
 });

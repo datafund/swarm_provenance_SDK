@@ -6,6 +6,21 @@ const mockEvmV1 = () => ({
   },
 });
 
+
+// A 402 option the default policy accepts: Base Sepolia USDC, 0.01, 60 s
+const VALID_V1_REQUIREMENT = {
+  scheme: 'exact',
+  network: 'base-sepolia',
+  maxAmountRequired: '10000',
+  asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+  payTo: '0x1111111111111111111111111111111111111111',
+  maxTimeoutSeconds: 60,
+  resource: 'http://test.com',
+  description: '',
+  mimeType: 'application/json',
+  extra: {},
+};
+
 describe('createX402Fetch', () => {
   const mockWallet = {
     address: '0x1234567890abcdef1234567890abcdef12345678' as `0x${string}`,
@@ -22,10 +37,10 @@ describe('createX402Fetch', () => {
       throw new Error('Cannot find module');
     });
 
-    const { createX402Fetch } = await import('../../src/payment.js');
+    const { createX402Transport } = await import('../../src/payment.js');
 
     try {
-      await createX402Fetch({ wallet: mockWallet });
+      (await createX402Transport({ wallet: mockWallet })).fetchFor({ paid: false });
       expect.fail('Should have thrown');
     } catch (error) {
       expect((error as Error).name).toBe('PaymentConfigurationError');
@@ -38,6 +53,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register() { return this; }
         registerV1() { return this; }
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn(),
     }));
@@ -45,10 +62,10 @@ describe('createX402Fetch', () => {
       throw new Error('Cannot find module');
     });
 
-    const { createX402Fetch } = await import('../../src/payment.js');
+    const { createX402Transport } = await import('../../src/payment.js');
 
     try {
-      await createX402Fetch({ wallet: mockWallet });
+      (await createX402Transport({ wallet: mockWallet })).fetchFor({ paid: false });
       expect.fail('Should have thrown');
     } catch (error) {
       expect((error as Error).name).toBe('PaymentConfigurationError');
@@ -65,6 +82,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register = mockRegister;
         registerV1 = mockRegisterV1;
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn().mockReturnValue(mockWrappedFetch),
     }));
@@ -75,8 +94,8 @@ describe('createX402Fetch', () => {
     }));
     vi.doMock('@x402/evm/v1', mockEvmV1);
 
-    const { createX402Fetch } = await import('../../src/payment.js');
-    const result = await createX402Fetch({ wallet: mockWallet });
+    const { createX402Transport } = await import('../../src/payment.js');
+    const result = (await createX402Transport({ wallet: mockWallet })).fetchFor({ paid: false });
 
     expect(result).toBeTypeOf('function');
     expect(mockRegister).toHaveBeenCalledWith('eip155:84532', expect.any(Object));
@@ -91,6 +110,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register = mockRegister;
         registerV1 = mockRegisterV1;
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn().mockReturnValue(vi.fn()),
     }));
@@ -101,8 +122,8 @@ describe('createX402Fetch', () => {
     }));
     vi.doMock('@x402/evm/v1', mockEvmV1);
 
-    const { createX402Fetch } = await import('../../src/payment.js');
-    await createX402Fetch({ wallet: mockWallet, network: 'eip155:8453' });
+    const { createX402Transport } = await import('../../src/payment.js');
+    (await createX402Transport({ wallet: mockWallet, network: 'eip155:8453', maxAmount: '0.50' })).fetchFor({ paid: false });
 
     expect(mockRegister).toHaveBeenCalledWith('eip155:8453', expect.any(Object));
   });
@@ -114,6 +135,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register() { return this; }
         registerV1() { return this; }
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn().mockReturnValue(vi.fn()),
     }));
@@ -126,8 +149,8 @@ describe('createX402Fetch', () => {
     }));
     vi.doMock('@x402/evm/v1', mockEvmV1);
 
-    const { createX402Fetch } = await import('../../src/payment.js');
-    await createX402Fetch({ wallet: mockWallet });
+    const { createX402Transport } = await import('../../src/payment.js');
+    (await createX402Transport({ wallet: mockWallet })).fetchFor({ paid: false });
 
     expect(capturedSigner).toBe(mockWallet);
   });
@@ -146,6 +169,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register() { return this; }
         registerV1() { return this; }
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn().mockReturnValue(vi.fn()),
     }));
@@ -158,8 +183,8 @@ describe('createX402Fetch', () => {
     }));
     vi.doMock('@x402/evm/v1', mockEvmV1);
 
-    const { createX402Fetch } = await import('../../src/payment.js');
-    await createX402Fetch({ wallet: walletWithoutAddress as never });
+    const { createX402Transport } = await import('../../src/payment.js');
+    (await createX402Transport({ wallet: walletWithoutAddress as never })).fetchFor({ paid: false });
 
     expect(capturedSigner?.address).toBe('0xabcdefabcdefabcdefabcdefabcdefabcdefabcd');
   });
@@ -171,6 +196,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register() { return this; }
         registerV1() { return this; }
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn().mockImplementation((fetchFn: typeof fetch) => {
         capturedFetch = fetchFn;
@@ -184,20 +211,20 @@ describe('createX402Fetch', () => {
     }));
     vi.doMock('@x402/evm/v1', mockEvmV1);
 
-    const x402Body = { x402Version: 1, accepts: [{ scheme: 'exact' }] };
+    const x402Body = { x402Version: 1, accepts: [VALID_V1_REQUIREMENT] };
     const wrappedBody = { detail: x402Body };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
       new Response(JSON.stringify(wrappedBody), { status: 402, headers: { 'content-type': 'application/json' } })
     ));
 
-    const { createX402Fetch } = await import('../../src/payment.js');
-    await createX402Fetch({ wallet: mockWallet });
+    const { createX402Transport } = await import('../../src/payment.js');
+    (await createX402Transport({ wallet: mockWallet })).fetchFor({ paid: false });
 
     expect(capturedFetch).toBeDefined();
     const response = await capturedFetch!('http://test.com', {});
     const body = (await response.json()) as Record<string, unknown>;
     expect(body['x402Version']).toBe(1);
-    expect(body['accepts']).toEqual([{ scheme: 'exact' }]);
+    expect(body['accepts']).toEqual([VALID_V1_REQUIREMENT]);
     expect(body['detail']).toBeUndefined();
 
     vi.unstubAllGlobals();
@@ -210,6 +237,8 @@ describe('createX402Fetch', () => {
       x402Client: class {
         register() { return this; }
         registerV1() { return this; }
+        onBeforePaymentCreation() { return this; }
+        onPaymentCreationFailure() { return this; }
       },
       wrapFetchWithPayment: vi.fn().mockImplementation((fetchFn: typeof fetch) => {
         capturedFetch = fetchFn;
@@ -223,18 +252,18 @@ describe('createX402Fetch', () => {
     }));
     vi.doMock('@x402/evm/v1', mockEvmV1);
 
-    const x402Body = { x402Version: 1, accepts: [{ scheme: 'exact' }] };
+    const x402Body = { x402Version: 1, accepts: [VALID_V1_REQUIREMENT] };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
       new Response(JSON.stringify(x402Body), { status: 402, headers: { 'content-type': 'application/json' } })
     ));
 
-    const { createX402Fetch } = await import('../../src/payment.js');
-    await createX402Fetch({ wallet: mockWallet });
+    const { createX402Transport } = await import('../../src/payment.js');
+    (await createX402Transport({ wallet: mockWallet })).fetchFor({ paid: false });
 
     const response = await capturedFetch!('http://test.com', {});
     const body = (await response.json()) as Record<string, unknown>;
     expect(body['x402Version']).toBe(1);
-    expect(body['accepts']).toEqual([{ scheme: 'exact' }]);
+    expect(body['accepts']).toEqual([VALID_V1_REQUIREMENT]);
 
     vi.unstubAllGlobals();
   });

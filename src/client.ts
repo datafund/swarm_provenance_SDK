@@ -28,12 +28,21 @@ import {
   StampError,
   NotaryError,
   PaymentRateLimitError,
+  PaymentError,
+  type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
 import { toBytes, isAddress } from './utils.js';
-import { createX402Fetch } from './payment.js';
+import {
+  base64Decode,
+  untilAborted,
+  createX402Transport,
+  resolvePaymentPolicy,
+  type PaymentAttemptState,
+  type PaymentPolicy,
+} from './payment.js';
 
 const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
@@ -52,13 +61,18 @@ export class ProvenanceClient {
   private notaryLookup: Promise<string | undefined> | undefined;
   /** When a cached address was last re-checked after a failed verification */
   private notaryRecheckedAt = 0;
-  private x402Fetch: typeof fetch | undefined;
-  private x402FetchPromise: Promise<typeof fetch> | undefined;
+  private x402Transport: { fetchFor(state: PaymentAttemptState): typeof fetch } | undefined;
+  private paymentPolicy: PaymentPolicy | undefined;
+  /** Responses to attempts that sent a payment (see fetch, handleError) */
+  private readonly paidResponses = new WeakSet<Response>();
+  private x402TransportPromise: Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> | undefined;
 
   constructor(config: ProvenanceClientConfig = {}) {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
     this.paymentMode = config.payment ?? 'free';
+    // Resolve (and reject a bad) payment policy now, not on the first paid request
+    if (typeof this.paymentMode === 'object') this.paymentPolicy = resolvePaymentPolicy(this.paymentMode);
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 2,
       baseDelayMs: config.retry?.baseDelayMs ?? 1000,
@@ -66,21 +80,25 @@ export class ProvenanceClient {
   }
 
   /**
-   * Get or create the x402-wrapped fetch (lazy singleton with dedup)
+   * Get or create the x402 transport (lazy singleton with dedup)
    */
-  private getX402Fetch(): Promise<typeof fetch> {
-    if (this.x402Fetch) {
-      return Promise.resolve(this.x402Fetch);
+  private getX402Transport(): Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> {
+    if (this.x402Transport) {
+      return Promise.resolve(this.x402Transport);
     }
-    if (!this.x402FetchPromise) {
-      this.x402FetchPromise = createX402Fetch(this.paymentMode as X402PaymentConfig).then(
-        (wrappedFetch) => {
-          this.x402Fetch = wrappedFetch;
-          return wrappedFetch;
+    if (!this.x402TransportPromise) {
+      this.x402TransportPromise = createX402Transport(this.paymentMode as X402PaymentConfig, this.paymentPolicy).then(
+        (transport) => {
+          this.x402Transport = transport;
+          return transport;
+        },
+        (error: unknown) => {
+          this.x402TransportPromise = undefined; // e.g. @x402 installed later: try again
+          throw error;
         }
       );
     }
-    return this.x402FetchPromise;
+    return this.x402TransportPromise;
   }
 
   /**
@@ -159,13 +177,13 @@ export class ProvenanceClient {
 
     if (!response.ok) {
       const error = await this.handleError(response);
-      throw new StampError(
-        error.suggestion ? `${error.message}. ${error.suggestion}` : error.message,
-        error.code,
+      throw withPayment(
+        new StampError(error.suggestion ? `${error.message}. ${error.suggestion}` : error.message, error.code),
+        error,
       );
     }
 
-    const data = (await response.json()) as GatewayAcquireStampResponse;
+    const data = await this.readJson<GatewayAcquireStampResponse>(response);
     return {
       batchId: data.batch_id,
       depth: data.depth,
@@ -462,12 +480,12 @@ export class ProvenanceClient {
     if (!response.ok) {
       const error = await this.handleError(response);
       if (options.sign === 'notary') {
-        throw new NotaryError(error.message, error.code);
+        throw withPayment(new NotaryError(error.message, error.code), error);
       }
       throw error;
     }
 
-    return (await response.json()) as GatewayUploadResponse;
+    return this.readJson<GatewayUploadResponse>(response);
   }
 
   /**
@@ -543,12 +561,6 @@ export class ProvenanceClient {
     return result;
   }
 
-  private isRetryableStatus(status: number): boolean {
-    // 429 is only retryable for non-free modes (free mode throws PaymentRateLimitError)
-    if (status === 429 && this.paymentMode !== 'free') return true;
-    return status === 502 || status === 503;
-  }
-
   private getRetryDelay(response: Response, attempt: number): number {
     if (response.status === 429) {
       const retryAfter = response.headers.get('Retry-After');
@@ -558,58 +570,68 @@ export class ProvenanceClient {
   }
 
   /**
-   * Make a fetch request to the gateway
+   * Make a fetch request to the gateway.
+   *
+   * x402 mode: writes go through the paying fetch; reads use the free tier
+   * unless `payForReads`. Each attempt gets its own paying fetch and state, so
+   * the SDK knows whether it sent a payment: a paid attempt is never retried
+   * (the gateway may already have settled, #107) and its errors carry `payment`.
    */
   private async fetch(path: string, init?: RequestInit): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
 
-    const isX402 = typeof this.paymentMode === 'object';
-
-    // Choose fetch implementation
-    let fetchFn: typeof fetch;
-    if (isX402) {
-      fetchFn = await this.getX402Fetch();
-    } else {
-      fetchFn = fetch;
-    }
+    const x402 = typeof this.paymentMode === 'object' ? this.paymentMode : undefined;
+    const method = (init?.method ?? 'GET').toUpperCase();
+    const isRead = method === 'GET' || method === 'HEAD';
+    const paying = x402 !== undefined && (!isRead || x402.payForReads === true);
+    // Unpaid requests in x402 mode use the free tier, as in 'free' mode
+    const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
+    const transport = paying ? await this.getX402Transport() : undefined;
 
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
       const headers = new Headers(init?.headers);
-
-      // Set payment header based on mode
-      if (this.paymentMode === 'free') {
-        if (!headers.has('X-Payment-Mode')) {
-          headers.set('X-Payment-Mode', 'free');
-        }
+      if (freeTier && !headers.has('X-Payment-Mode')) {
+        headers.set('X-Payment-Mode', 'free');
       }
-      // 'none' and x402: no X-Payment-Mode header
+      // Each attempt gets its own paying fetch, which records whether it paid
+      const state: PaymentAttemptState = { paid: false };
+      const fetchFn: typeof fetch = transport ? transport.fetchFor(state) : fetch;
 
       try {
-        const response = await fetchFn(url, {
-          ...init,
-          headers,
-          signal: controller.signal,
-        });
+        // Bounded by the timeout even while a payment waits for approval or signing
+        const response = await untilAborted(
+          fetchFn(url, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          }),
+          controller.signal
+        );
+        const paid = state.paid;
+        if (paid) this.paidResponses.add(response);
 
         // Detect free-tier rate limiting
-        if (response.status === 429 && this.paymentMode === 'free') {
+        if (response.status === 429 && freeTier) {
           const retryAfter = response.headers.get('Retry-After');
           const rateLimit = response.headers.get('X-RateLimit-Limit');
           const rateRemaining = response.headers.get('X-RateLimit-Remaining');
 
           throw new PaymentRateLimitError(
-            'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
+            x402
+              ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
+              : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
             retryAfter ? parseInt(retryAfter, 10) : undefined,
             rateLimit ? parseInt(rateLimit, 10) : undefined,
             rateRemaining ? parseInt(rateRemaining, 10) : undefined
           );
         }
 
-        // Retry on transient HTTP errors
-        if (attempt < this.retryConfig.maxRetries && this.isRetryableStatus(response.status)) {
+        // Retry transient errors, but never an attempt that sent a payment
+        const retryable = response.status === 502 || response.status === 503 || response.status === 429;
+        if (!paid && attempt < this.retryConfig.maxRetries && retryable) {
           const delay = this.getRetryDelay(response, attempt);
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
@@ -617,17 +639,7 @@ export class ProvenanceClient {
 
         return response;
       } catch (error) {
-        if (error instanceof PaymentRateLimitError) {
-          throw error;
-        }
-        if (error instanceof Error && error.name === 'AbortError') {
-          throw new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT');
-        }
-        throw new GatewayConnectionError(
-          error instanceof Error ? error.message : 'Failed to connect to gateway',
-          undefined,
-          'CONNECTION_FAILED'
-        );
+        throw this.requestFailure(error, state);
       } finally {
         clearTimeout(timeoutId);
       }
@@ -635,6 +647,56 @@ export class ProvenanceClient {
 
     // This should be unreachable, but TypeScript needs it
     throw new GatewayConnectionError('Request failed after retries', undefined, 'CONNECTION_FAILED');
+  }
+
+  /** Map a thrown fetch/x402 error to an SDK error, flagging a sent payment. */
+  private requestFailure(error: unknown, state: PaymentAttemptState): ProvenanceError {
+    const flag = <E extends ProvenanceError>(e: E): E => {
+      if (state.paid) {
+        e.payment = { paymentSent: true };
+        e.message += ' (a payment was sent with this request and may have been charged)';
+      }
+      return e;
+    };
+    // Our own refusals, configuration errors and rate limits pass through
+    if (error instanceof PaymentError) return error;
+    // A refusal recorded inside the library (its hook aborted signing): nothing signed
+    if (state.refusal) return state.refusal;
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof Error && error.name === 'AbortError') {
+      return flag(new GatewayConnectionError('Request timed out', undefined, 'TIMEOUT'));
+    }
+    if (state.paid) {
+      // The paid request went out; the library failed afterwards
+      return flag(new PaymentError(`Payment sent, but the response could not be processed: ${message}`, 'PAYMENT_UNCONFIRMED'));
+    }
+    if (state.creationFailure !== undefined || state.handedToLibrary) {
+      // The x402 library failed after taking the approved 402 (selection,
+      // spend controls, signing) and before sending: nothing was paid
+      return new PaymentError(`Payment could not be created: ${message}`, 'PAYMENT_FAILED');
+    }
+    return new GatewayConnectionError(message || 'Failed to connect to gateway', undefined, 'CONNECTION_FAILED');
+  }
+
+  /**
+   * Parse a successful response body. If it is not valid JSON and the request
+   * was paid, the error says so: the payment may have been taken (#107).
+   */
+  private async readJson<T>(response: Response): Promise<T> {
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      const failure = new GatewayConnectionError(
+        `Invalid response from gateway: ${error instanceof Error ? error.message : String(error)}`,
+        response.status,
+        'INVALID_RESPONSE'
+      );
+      if (this.paidResponses.has(response)) {
+        failure.payment = paymentAttempt(response);
+        failure.message += ' (a payment was sent with this request and may have been charged)';
+      }
+      throw failure;
+    }
   }
 
   /**
@@ -663,7 +725,16 @@ export class ProvenanceClient {
       // Ignore JSON parse errors
     }
 
-    return new GatewayConnectionError(message, response.status, code, suggestion);
+    const error = new GatewayConnectionError(message, response.status, code, suggestion);
+    if (this.paidResponses.has(response)) {
+      // The request carried a signed payment: say so, with whatever the gateway reported
+      const payment = paymentAttempt(response);
+      error.payment = payment;
+      error.message += ` (a payment was sent with this request and may have been charged${
+        payment.transaction ? `; transaction ${payment.transaction}` : ''
+      })`;
+    }
+    return error;
   }
 }
 
@@ -692,4 +763,29 @@ function assertNotaryAddress(options: DownloadOptions): void {
       'INVALID_INPUT'
     );
   }
+}
+
+/** Payment details the gateway attached to a response for a paid request */
+function paymentAttempt(response: Response): PaymentAttempt {
+  const attempt: PaymentAttempt = { paymentSent: true };
+  let transaction = response.headers.get('X-Payment-Transaction') ?? undefined;
+  const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
+  if (!transaction && encoded) {
+    try {
+      const decoded = JSON.parse(base64Decode(encoded)) as { transaction?: unknown };
+      if (typeof decoded.transaction === 'string' && decoded.transaction) transaction = decoded.transaction;
+    } catch {
+      // not decodable: leave the transaction unknown
+    }
+  }
+  if (transaction) attempt.transaction = transaction;
+  const status = response.headers.get('X-Payment-Status');
+  if (status) attempt.status = status;
+  return attempt;
+}
+
+/** Carry the payment flag over when a gateway error is re-thrown as another error type. */
+function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceError): E {
+  if (source.payment) target.payment = source.payment;
+  return target;
 }

@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { ProvenanceClient } from '../../src/client.js';
+import { GATEWAY_URL, WRITES_ALLOWED } from './env.js';
 
 /**
  * Integration tests against the real gateway
  * Run with: pnpm test:integration
+ *
+ * Targets the dev gateway unless PROVENANCE_GATEWAY_URL is set; uploads run
+ * against production only with ALLOW_PRODUCTION_WRITES=1 (see ./env.ts).
  *
  * These tests require:
  * - Network access to the gateway
@@ -11,7 +15,7 @@ import { ProvenanceClient } from '../../src/client.js';
  * - Stamps to be available in the pool
  */
 
-const GATEWAY_URL = process.env['PROVENANCE_GATEWAY_URL'] ?? 'https://provenance-gateway.datafund.io';
+
 
 describe('Gateway Integration', () => {
   let client: ProvenanceClient;
@@ -56,7 +60,7 @@ describe('Gateway Integration', () => {
     });
   });
 
-  describe('upload and download round-trip', () => {
+  describe.skipIf(!WRITES_ALLOWED)('upload and download round-trip', () => {
     it('should upload and download text content', async () => {
       const originalContent = `Test content created at ${new Date().toISOString()}`;
 
