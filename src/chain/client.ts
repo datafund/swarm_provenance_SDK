@@ -85,6 +85,8 @@ export class ChainClient {
   private readonly retryConfig: Required<RetryConfig>;
   /** RPC chain + contract code check, done once per client (see ensureWriteTarget) */
   private writeTargetCheck: Promise<void> | undefined;
+  /** In-flight wallet chain switch, shared by concurrent writes */
+  private pendingSwitch: Promise<void> | undefined;
 
   constructor(config: ChainClientConfig) {
     // Resolve chain preset
@@ -614,11 +616,13 @@ export class ChainClient {
    * Requires a signer.
    */
   async anchor(dataHash: string, dataType: string, storageRef?: string): Promise<AnchorResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     validateDataType(dataType);
 
     const hash = normalizeHash(dataHash);
     const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     await this.checkNotRegistered(hash, dataHash);
 
     const data = encodeRegisterData(hash, dataType, normalizedStorageRef);
@@ -652,10 +656,12 @@ export class ChainClient {
    * Requires a signer.
    */
   async recordAccess(dataHash: string): Promise<AccessResult> {
-    await this.prepareWrite();
+    this.requireSigner();
 
     const hash = normalizeHash(dataHash);
     const data = encodeRecordAccess(hash);
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const accessor = await this.signer!.getAddress();
 
     const receipt = await this.sendAndWait(data, { event: 'DataAccessed' });
@@ -673,12 +679,14 @@ export class ChainClient {
    * Requires a signer with operator role.
    */
   async anchorFor(dataHash: string, dataType: string, actualOwner: string, storageRef?: string): Promise<AnchorResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     validateDataType(dataType);
     validateAddress(actualOwner);
 
     const hash = normalizeHash(dataHash);
     const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     await this.checkNotRegistered(hash, dataHash);
 
     const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address, normalizedStorageRef);
@@ -739,12 +747,14 @@ export class ChainClient {
     newHash: string,
     description: string,
   ): Promise<TransformResult> {
-    await this.prepareWrite();
+    this.requireSigner();
 
     const origHash = normalizeHash(originalHash);
     const nHash = normalizeHash(newHash);
 
     // Check for duplicate transformation (saves gas)
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const existingLinks = await this.getTransformationLinks(origHash);
     if (existingLinks.some((link) => link.newDataHash.toLowerCase() === nHash.toLowerCase())) {
       throw new ChainValidationError(
@@ -791,7 +801,7 @@ export class ChainClient {
     description: string,
     newDataType = 'merged',
   ): Promise<MergeTransformResult> {
-    await this.prepareWrite();
+    this.requireSigner();
 
     if (sourceHashes.length < 2) {
       throw new ChainValidationError('Merge transformation requires at least 2 source hashes');
@@ -806,6 +816,8 @@ export class ChainClient {
     const normalizedNew = normalizeHash(newHash);
 
     // Check for duplicate merge (saves gas)
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const existingParents = await this.getTransformationParents(normalizedNew);
     if (existingParents.length > 0) {
       throw new ChainValidationError(
@@ -846,11 +858,13 @@ export class ChainClient {
    * Requires a signer.
    */
   async setDataStatus(dataHash: string, newStatus: DataStatus): Promise<StatusResult> {
-    await this.prepareWrite();
+    this.requireSigner();
 
     const hash = normalizeHash(dataHash);
     const data = encodeSetDataStatus(hash, newStatus as number);
 
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const receipt = await this.sendAndWait(data, { event: 'DataStatusChanged' });
 
     return {
@@ -865,12 +879,14 @@ export class ChainClient {
    * Requires a signer (current owner).
    */
   async transferOwnership(dataHash: string, newOwner: string): Promise<TransferResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     validateAddress(newOwner);
 
     const hash = normalizeHash(dataHash);
     const data = encodeTransferDataOwnership(hash, newOwner as Address);
 
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const receipt = await this.sendAndWait(data, { event: 'DataOwnershipTransferred' });
 
     return {
@@ -885,11 +901,13 @@ export class ChainClient {
    * Requires a signer.
    */
   async setDelegate(delegate: string, authorized: boolean): Promise<DelegateResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     validateAddress(delegate);
 
     const data = encodeSetDelegate(delegate as Address, authorized);
 
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const receipt = await this.sendAndWait(data, { event: 'DelegateAuthorized' });
 
     return {
@@ -905,7 +923,7 @@ export class ChainClient {
    * Requires a signer.
    */
   async batchAnchor(items: Array<{ dataHash: string; dataType: string; storageRef?: string }>): Promise<BatchResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     this.validateBatchSize(items.length);
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
@@ -923,6 +941,8 @@ export class ChainClient {
     }
 
     const data = encodeBatchRegisterData(hashes, types, storageRefs);
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const receipt = await this.sendAndWait(data, { event: 'DataRegistered', count: items.length });
 
     return {
@@ -936,11 +956,13 @@ export class ChainClient {
    * Requires a signer.
    */
   async batchRecordAccess(dataHashes: string[]): Promise<BatchResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     this.validateBatchSize(dataHashes.length);
 
     const hashes = dataHashes.map((h) => normalizeHash(h));
     const data = encodeBatchRecordAccess(hashes);
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const receipt = await this.sendAndWait(data, { event: 'DataAccessed', count: dataHashes.length });
 
     return {
@@ -956,12 +978,14 @@ export class ChainClient {
   async batchSetDataStatus(
     items: Array<{ dataHash: string; status: DataStatus }>,
   ): Promise<BatchResult> {
-    await this.prepareWrite();
+    this.requireSigner();
     this.validateBatchSize(items.length);
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
     const statuses = items.map((item) => item.status as number);
     const data = encodeBatchSetDataStatus(hashes, statuses);
+    // After local validation, before any network call (#115/#116)
+    await this.ensureWriteTarget();
     const receipt = await this.sendAndWait(data, { event: 'DataStatusChanged', count: items.length });
 
     return {
@@ -1087,9 +1111,24 @@ export class ChainClient {
    * the RPC and the signer must both be on the preset's chain (an EIP-1193
    * wallet is asked to switch), and the contract address must hold code.
    */
+  /**
+   * Chain details a wallet may add (4902), only for built-in presets: their
+   * URLs are public. A custom preset's RPC URL may embed an API key, which must
+   * not end up in the user's wallet; the user adds such a chain themselves.
+   */
+  private addableChain(): { name: string; rpcUrls: string[]; explorerUrl: string } | undefined {
+    const builtinName = Object.keys(CHAIN_PRESETS).find((name) => CHAIN_PRESETS[name] === this.preset);
+    if (!builtinName) return undefined;
+    return {
+      name: this.preset.name,
+      rpcUrls: [this.preset.rpcUrl, ...(PRESET_RPC_FALLBACKS[builtinName] ?? [])],
+      explorerUrl: this.preset.explorerUrl,
+    };
+  }
+
   private async ensureWriteTarget(): Promise<void> {
     const expected = this.preset.chainId;
-    this.writeTargetCheck ??= (async () => {
+    const check = (this.writeTargetCheck ??= (async () => {
       let rpcChainId: number;
       let code: Hex | undefined;
       try {
@@ -1110,11 +1149,12 @@ export class ChainClient {
           `No contract code at ${this.contractAddress} on ${this.preset.name}: wrong contract address or chain`
         );
       }
-    })();
+    })());
     try {
-      await this.writeTargetCheck;
+      await check;
     } catch (error) {
-      this.writeTargetCheck = undefined; // check again next time
+      // Check again next time, unless a newer check already replaced this one
+      if (this.writeTargetCheck === check) this.writeTargetCheck = undefined;
       throw error;
     }
 
@@ -1124,11 +1164,11 @@ export class ChainClient {
     try {
       signerChainId = await signer.getChainId();
       if (signerChainId !== expected && signer.switchChain) {
-        await signer.switchChain(expected, {
-          name: this.preset.name,
-          rpcUrls: [this.preset.rpcUrl, ...(PRESET_RPC_FALLBACKS[this.preset.name] ?? this.preset.rpcFallbacks ?? [])],
-          explorerUrl: this.preset.explorerUrl,
+        // One switch request at a time: wallets reject a second while one is pending
+        this.pendingSwitch ??= signer.switchChain(expected, this.addableChain()).finally(() => {
+          this.pendingSwitch = undefined;
         });
+        await this.pendingSwitch;
         signerChainId = await signer.getChainId();
       }
     } catch (error) {
@@ -1176,15 +1216,6 @@ export class ChainClient {
     return this.waitForTransaction(txHash, expected);
   }
 
-  /**
-   * Start of every write: a signer is required, and the chain and contract are
-   * checked before any read pre-check, so a wrong chain or address is reported
-   * as such (ChainConfigurationError), not as a failed read.
-   */
-  private async prepareWrite(): Promise<void> {
-    this.requireSigner();
-    await this.ensureWriteTarget();
-  }
 
   /**
    * Wait for a sent transaction and confirm it did what was asked: it did not
@@ -1224,14 +1255,18 @@ export class ChainClient {
 
     // The hash that actually landed (a speed-up replaces it)
     const finalHash = (receipt.transactionHash ?? replacement?.hash ?? txHash);
-    if (replacement?.reason === 'cancelled') {
-      throw new ChainTransactionError(`Transaction ${txHash} was cancelled in the wallet (replaced by ${finalHash})`, finalHash);
+    if (replacement?.reason === 'cancelled' || replacement?.reason === 'replaced') {
+      // 'replaced': same nonce, different call; its events say nothing about this write
+      throw new ChainTransactionError(
+        `Transaction ${txHash} was ${replacement.reason} in the wallet (by ${finalHash}); the write did not happen as sent`,
+        finalHash,
+      );
     }
     if (receipt.status === 'reverted') {
       throw new ChainTransactionError('Transaction reverted', finalHash);
     }
 
-    if (expected) {
+    if (expected?.event) {
       // "Did not revert" is not success: a call to an address without the
       // contract also succeeds. Require the contract's own event (#116).
       const emitted = receipt.logs.filter((log) => {

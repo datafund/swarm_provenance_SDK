@@ -28,10 +28,13 @@ interface Eip1193Provider {
 export function fromViemWalletClient(walletClient: {
   account?: { address: Address } | null;
   getChainId(): Promise<number>;
+  /** viem's WalletClient.switchChain; used to ask the wallet to switch on a mismatch */
+  switchChain?(args: { id: number }): Promise<void>;
   sendTransaction(args: {
     to: Address;
     data: Hex;
     gas?: bigint;
+    chain?: BoundChain | null;
   }): Promise<Hex>;
 }): ChainSigner {
   if (!walletClient.account) {
@@ -42,21 +45,28 @@ export function fromViemWalletClient(walletClient: {
 
   const account = walletClient.account;
 
-  return {
+  const signer: ChainSigner = {
     getAddress(): Promise<Address> {
       return Promise.resolve(account.address);
     },
     getChainId(): Promise<number> {
       return walletClient.getChainId();
     },
-    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
+    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint; chainId?: number }): Promise<Hex> {
       return walletClient.sendTransaction({
         to: tx.to,
         data: tx.data,
+        // viem then refuses to send if the wallet is on another chain
+        ...(tx.chainId ? { chain: boundChain(tx.chainId) } : {}),
         ...(tx.gas ? { gas: tx.gas } : {}),
       });
     },
   };
+  if (walletClient.switchChain) {
+    const switchChain = walletClient.switchChain.bind(walletClient);
+    signer.switchChain = (chainId: number) => switchChain({ id: chainId });
+  }
+  return signer;
 }
 
 /**
@@ -99,11 +109,12 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
     getChainId(): Promise<number> {
       return client.getChainId();
     },
-    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
+    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint; chainId?: number }): Promise<Hex> {
       return client.sendTransaction({
         to: tx.to,
         data: tx.data,
-        chain: null, // let the RPC determine the chain
+        // Signed for this chain ID (EIP-155): it cannot execute anywhere else
+        chain: tx.chainId ? boundChain(tx.chainId) : null,
         ...(tx.gas ? { gas: tx.gas } : {}),
       });
     },
@@ -145,7 +156,7 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
       } catch (error) {
         // 4902: the wallet does not know the chain (some wallets nest the code)
         const e = error as { code?: number; data?: { originalError?: { code?: number } } };
-        if ((e.code ?? e.data?.originalError?.code) !== 4902 || !chain) throw error;
+        if ((e.code !== 4902 && e.data?.originalError?.code !== 4902) || !chain) throw error;
         await provider.request({
           method: 'wallet_addEthereumChain',
           params: [
@@ -153,7 +164,8 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
               chainId: hexChainId,
               chainName: chain.name,
               rpcUrls: chain.rpcUrls,
-              blockExplorerUrls: [chain.explorerUrl],
+              // Wallets accept only https explorer URLs (e.g. not http://localhost)
+              ...(chain.explorerUrl.startsWith('https://') ? { blockExplorerUrls: [chain.explorerUrl] } : {}),
               nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
             },
           ],
@@ -176,5 +188,22 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
       })) as Hex;
       return txHash;
     },
+  };
+}
+
+/** The minimal viem Chain needed to bind a transaction to a chain ID */
+type BoundChain = {
+  id: number;
+  name: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
+  rpcUrls: { default: { http: readonly string[] } };
+};
+
+function boundChain(id: number): BoundChain {
+  return {
+    id,
+    name: `chain-${id}`,
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [] } },
   };
 }

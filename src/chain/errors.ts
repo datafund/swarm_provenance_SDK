@@ -26,8 +26,8 @@ export class ChainConfigurationError extends ChainError {
  * RPC connection errors
  */
 export class ChainConnectionError extends ChainError {
-  constructor(message: string, code = 'CHAIN_CONNECTION') {
-    super(message, code);
+  constructor(message: string) {
+    super(message, 'CHAIN_CONNECTION');
     this.name = 'ChainConnectionError';
     Object.setPrototypeOf(this, ChainConnectionError.prototype);
   }
@@ -70,9 +70,9 @@ export class ReceiptTimeoutError extends ChainConnectionError {
     /** What the write must emit to count as done: pass to waitForTransaction to keep that check */
     public readonly expected?: { event: string; count?: number },
   ) {
-    // Same code as other connection errors, so code-based handling keeps matching;
-    // tell it apart by class (instanceof ReceiptTimeoutError) or txHash
-    super(message, 'CHAIN_CONNECTION');
+    // Same code as other connection errors (CHAIN_CONNECTION), so code-based
+    // handling keeps matching; tell it apart by class or txHash
+    super(message);
     this.name = 'ReceiptTimeoutError';
     Object.setPrototypeOf(this, ReceiptTimeoutError.prototype);
   }

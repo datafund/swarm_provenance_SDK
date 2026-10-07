@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { encodeAbiParameters, encodeEventTopics, type AbiEvent, type Hex } from 'viem';
 import { ChainClient } from '../../../src/chain/client.js';
-import { fromEip1193Provider } from '../../../src/chain/signer.js';
+import { fromEip1193Provider, fromViemWalletClient } from '../../../src/chain/signer.js';
 import {
   ChainConfigurationError,
   ChainConnectionError,
+  ChainValidationError,
   ChainTransactionError,
   ReceiptTimeoutError,
   rpcErrorMessage,
@@ -316,5 +317,84 @@ describe('review round 1 (#139)', () => {
       'eth_sendTransaction',
     ]);
     expect((calls.at(-1)!.params![0] as { chainId: string }).chainId).toBe('0x14a34');
+  });
+});
+
+describe('review round 2 (#139)', () => {
+  it('local validation fails before any network call or switch prompt', async () => {
+    mockGetChainId.mockRejectedValue(new Error('RPC down'));
+    const client = new ChainClient({ chain: 'base-sepolia', signer: signer() });
+    await expect(client.batchSetDataStatus([])).rejects.toThrow(ChainValidationError);
+    await expect(client.transferOwnership(HASH, 'not-an-address')).rejects.toThrow(ChainValidationError);
+    expect(mockGetChainId).not.toHaveBeenCalled();
+  });
+
+  it('a transaction replaced by a different call is an error', async () => {
+    const NEW: Hex = `0x${'cc'.repeat(32)}`;
+    mockWaitForTransactionReceipt.mockImplementation((args: { onReplaced?: (r: unknown) => void }) => {
+      args.onReplaced?.({ reason: 'replaced', transaction: { hash: NEW } });
+      return Promise.resolve({ status: 'success', blockNumber: 2n, gasUsed: 1n, transactionHash: NEW, logs: [registeredLog()] });
+    });
+    await expect(new ChainClient({ chain: 'base-sepolia', signer: signer() }).anchor(HASH, 'dataset')).rejects.toThrow(
+      /was replaced in the wallet/,
+    );
+  });
+
+  it('waitForTransaction with options but no event skips the event check', async () => {
+    mockWaitForTransactionReceipt.mockResolvedValue({ status: 'success', blockNumber: 3n, gasUsed: 1n, logs: [] });
+    const result = await new ChainClient({ chain: 'base-sepolia' }).waitForTransaction(TX, { timeout: 1000 } as never);
+    expect(result.blockNumber).toBe(3);
+  });
+
+  it('concurrent writes on the wrong chain share one switch request', async () => {
+    let chain = 1;
+    const switchChain = vi.fn(async (id: number) => {
+      await new Promise((r) => setTimeout(r, 10));
+      chain = id;
+    });
+    const s = signer(0, { getChainId: () => Promise.resolve(chain), switchChain });
+    mockWaitForTransactionReceipt.mockResolvedValue({ status: 'success', blockNumber: 1n, gasUsed: 1n, logs: [registeredLog()] });
+    const client = new ChainClient({ chain: 'base-sepolia', signer: s });
+    await Promise.all([client.anchor(HASH, 'a'), client.anchor('cd'.repeat(32), 'b')]);
+    expect(switchChain).toHaveBeenCalledTimes(1);
+  });
+
+  it('a custom preset gets no chain details to add (its RPC URL may carry a key)', async () => {
+    const switchChain = vi.fn(() => Promise.reject(new Error('stop here')));
+    const s = signer(1, { switchChain });
+    const chain = { ...BASE_SEPOLIA, rpcUrl: 'https://base-sepolia.g.alchemy.com/v2/KEY' };
+    await new ChainClient({ chain, signer: s }).anchor(HASH, 'dataset').catch(() => undefined);
+    expect(switchChain).toHaveBeenCalledWith(84532, undefined);
+  });
+
+  it('fromEip1193Provider detects a nested 4902 and omits a non-https explorer', async () => {
+    const calls: Array<{ method: string; params?: unknown[] }> = [];
+    let first = true;
+    const provider = {
+      request: (args: { method: string; params?: unknown[] }) => {
+        calls.push(args);
+        if (args.method === 'eth_requestAccounts') return Promise.resolve([ADDRESS]);
+        if (args.method === 'wallet_switchEthereumChain' && first) {
+          first = false;
+          return Promise.reject({ code: -32603, data: { originalError: { code: 4902 } } });
+        }
+        return Promise.resolve(null);
+      },
+    };
+    const s = await fromEip1193Provider(provider);
+    await s.switchChain!(31337, { name: 'hardhat', rpcUrls: ['http://127.0.0.1:8545'], explorerUrl: 'http://localhost' });
+    const add = calls.find((c) => c.method === 'wallet_addEthereumChain');
+    expect(add).toBeDefined();
+    expect(add!.params![0]).not.toHaveProperty('blockExplorerUrls');
+  });
+
+  it('fromViemWalletClient switches via viem and binds the send to the chain', async () => {
+    const switchChain = vi.fn(() => Promise.resolve());
+    const sendTransaction = vi.fn(() => Promise.resolve(TX));
+    const s = fromViemWalletClient({ account: { address: ADDRESS }, getChainId: () => Promise.resolve(84532), switchChain, sendTransaction });
+    await s.switchChain!(8453);
+    await s.sendTransaction({ to: ADDRESS, data: '0x', chainId: 84532 });
+    expect(switchChain).toHaveBeenCalledWith({ id: 8453 });
+    expect((sendTransaction.mock.calls[0] as unknown as [{ chain?: { id: number } }])[0].chain?.id).toBe(84532);
   });
 });
