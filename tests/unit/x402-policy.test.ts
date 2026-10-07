@@ -401,7 +401,7 @@ describe('review round 4 (#138)', () => {
     const asset = '0x2222222222222222222222222222222222222222';
     expect(() =>
       client({ network: 'eip155:8453', v1Network: 'base-sepolia', asset, assetDecimals: 6, maxAmount: '1' }),
-    ).toThrow(/different chains/);
+    ).toThrow(/drop v1Network|different chains/);
     expect(() => client({ network: 'eip155:8453', asset, assetDecimals: 6, maxAmount: '1' })).not.toThrow();
   });
 
@@ -488,7 +488,7 @@ describe('one network setting (#108)', () => {
   });
 
   it.each([
-    [{ network: 'base', v1Network: 'base-sepolia', maxAmount: '1' }, /different chains/],
+    [{ network: 'base', v1Network: 'base-sepolia', maxAmount: '1' }, /drop v1Network/],
     [{ network: 'eip155:137', maxAmount: '1' }, /v1Network is required/],
     [{ network: 'mainnet', maxAmount: '1' }, /must be 'base', 'base-sepolia' or a CAIP-2 ID/],
   ])('rejects %j at construction', (config, message) => {
@@ -522,8 +522,13 @@ describe('review round 1 (#140)', () => {
     expect(() => client({ network: 'a:b', v1Network: 'x', maxAmount: '1' })).toThrow(/CAIP-2/);
   });
 
-  it('the mismatch error names the default when network was not set', () => {
-    expect(() => client({ network: undefined, v1Network: 'base', maxAmount: '1', asset: undefined } as never)).not.toThrow();
-    expect(() => client({ network: 'base-sepolia', v1Network: 'base', maxAmount: '1' })).toThrow(/payment.network base-sepolia/);
+  it('rejects a v1Network that contradicts a known network, or a lone unknown v1Network', () => {
+    expect(() => client({ network: 'base', v1Network: 'base-mainnet', maxAmount: '0.1' })).toThrow(/drop v1Network/);
+    expect(() => client({ network: 'base-sepolia', v1Network: 'base', maxAmount: '1' })).toThrow(/drop v1Network/);
+    expect(() => client({ v1Network: 'polygon', maxAmount: '1' })).toThrow(/payment.network is required/);
+  });
+
+  it('a non-string network is rejected, not treated as the default', () => {
+    expect(() => client({ network: null as never, v1Network: 'base', maxAmount: '1' })).toThrow(/must be a string/);
   });
 });

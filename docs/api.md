@@ -25,7 +25,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 |----------|------|---------|-------------|
 | `wallet` | `PaymentWallet` | required | Signs payment authorizations (viem `WalletClient` with an account, or `toClientEvmSigner()`) |
 | `network` | `'base' \| 'base-sepolia' \| CAIP-2` | `'base-sepolia'` | Network to pay on; selects both x402 identifiers. `'base'` (mainnet) requires `maxAmount` |
-| `v1Network` | `string` | implied by `network` | x402 v1 name; only needed for chains other than Base / Base Sepolia |
+| `v1Network` | `string` | implied by `network` | x402 v1 name; only needed for chains other than Base / Base Sepolia. Alone, a known name (`'base'`) also selects `network`; it must not contradict a known `network` |
 | `maxAmount` | `string` | `'1'` on Base Sepolia with test USDC; **required** elsewhere | Largest single payment, in tokens (`'0.50'`) |
 | `payTo` | `string[]` | any | Allowed recipients |
 | `asset` | `string` | the network's USDC | Token to pay with |

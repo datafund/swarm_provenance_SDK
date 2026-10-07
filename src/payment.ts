@@ -34,48 +34,73 @@ const DEFAULT_TESTNET_MAX_AMOUNT = '1';
 /** CAIP-2: namespace 3-8 of [-a-z0-9], reference 1-32 of [-_a-zA-Z0-9] */
 const CAIP2 = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
 
-/** EVM chain ID of a network identifier: from `eip155:<id>`, or a known v1 name */
+/** Known network records by any of their identifiers (v1 name or v2 CAIP-2) */
+const NETWORK_BY_ID: ReadonlyMap<string, (typeof NETWORKS)[number]> = new Map(
+  NETWORKS.flatMap((n) => [[n.name, n], [n.v2, n]] as const)
+);
+
+/** EVM chain ID of a network identifier: a known record, or `eip155:<id>` */
 function chainIdOf(id: string): number | undefined {
+  const known = NETWORK_BY_ID.get(id);
+  if (known) return known.chainId;
   const eip155 = /^eip155:(\d+)$/.exec(id);
-  if (eip155) return Number(eip155[1]);
-  return NETWORKS.find((n) => n.name === id)?.chainId;
+  return eip155 ? Number(eip155[1]) : undefined;
 }
 
 /**
  * The x402 v2 (CAIP-2) and v1 network identifiers for a config. The gateway
- * speaks v1 today, so both must name the same chain: a mismatch would fail
- * every payment, so it is a configuration error.
+ * speaks v1 today, so both must name the same chain; anything that cannot be
+ * shown to (a mismatch, or a v1 name that contradicts a known network) is a
+ * configuration error, so it fails at construction rather than on every payment.
  */
 function resolveNetworks(config: X402PaymentConfig): { network: `${string}:${string}`; v1Network: string } {
+  if (config.network !== undefined && typeof config.network !== 'string') {
+    throw new PaymentConfigurationError(`payment.network must be a string, got ${JSON.stringify(config.network)}`);
+  }
   if (config.v1Network !== undefined && (typeof config.v1Network !== 'string' || !/^[-a-z0-9]+$/.test(config.v1Network))) {
     throw new PaymentConfigurationError(
       `payment.v1Network must be an x402 v1 network name such as 'base', got ${JSON.stringify(config.v1Network)}`
     );
   }
-  // Only v1Network set (the old way to pick mainnet): follow it
-  const fromV1 = config.network === undefined && config.v1Network !== undefined
-    ? NETWORKS.find((n) => n.name === config.v1Network)?.v2
-    : undefined;
-  const requested = config.network ?? fromV1 ?? 'base-sepolia';
-  const known = NETWORKS.find((n) => n.name === requested);
+
+  let requested = config.network;
+  if (requested === undefined && config.v1Network !== undefined) {
+    // Only v1Network set (the old way to pick mainnet): follow it, if known
+    const fromV1 = NETWORK_BY_ID.get(config.v1Network);
+    if (!fromV1) {
+      throw new PaymentConfigurationError(
+        `payment.network is required with v1Network ${config.v1Network}: name the same chain in CAIP-2 form`
+      );
+    }
+    requested = fromV1.name;
+  }
+  requested ??= 'base-sepolia';
+
+  const known = NETWORK_BY_ID.get(requested);
   const network = known ? known.v2 : requested;
-  if (!known && !(typeof network === 'string' && CAIP2.test(network))) {
+  if (!known && !CAIP2.test(network)) {
     throw new PaymentConfigurationError(
       `payment.network must be 'base', 'base-sepolia' or a CAIP-2 ID such as 'eip155:8453', got ${JSON.stringify(requested)}`
     );
   }
-  const v1Network = config.v1Network ?? NETWORKS.find((n) => n.v2 === network)?.name;
+
+  const v1Network = config.v1Network ?? known?.name;
   if (v1Network === undefined) {
     throw new PaymentConfigurationError(
       `payment.v1Network is required for ${network}: the gateway names networks the x402 v1 way (e.g. 'base')`
     );
   }
+  // A known network has exactly one v1 name
+  if (known && v1Network !== known.name) {
+    throw new PaymentConfigurationError(
+      `payment.network ${requested} is x402 v1 '${known.name}', but payment.v1Network is '${v1Network}'; drop v1Network`
+    );
+  }
   const chainA = chainIdOf(network);
   const chainB = chainIdOf(v1Network);
   if (chainA !== undefined && chainB !== undefined && chainA !== chainB) {
-    const networkSetting = config.network === undefined ? `the default network ${network}` : `payment.network ${requested}`;
     throw new PaymentConfigurationError(
-      `${networkSetting} and payment.v1Network ${v1Network} are different chains; set one network: 'base' or 'base-sepolia'`
+      `payment.network ${requested} and payment.v1Network ${v1Network} are different chains; set one network: 'base' or 'base-sepolia'`
     );
   }
   return { network: network as `${string}:${string}`, v1Network };
@@ -103,7 +128,7 @@ export interface PaymentPolicy {
  */
 export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
   const { network, v1Network } = resolveNetworks(config);
-  const isTestnet = (id: string) => NETWORKS.some((n) => n.testnet && (n.name === id || n.v2 === id));
+  const isTestnet = (id: string) => NETWORK_BY_ID.get(id)?.testnet === true;
   const testnetOnly = isTestnet(network) && isTestnet(v1Network) && config.asset === undefined;
 
   if (config.maxAmount === undefined && !testnetOnly) {
