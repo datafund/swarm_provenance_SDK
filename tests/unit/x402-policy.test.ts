@@ -391,3 +391,37 @@ describe('review round 3 (#138)', () => {
     }
   });
 });
+
+describe('review round 4 (#138)', () => {
+  it('assetDecimals without asset is rejected (it would rescale the USDC cap)', () => {
+    expect(() => client({ maxAmount: '1', assetDecimals: 18 })).toThrow(/only valid together with payment.asset/);
+  });
+
+  it('one asset across two different chains is rejected', () => {
+    const asset = '0x2222222222222222222222222222222222222222';
+    expect(() => client({ network: 'eip155:8453', asset, assetDecimals: 6, maxAmount: '1' })).toThrow(/different chains/);
+    expect(() => client({ network: 'eip155:8453', v1Network: 'base', asset, assetDecimals: 6, maxAmount: '1' })).not.toThrow();
+  });
+
+  it('an undecodable PAYMENT-REQUIRED header falls back to the v1 body', async () => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (!headers.has('X-PAYMENT') && !headers.has('PAYMENT-SIGNATURE')) {
+        seen.push({ method: 'POST', path: '/api/v1/data/', paid: false });
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: { x402Version: 1, accepts } }), {
+            status: 402,
+            headers: { 'PAYMENT-REQUIRED': '%%%not-base64%%%' },
+          }),
+        );
+      }
+      return gateway(input, init);
+    });
+    try {
+      await client().upload('hello', { stampId: STAMP });
+      expect(payments()).toBe(1);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});

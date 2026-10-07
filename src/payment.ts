@@ -16,6 +16,14 @@ export const USDC_BY_NETWORK: Readonly<Record<string, string>> = Object.freeze({
 /** Networks where maxAmount may default: test tokens only. Everywhere else it is required. */
 const TESTNETS = new Set(['eip155:84532', 'base-sepolia']);
 const DEFAULT_TESTNET_MAX_AMOUNT = '1';
+
+/** EVM chain ID behind each known network name (v2 CAIP-2 and v1 names) */
+const CHAIN_OF_NETWORK: Readonly<Record<string, number>> = {
+  'eip155:84532': 84532,
+  'base-sepolia': 84532,
+  'eip155:8453': 8453,
+  base: 8453,
+};
 const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 
 /** The checks every payment must pass before the SDK signs it (#106). */
@@ -48,9 +56,13 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
   }
   const maxAmount = config.maxAmount ?? DEFAULT_TESTNET_MAX_AMOUNT;
 
-  // A custom token's decimals cannot be assumed: '1' means 10^6 units only for USDC
+  // A custom token's decimals cannot be assumed: '1' means 10^6 units only for USDC.
+  // And decimals without a token would rescale the cap on the default USDC.
   if (config.asset !== undefined && config.assetDecimals === undefined) {
     throw new PaymentConfigurationError('payment.assetDecimals is required with payment.asset');
+  }
+  if (config.asset === undefined && config.assetDecimals !== undefined) {
+    throw new PaymentConfigurationError('payment.assetDecimals is only valid together with payment.asset');
   }
   const decimals = config.assetDecimals ?? 6;
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
@@ -60,6 +72,14 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
 
   if (config.asset !== undefined && !isAddress(config.asset)) {
     throw new PaymentConfigurationError(`payment.asset must be a token address, got ${JSON.stringify(config.asset)}`);
+  }
+  // One token address cannot be right on two chains
+  const chainA = CHAIN_OF_NETWORK[network];
+  const chainB = CHAIN_OF_NETWORK[v1Network];
+  if (config.asset !== undefined && chainA !== undefined && chainB !== undefined && chainA !== chainB) {
+    throw new PaymentConfigurationError(
+      `payment.asset is one token, but network ${network} and v1Network ${v1Network} are different chains`
+    );
   }
   const networks = new Map<string, string | undefined>();
   for (const n of [network, v1Network]) networks.set(n, config.asset ?? USDC_BY_NETWORK[n]);
@@ -279,10 +299,11 @@ export async function createX402Transport(
   // Pass the wallet through unchanged when it already carries the address
   const signer = hasAddress(wallet) ? wallet : { ...wallet, address };
 
-  const network = config.network ?? 'eip155:84532';
   // The gateway currently answers with x402 v1 and simple network names
-  // (e.g. "base-sepolia"); v2 uses CAIP-2 (e.g. "eip155:84532"). Register both.
-  const v1Network = config.v1Network ?? 'base-sepolia';
+  // (e.g. "base-sepolia"); v2 uses CAIP-2 (e.g. "eip155:84532"). Register both,
+  // from the policy so the schemes and the checks name the same networks.
+  const network = policy.networkByVersion.get(2)! as `${string}:${string}`;
+  const v1Network = policy.networkByVersion.get(1)!;
   const scheme = new x402Evm.ExactEvmScheme(signer);
   const v1Scheme = new x402EvmV1.ExactEvmSchemeV1(signer);
 
@@ -356,15 +377,20 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy, 
   const headers = new Headers(response.headers);
   const header = headers.get('PAYMENT-REQUIRED');
   let paymentRequired: Record<string, unknown> | undefined;
+  let fromHeader = false;
 
   if (header) {
-    // The body is not used: release the connection
-    await response.body?.cancel().catch(() => undefined);
     try {
       paymentRequired = JSON.parse(base64Decode(header)) as Record<string, unknown>;
+      fromHeader = true;
     } catch {
-      paymentRequired = undefined;
+      // Undecodable: drop it and fall back to the body
+      headers.delete('PAYMENT-REQUIRED');
     }
+  }
+  if (fromHeader) {
+    // The body is not used: release the connection
+    await response.body?.cancel().catch(() => undefined);
   } else {
     let body: Record<string, unknown> | undefined;
     try {
@@ -421,7 +447,7 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy, 
   // Only the approved option reaches the library, so it cannot select another
   const narrowed = { ...paymentRequired, accepts: [chosen] };
   headers.delete('content-length');
-  if (header) {
+  if (fromHeader) {
     headers.set('PAYMENT-REQUIRED', base64Encode(JSON.stringify(narrowed)));
     return new Response(null, { status: 402, statusText: response.statusText, headers });
   }

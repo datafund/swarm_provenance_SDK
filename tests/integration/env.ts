@@ -4,6 +4,9 @@
  *
  *   PROVENANCE_GATEWAY_URL   gateway to test (default: dev)
  *   ALLOW_PRODUCTION_WRITES  set to 1 to let write tests run against production
+ *
+ * The guard matches production by hostname: point PROVENANCE_GATEWAY_URL at the
+ * canonical hostname, not an IP or alias of the production gateway.
  */
 export const PRODUCTION_GATEWAY = 'https://provenance-gateway.datafund.io';
 export const DEV_GATEWAY = 'https://provenance-gateway.dev.datafund.io';
