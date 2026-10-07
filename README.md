@@ -506,6 +506,8 @@ try {
     console.error(error.message);
   } else if (error instanceof ReceiptTimeoutError) {
     // Sent, but no receipt yet: it may still confirm. Do not resend; resume instead.
+    // (If the tx was sped up and the original has left the mempool, viem cannot
+    // see the replacement: look up the new hash in the wallet and wait on that.)
     await chain.waitForTransaction(error.txHash as `0x${string}`, error.expected);
   } else if (error instanceof ChainTransactionError) {
     // Reverted, or succeeded without the contract's event (nothing recorded); error.txHash is set

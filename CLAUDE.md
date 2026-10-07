@@ -70,7 +70,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 
 ## Chain Write Safety (#115-#118)
 
-- `prepareWrite()` first in every write method (before any read pre-check), which runs `ensureWriteTarget()`: RPC `getChainId()` and contract `getBytecode()` once per client (cached; retried after a failure), signer `getChainId()` every write (`switchChain()` if the signer has it). Mismatch → `ChainConfigurationError`, nothing sent.
+- `const target = await this.ensureWriteTarget()` in every write method, after local validation and before any network call; `sendAndWait(data, expected, target)` requires that token, so a new write method cannot skip the check. `ensureWriteTarget()`: RPC `getChainId()` and contract `getBytecode()` once per client (cached; retried after a failure), signer `getChainId()` every write (`switchChain()` if the signer has it, one shared request at a time; chain details for adding an unknown chain only for built-in presets). Mismatch or declined switch → `ChainConfigurationError`; signer unreachable → `ChainConnectionError`; nothing sent.
 - `sendAndWait(data, { event, count })`: success requires `count` logs of `event` emitted by `contractAddress`, decoded with the embedded ABI (verified against live Base Sepolia logs). Event per write: anchor/anchorFor/batchAnchor `DataRegistered`, recordAccess `DataAccessed`, recordTransformation `DataTransformed`, mergeTransform `DataMerged`, setDataStatus `DataStatusChanged`, transferOwnership `DataOwnershipTransferred`, setDelegate `DelegateAuthorized`.
 - Pre-checks only proceed on `DataNotRegisteredError`; any other read error is thrown.
 - All chain error text goes through `rpcErrorMessage()` (drops viem URL/body sections, redacts URLs).

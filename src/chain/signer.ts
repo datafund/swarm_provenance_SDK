@@ -30,6 +30,8 @@ export function fromViemWalletClient(walletClient: {
   getChainId(): Promise<number>;
   /** viem's WalletClient.switchChain; used to ask the wallet to switch on a mismatch */
   switchChain?(args: { id: number }): Promise<void>;
+  /** viem's WalletClient.addChain; used when the wallet does not know the chain (4902) */
+  addChain?(args: { chain: BoundChain & { blockExplorers?: { default: { name: string; url: string } } } }): Promise<void>;
   sendTransaction(args: {
     to: Address;
     data: Hex;
@@ -64,7 +66,26 @@ export function fromViemWalletClient(walletClient: {
   };
   if (walletClient.switchChain) {
     const switchChain = walletClient.switchChain.bind(walletClient);
-    signer.switchChain = (chainId: number) => switchChain({ id: chainId });
+    const addChain = walletClient.addChain?.bind(walletClient);
+    signer.switchChain = async (chainId, chain) => {
+      try {
+        await switchChain({ id: chainId });
+      } catch (error) {
+        // 4902: the wallet does not know the chain; add it (built-in presets only pass details)
+        if (!isUnknownChain(error) || !chain || !addChain) throw error;
+        await addChain({
+          chain: {
+            ...boundChain(chainId),
+            name: chain.name,
+            rpcUrls: { default: { http: chain.rpcUrls } },
+            ...(chain.explorerUrl.startsWith('https://')
+              ? { blockExplorers: { default: { name: 'Explorer', url: chain.explorerUrl } } }
+              : {}),
+          },
+        });
+        await switchChain({ id: chainId });
+      }
+    };
   }
   return signer;
 }
@@ -155,8 +176,7 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
         await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexChainId }] });
       } catch (error) {
         // 4902: the wallet does not know the chain (some wallets nest the code)
-        const e = error as { code?: number; data?: { originalError?: { code?: number } } };
-        if ((e.code !== 4902 && e.data?.originalError?.code !== 4902) || !chain) throw error;
+        if (!isUnknownChain(error) || !chain) throw error;
         await provider.request({
           method: 'wallet_addEthereumChain',
           params: [
@@ -206,4 +226,10 @@ function boundChain(id: number): BoundChain {
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
     rpcUrls: { default: { http: [] } },
   };
+}
+
+/** EIP-1193 4902 "unrecognized chain", at the top level or nested (as some wallets and viem wrap it) */
+function isUnknownChain(error: unknown): boolean {
+  const e = error as { code?: number; cause?: { code?: number }; data?: { originalError?: { code?: number } } } | null;
+  return e?.code === 4902 || e?.cause?.code === 4902 || e?.data?.originalError?.code === 4902;
 }

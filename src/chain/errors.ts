@@ -87,11 +87,13 @@ export function rpcErrorMessage(error: unknown): string {
   let text: string;
   if (error instanceof Error) {
     // viem errors: shortMessage plus details (e.g. the node's reason), without the URL sections
-    const { shortMessage, details } = error as { shortMessage?: unknown; details?: unknown };
+    const { shortMessage, details, status } = error as { shortMessage?: unknown; details?: unknown; status?: unknown };
     text =
       typeof shortMessage === 'string' && shortMessage
         ? shortMessage + (typeof details === 'string' && details && !shortMessage.includes(details) ? ` ${details}` : '')
         : error.message;
+    // Keep the HTTP status: it tells a rate limit (429) from bad credentials (401) or an outage
+    if (typeof status === 'number' && !text.includes(String(status))) text += ` (HTTP ${status})`;
   } else if (typeof error === 'object' && error !== null && typeof (error as { message?: unknown }).message === 'string') {
     text = (error as { message: string }).message;
   } else {

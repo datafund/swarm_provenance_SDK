@@ -398,3 +398,50 @@ describe('review round 2 (#139)', () => {
     expect((sendTransaction.mock.calls[0] as unknown as [{ chain?: { id: number } }])[0].chain?.id).toBe(84532);
   });
 });
+
+describe('review round 3 (#139)', () => {
+  it('an unreachable signer is a connection error, not a configuration error', async () => {
+    const s = signer(0, { getChainId: () => Promise.reject(new Error('fetch failed')) });
+    const error = await new ChainClient({ chain: 'base-sepolia', signer: s }).anchor(HASH, 'dataset').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConnectionError);
+    expect(error).not.toBeInstanceOf(ChainConfigurationError);
+  });
+
+  it('a declined switch is a configuration error', async () => {
+    const s = signer(1, { switchChain: () => Promise.reject(new Error('User rejected')) });
+    await expect(new ChainClient({ chain: 'base-sepolia', signer: s }).anchor(HASH, 'dataset')).rejects.toThrow(
+      /did not switch/,
+    );
+  });
+
+  it('rpcErrorMessage keeps the HTTP status (rate limit vs auth vs outage)', () => {
+    const viem429 = Object.assign(new Error('HTTP request failed.\n\nURL: https://rpc.example/v2/KEY'), {
+      shortMessage: 'HTTP request failed.',
+      status: 429,
+    });
+    const text = rpcErrorMessage(viem429);
+    expect(text).toContain('HTTP 429');
+    expect(text).not.toContain('KEY');
+  });
+
+  it('fromViemWalletClient adds an unknown chain (4902) before switching', async () => {
+    let known = false;
+    const switchChain = vi.fn(({ id }: { id: number }) =>
+      known ? Promise.resolve() : Promise.reject(Object.assign(new Error(`Unrecognized chain ${id}`), { code: 4902 })),
+    );
+    const addChain = vi.fn(() => {
+      known = true;
+      return Promise.resolve();
+    });
+    const s = fromViemWalletClient({
+      account: { address: ADDRESS },
+      getChainId: () => Promise.resolve(1),
+      switchChain,
+      addChain,
+      sendTransaction: () => Promise.resolve(TX),
+    });
+    await s.switchChain!(84532, { name: 'base-sepolia', rpcUrls: ['https://rpc'], explorerUrl: 'https://scan' });
+    expect(addChain).toHaveBeenCalledTimes(1);
+    expect(switchChain).toHaveBeenCalledTimes(2);
+  });
+});

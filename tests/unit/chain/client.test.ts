@@ -456,10 +456,14 @@ describe('ChainClient', () => {
 
     it('should throw on duplicate transformation', async () => {
       const newHash = 'cd'.repeat(32);
-      // getTransformationLinks returns existing link
-      mockReadContract.mockResolvedValueOnce([
-        { newDataHash: `0x${newHash}`, description: 'already done' },
-      ]);
+      // getTransformationLinks returns an existing link; verifyOnChain (run in parallel) says not registered
+      mockReadContract.mockImplementation(({ functionName }: { functionName: string }) =>
+        Promise.resolve(
+          functionName === 'getTransformationLinks'
+            ? [{ newDataHash: `0x${newHash}`, description: 'already done' }]
+            : [ZERO_HASH, '0x' + '00'.repeat(20), 0n, '', ZERO_HASH, 0],
+        ),
+      );
 
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
