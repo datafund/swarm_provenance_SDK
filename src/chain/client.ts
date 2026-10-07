@@ -1,5 +1,6 @@
 import {
   createPublicClient,
+  decodeEventLog,
   fallback,
   formatEther,
   http,
@@ -17,6 +18,9 @@ import {
   DataAlreadyRegisteredError,
   DataNotRegisteredError,
   SignerRequiredError,
+  ReceiptTimeoutError,
+  rpcErrorMessage,
+  redactUrls,
 } from './errors.js';
 import { normalizeHash, validateDataType, validateAddress } from './validation.js';
 import {
@@ -79,6 +83,8 @@ export class ChainClient {
   private readonly txTimeout: number;
   private readonly gasLimit: bigint | undefined;
   private readonly retryConfig: Required<RetryConfig>;
+  /** RPC chain + contract code check, done once per client (see ensureWriteTarget) */
+  private writeTargetCheck: Promise<void> | undefined;
 
   constructor(config: ChainClientConfig) {
     // Resolve chain preset
@@ -191,7 +197,7 @@ export class ChainClient {
       return storedHash !== ZERO_BYTES32;
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to verify on-chain: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to verify on-chain: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -247,7 +253,7 @@ export class ChainClient {
         throw error;
       }
       throw new ChainConnectionError(
-        `Failed to get data record: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get data record: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -269,7 +275,7 @@ export class ChainClient {
       return [...(result as readonly Hex[])];
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get user data records: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get user data records: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -292,7 +298,7 @@ export class ChainClient {
       return result;
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to check access: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to check access: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -315,7 +321,7 @@ export class ChainClient {
       return result;
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to check delegate: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to check delegate: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -341,7 +347,7 @@ export class ChainClient {
       }));
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get transformation links: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get transformation links: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -364,7 +370,7 @@ export class ChainClient {
       return [...(result as readonly Hex[])];
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get transformation parents: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get transformation parents: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -386,7 +392,7 @@ export class ChainClient {
       return [...(result as readonly Hex[])];
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get child hashes: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get child hashes: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -478,7 +484,7 @@ export class ChainClient {
    */
   private traversalError(hash: Hex, depth: number, cause: unknown): Error {
     if (cause instanceof ChainError && !(cause instanceof ChainConnectionError)) return cause;
-    const message = cause instanceof Error ? cause.message : String(cause);
+    const message = rpcErrorMessage(cause);
     const error = new ChainConnectionError(`getProvenanceChain failed at ${hash} (depth ${depth}): ${message}`);
     error.cause = cause;
     return error;
@@ -501,7 +507,7 @@ export class ChainClient {
       return Number(result);
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get user data records count: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get user data records count: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -523,7 +529,7 @@ export class ChainClient {
       return [...(result as readonly Hex[])];
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get paginated data records: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get paginated data records: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -594,7 +600,7 @@ export class ChainClient {
       };
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get balance: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get balance: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -619,7 +625,7 @@ export class ChainClient {
 
     let receipt: TransactionResult;
     try {
-      receipt = await this.sendAndWait(data);
+      receipt = await this.sendAndWait(data, { event: 'DataRegistered' });
     } catch (error) {
       // Fallback: pre-check may miss due to RPC read lag
       if (this.isAlreadyRegisteredRevert(error)) {
@@ -651,7 +657,7 @@ export class ChainClient {
     const data = encodeRecordAccess(hash);
     const accessor = await this.signer!.getAddress();
 
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataAccessed' });
 
     return {
       ...receipt,
@@ -678,7 +684,7 @@ export class ChainClient {
 
     let receipt: TransactionResult;
     try {
-      receipt = await this.sendAndWait(data);
+      receipt = await this.sendAndWait(data, { event: 'DataRegistered' });
     } catch (error) {
       if (this.isAlreadyRegisteredRevert(error)) {
         await this.throwAlreadyRegistered(hash, dataHash);
@@ -718,7 +724,7 @@ export class ChainClient {
       return dataHash === ZERO_BYTES32 ? null : (dataHash as string);
     } catch (error) {
       throw new ChainConnectionError(
-        `Failed to get data hash by storage ref: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to get data hash by storage ref: ${rpcErrorMessage(error)}`
       );
     }
   }
@@ -738,34 +744,26 @@ export class ChainClient {
     const nHash = normalizeHash(newHash);
 
     // Check for duplicate transformation (saves gas)
-    try {
-      const existingLinks = await this.getTransformationLinks(origHash);
-      if (existingLinks.some((link) => link.newDataHash.toLowerCase() === nHash.toLowerCase())) {
-        throw new ChainValidationError(
-          `Transformation from ${originalHash} to ${newHash} is already recorded on-chain`
-        );
-      }
-    } catch (error) {
-      if (error instanceof ChainValidationError) throw error;
-      // Ignore read errors — proceed with the transaction
+    const existingLinks = await this.getTransformationLinks(origHash);
+    if (existingLinks.some((link) => link.newDataHash.toLowerCase() === nHash.toLowerCase())) {
+      throw new ChainValidationError(
+        `Transformation from ${originalHash} to ${newHash} is already recorded on-chain`
+      );
     }
 
+
     // Check that the new hash is not already registered (contract will revert otherwise)
-    try {
-      const exists = await this.verifyOnChain(nHash);
-      if (exists) {
-        throw new ChainValidationError(
-          `New hash ${newHash} is already registered on-chain. The contract auto-registers the new hash during transformation — do not anchor it beforehand.`
-        );
-      }
-    } catch (error) {
-      if (error instanceof ChainValidationError) throw error;
-      // Ignore read errors — proceed with the transaction
+    const exists = await this.verifyOnChain(nHash);
+    if (exists) {
+      throw new ChainValidationError(
+        `New hash ${newHash} is already registered on-chain. The contract auto-registers the new hash during transformation — do not anchor it beforehand.`
+      );
     }
+
 
     const data = encodeRecordTransformation(origHash, nHash, description);
 
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataTransformed' });
 
     return {
       ...receipt,
@@ -807,30 +805,22 @@ export class ChainClient {
     const normalizedNew = normalizeHash(newHash);
 
     // Check for duplicate merge (saves gas)
-    try {
-      const existingParents = await this.getTransformationParents(normalizedNew);
-      if (existingParents.length > 0) {
-        throw new ChainValidationError(
-          `Hash ${newHash} already has transformation parents recorded on-chain`
-        );
-      }
-    } catch (error) {
-      if (error instanceof ChainValidationError) throw error;
-      // Ignore read errors — proceed with the transaction
+    const existingParents = await this.getTransformationParents(normalizedNew);
+    if (existingParents.length > 0) {
+      throw new ChainValidationError(
+        `Hash ${newHash} already has transformation parents recorded on-chain`
+      );
     }
 
+
     // Check that the new hash is not already registered (contract will revert otherwise)
-    try {
-      const exists = await this.verifyOnChain(normalizedNew);
-      if (exists) {
-        throw new ChainValidationError(
-          `New hash ${newHash} is already registered on-chain. The contract auto-registers the new hash during merge — do not anchor it beforehand.`
-        );
-      }
-    } catch (error) {
-      if (error instanceof ChainValidationError) throw error;
-      // Ignore read errors — proceed with the transaction
+    const exists = await this.verifyOnChain(normalizedNew);
+    if (exists) {
+      throw new ChainValidationError(
+        `New hash ${newHash} is already registered on-chain. The contract auto-registers the new hash during merge — do not anchor it beforehand.`
+      );
     }
+
 
     const data = encodeRecordMergeTransformation(
       normalizedSources,
@@ -839,7 +829,7 @@ export class ChainClient {
       newDataType,
     );
 
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataMerged' });
 
     return {
       ...receipt,
@@ -860,7 +850,7 @@ export class ChainClient {
     const hash = normalizeHash(dataHash);
     const data = encodeSetDataStatus(hash, newStatus as number);
 
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataStatusChanged' });
 
     return {
       ...receipt,
@@ -880,7 +870,7 @@ export class ChainClient {
     const hash = normalizeHash(dataHash);
     const data = encodeTransferDataOwnership(hash, newOwner as Address);
 
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataOwnershipTransferred' });
 
     return {
       ...receipt,
@@ -899,7 +889,7 @@ export class ChainClient {
 
     const data = encodeSetDelegate(delegate as Address, authorized);
 
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DelegateAuthorized' });
 
     return {
       ...receipt,
@@ -932,7 +922,7 @@ export class ChainClient {
     }
 
     const data = encodeBatchRegisterData(hashes, types, storageRefs);
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataRegistered', count: items.length });
 
     return {
       ...receipt,
@@ -950,7 +940,7 @@ export class ChainClient {
 
     const hashes = dataHashes.map((h) => normalizeHash(h));
     const data = encodeBatchRecordAccess(hashes);
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataAccessed', count: dataHashes.length });
 
     return {
       ...receipt,
@@ -971,7 +961,7 @@ export class ChainClient {
     const hashes = items.map((item) => normalizeHash(item.dataHash));
     const statuses = items.map((item) => item.status as number);
     const data = encodeBatchSetDataStatus(hashes, statuses);
-    const receipt = await this.sendAndWait(data);
+    const receipt = await this.sendAndWait(data, { event: 'DataStatusChanged', count: items.length });
 
     return {
       ...receipt,
@@ -1016,10 +1006,10 @@ export class ChainClient {
         record.dataType,
       );
     } catch (error) {
-      if (error instanceof DataAlreadyRegisteredError) {
-        throw error;
-      }
-      // DataNotRegisteredError means the hash is free — proceed
+      // Only "not registered" means the hash is free. Any other failure (RPC
+      // down, wrong contract) is surfaced instead of anchoring blind (#116).
+      if (error instanceof DataNotRegisteredError) return;
+      throw error;
     }
   }
 
@@ -1068,7 +1058,7 @@ export class ChainClient {
 
     // Extract the first meaningful section before viem's verbose details
     const match = raw.match(/^(.*?)(?:\n\n|\nContract Call:|\nRequest Arguments:|\nDocs:)/s);
-    const cleaned = match ? match[1]!.trim() : raw;
+    const cleaned = redactUrls(match ? match[1]!.trim() : raw);
     if (cleaned.length > 200) {
       return cleaned.slice(0, 197) + '...';
     }
@@ -1089,6 +1079,61 @@ export class ChainClient {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Refuse to write anywhere but the configured chain and contract (#115, #116):
+   * the RPC and the signer must both be on the preset's chain (an EIP-1193
+   * wallet is asked to switch), and the contract address must hold code.
+   */
+  private async ensureWriteTarget(): Promise<void> {
+    const expected = this.preset.chainId;
+    this.writeTargetCheck ??= (async () => {
+      let rpcChainId: number;
+      let code: Hex | undefined;
+      try {
+        rpcChainId = await this.publicClient.getChainId();
+        code = await this.publicClient.getBytecode({ address: this.contractAddress });
+      } catch (error) {
+        throw new ChainConnectionError(`Could not check the chain before writing: ${rpcErrorMessage(error)}`);
+      }
+      if (rpcChainId !== expected) {
+        throw new ChainConfigurationError(
+          `The RPC is on chain ${rpcChainId}, but the ${this.preset.name} preset is chain ${expected}`
+        );
+      }
+      if (!code || code === '0x') {
+        throw new ChainConfigurationError(
+          `No contract code at ${this.contractAddress} on ${this.preset.name}: wrong contract address or chain`
+        );
+      }
+    })();
+    try {
+      await this.writeTargetCheck;
+    } catch (error) {
+      this.writeTargetCheck = undefined; // check again next time
+      throw error;
+    }
+
+    // The signer is checked on every write: a wallet can change network at any time
+    const signer = this.signer!;
+    let signerChainId: number;
+    try {
+      signerChainId = await signer.getChainId();
+      if (signerChainId !== expected && signer.switchChain) {
+        await signer.switchChain(expected);
+        signerChainId = await signer.getChainId();
+      }
+    } catch (error) {
+      throw new ChainConfigurationError(
+        `Could not confirm the signer is on chain ${expected} (${this.preset.name}): ${rpcErrorMessage(error)}`
+      );
+    }
+    if (signerChainId !== expected) {
+      throw new ChainConfigurationError(
+        `The signer is on chain ${signerChainId}, but the ${this.preset.name} preset is chain ${expected}`
+      );
+    }
   }
 
   private async sendWithRetry(data: Hex): Promise<Hex> {
@@ -1116,33 +1161,77 @@ export class ChainClient {
     throw new ChainTransactionError('Transaction failed after retries');
   }
 
-  private async sendAndWait(data: Hex): Promise<TransactionResult> {
+  private async sendAndWait(data: Hex, expected: ExpectedEvent): Promise<TransactionResult> {
+    await this.ensureWriteTarget();
     const txHash = await this.sendWithRetry(data);
+    return this.waitForTransaction(txHash, expected);
+  }
 
+  /**
+   * Wait for a sent transaction and confirm it did what was asked: it did not
+   * revert and the contract emitted the expected event(s). Use it to resume
+   * after a ReceiptTimeoutError (`error.txHash`).
+   *
+   * @throws ReceiptTimeoutError if the receipt does not arrive (it may still confirm)
+   * @throws ChainTransactionError if it reverted or the expected event is missing
+   */
+  async waitForTransaction(
+    txHash: Hex,
+    expected?: ExpectedEvent & { timeout?: number }
+  ): Promise<TransactionResult> {
+    let receipt: Awaited<ReturnType<PublicClient['waitForTransactionReceipt']>>;
     try {
-      const receipt = await this.publicClient.waitForTransactionReceipt({
+      receipt = await this.publicClient.waitForTransactionReceipt({
         hash: txHash,
-        timeout: this.txTimeout,
+        timeout: expected?.timeout ?? this.txTimeout,
         pollingInterval: 2_000,
       });
-
-      if (receipt.status === 'reverted') {
-        throw new ChainTransactionError('Transaction reverted', txHash);
-      }
-
-      return {
-        txHash,
-        blockNumber: Number(receipt.blockNumber),
-        gasUsed: receipt.gasUsed,
-        explorerUrl: this.getExplorerUrl(txHash),
-      };
     } catch (error) {
-      if (error instanceof ChainTransactionError) {
-        throw error;
-      }
-      throw new ChainConnectionError(
-        `Failed waiting for receipt: ${error instanceof Error ? error.message : String(error)}`
+      const explorerUrl = this.getExplorerUrl(txHash);
+      throw new ReceiptTimeoutError(
+        `Transaction ${txHash} was sent but its receipt could not be obtained (${rpcErrorMessage(error)}). ` +
+          'It may still confirm: call waitForTransaction(txHash) instead of sending again.',
+        txHash,
+        explorerUrl,
       );
     }
+
+    if (receipt.status === 'reverted') {
+      throw new ChainTransactionError('Transaction reverted', txHash);
+    }
+
+    if (expected) {
+      // "Did not revert" is not success: a call to an address without the
+      // contract also succeeds. Require the contract's own event (#116).
+      const emitted = receipt.logs.filter((log) => {
+        if (log.address.toLowerCase() !== this.contractAddress.toLowerCase()) return false;
+        try {
+          return decodeEventLog({ abi: DATA_PROVENANCE_ABI, data: log.data, topics: log.topics }).eventName === expected.event;
+        } catch {
+          return false;
+        }
+      }).length;
+      const needed = expected.count ?? 1;
+      if (emitted < needed) {
+        throw new ChainTransactionError(
+          `Transaction ${txHash} succeeded but the contract emitted ${emitted} of ${needed} expected ${expected.event} event(s): nothing may have been recorded`,
+          txHash,
+        );
+      }
+    }
+
+    return {
+      txHash,
+      blockNumber: Number(receipt.blockNumber),
+      gasUsed: receipt.gasUsed,
+      explorerUrl: this.getExplorerUrl(txHash),
+    };
   }
+}
+
+/** The event a write must emit to count as done (see waitForTransaction) */
+export interface ExpectedEvent {
+  event: string;
+  /** How many (batch writes emit one per item; default 1) */
+  count?: number;
 }

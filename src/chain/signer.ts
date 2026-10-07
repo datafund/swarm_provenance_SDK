@@ -27,6 +27,7 @@ interface Eip1193Provider {
  */
 export function fromViemWalletClient(walletClient: {
   account?: { address: Address } | null;
+  getChainId(): Promise<number>;
   sendTransaction(args: {
     to: Address;
     data: Hex;
@@ -44,6 +45,9 @@ export function fromViemWalletClient(walletClient: {
   return {
     getAddress(): Promise<Address> {
       return Promise.resolve(account.address);
+    },
+    getChainId(): Promise<number> {
+      return walletClient.getChainId();
     },
     sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
       return walletClient.sendTransaction({
@@ -91,6 +95,10 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
     getAddress(): Promise<Address> {
       return Promise.resolve(account.address);
     },
+    // The RPC decides the chain for a raw key; ChainClient checks it before writing
+    getChainId(): Promise<number> {
+      return client.getChainId();
+    },
     sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
       return client.sendTransaction({
         to: tx.to,
@@ -125,6 +133,13 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
   return {
     getAddress(): Promise<Address> {
       return Promise.resolve(address);
+    },
+    async getChainId(): Promise<number> {
+      return Number(await provider.request({ method: 'eth_chainId' }));
+    },
+    async switchChain(chainId: number): Promise<void> {
+      // The wallet asks the user; a refusal or an unknown chain throws
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: `0x${chainId.toString(16)}` }] });
     },
     async sendTransaction(tx: { to: Address; data: Hex; gas?: bigint }): Promise<Hex> {
       const txHash = (await provider.request({

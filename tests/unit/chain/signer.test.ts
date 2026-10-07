@@ -10,6 +10,7 @@ describe('fromViemWalletClient', () => {
   it('should create signer from wallet client with account', async () => {
     const mockWalletClient = {
       account: { address: MOCK_ADDRESS },
+      getChainId: () => Promise.resolve(84532),
       sendTransaction: () => Promise.resolve(MOCK_TX_HASH),
     };
 
@@ -21,6 +22,7 @@ describe('fromViemWalletClient', () => {
   it('should throw when wallet client has no account', () => {
     const mockWalletClient = {
       account: null,
+      getChainId: () => Promise.resolve(84532),
       sendTransaction: () => Promise.resolve(MOCK_TX_HASH),
     };
 
@@ -30,6 +32,7 @@ describe('fromViemWalletClient', () => {
   it('should delegate sendTransaction to wallet client', async () => {
     const mockWalletClient = {
       account: { address: MOCK_ADDRESS },
+      getChainId: () => Promise.resolve(84532),
       sendTransaction: (args: { to: Address; data: Hex }) => {
         expect(args.to).toBe('0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a');
         expect(args.data).toMatch(/^0x/);
@@ -49,6 +52,7 @@ describe('fromViemWalletClient', () => {
     const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
     const mockWalletClient = {
       account: { address: MOCK_ADDRESS },
+      getChainId: () => Promise.resolve(84532),
       sendTransaction,
     };
 
@@ -68,6 +72,7 @@ describe('fromViemWalletClient', () => {
     const sendTransaction = vi.fn().mockResolvedValue(MOCK_TX_HASH);
     const mockWalletClient = {
       account: { address: MOCK_ADDRESS },
+      getChainId: () => Promise.resolve(84532),
       sendTransaction,
     };
 

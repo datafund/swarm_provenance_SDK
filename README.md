@@ -490,9 +490,9 @@ const signer = fromViemWalletClient(walletClient);
 
 ```typescript
 import {
-  ChainConnectionError,
+  ChainConfigurationError,
   ChainTransactionError,
-  DataNotRegisteredError,
+  ReceiptTimeoutError,
   SignerRequiredError,
 } from '@datafund/swarm-provenance/chain';
 
@@ -501,12 +501,26 @@ try {
 } catch (error) {
   if (error instanceof SignerRequiredError) {
     console.error('Connect a wallet first');
+  } else if (error instanceof ChainConfigurationError) {
+    // Before anything was sent: wrong chain (RPC or wallet), or no contract at the address
+    console.error(error.message);
+  } else if (error instanceof ReceiptTimeoutError) {
+    // Sent, but no receipt yet: it may still confirm. Do not resend; resume instead.
+    await chain.waitForTransaction(error.txHash as `0x${string}`, { event: 'DataRegistered' });
   } else if (error instanceof ChainTransactionError) {
+    // Reverted, or succeeded without the contract's event (nothing recorded); error.txHash is set
     console.error('Transaction failed:', error.message);
-    // error.originalError has the full viem error for debugging
+    // error.originalError has the full viem error (not enumerable: it may contain the RPC URL)
   }
 }
 ```
+
+**Write safety.** Before the first write a client checks that its RPC is on the preset's chain
+and that the contract address holds code; before every write it checks the signer's chain
+(`fromEip1193Provider` asks the wallet to switch). A write counts as done only if the receipt
+contains the contract's event (`DataRegistered`, `DataAccessed`, ...; one per item for batch
+writes). Pre-checks that fail on an RPC error are reported, not skipped. Chain error messages
+never include RPC URLs (they often embed API keys).
 
 ### Troubleshooting: `Cannot find package 'viem'`
 
@@ -551,6 +565,13 @@ message comes from Node itself.
 - Raw documents (`raw: true`): `content_hash` is SHA-256 of canonical JSON (the gateway and
   Python tools' convention) instead of `JSON.stringify(data)` (#114). This version still
   accepts the old form; SDK 0.6.x rejects documents uploaded with this version.
+- Chain writes (#115-#118): `ChainSigner` requires `getChainId()` (and may implement
+  `switchChain()`); writes refuse a wrong RPC or signer chain and an address without contract
+  code; success requires the contract's event in the receipt (else `ChainTransactionError`
+  with `txHash`); a missing receipt is `ReceiptTimeoutError` (a `ChainConnectionError`) with
+  `txHash`, resumable with `waitForTransaction()`; RPC read errors in pre-checks (already
+  registered? duplicate transformation?) are thrown instead of ignored; error messages no
+  longer contain RPC URLs, and `ChainTransactionError.originalError` is not enumerable.
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.
