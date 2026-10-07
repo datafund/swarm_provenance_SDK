@@ -437,3 +437,17 @@ describe('final review (#138)', () => {
     expect(payments()).toBe(0);
   });
 });
+
+describe('Web Crypto requirement', () => {
+  it('x402 mode without globalThis.crypto fails with a clear configuration error', async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+    Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true });
+    try {
+      const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PaymentConfigurationError);
+      expect((error as Error).message).toMatch(/Node\.js 20/);
+    } finally {
+      if (original) Object.defineProperty(globalThis, 'crypto', original);
+    }
+  });
+});

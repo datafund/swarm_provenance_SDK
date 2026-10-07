@@ -257,6 +257,14 @@ export async function createX402Transport(
   config: X402PaymentConfig,
   policy: PaymentPolicy = resolvePaymentPolicy(config)
 ): Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> {
+  // The x402 library draws payment nonces from Web Crypto. Node 18 does not
+  // expose it globally, and the library's own error does not say why.
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') {
+    throw new PaymentConfigurationError(
+      'x402 payment mode needs globalThis.crypto (Web Crypto): use Node.js 20 or later, ' +
+        'or on Node 18 run with --experimental-global-webcrypto or set globalThis.crypto = require("node:crypto").webcrypto'
+    );
+  }
   let x402Fetch: typeof import('@x402/fetch');
   let x402Evm: typeof import('@x402/evm');
 

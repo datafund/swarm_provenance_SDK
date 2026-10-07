@@ -73,6 +73,7 @@ on 502/503/429); if it fails after the payment was sent, the error's `payment` f
 (`{ paymentSent: true, transaction? }`). A timeout while the wallet is still approving the
 payment is not reported as paid: nothing was sent. The receipt for a
 successful payment is not returned yet (#111). Tested with `@x402/*` 2.5.0 to 2.28.x.
+x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
 **Server (Node.js):** load the key from the environment or a secret store, never from source code:
 
