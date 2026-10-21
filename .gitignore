@@ -31,5 +31,9 @@ pnpm-debug.log*
 tmp/
 temp/
 
-# Local per-developer editor settings (may contain credentials)
+# Local per-developer settings (may contain credentials)
 .claude/settings.local.json
+.claude/*.local.json
+CLAUDE.local.md
+.env.*
+!.env.example
