@@ -6,6 +6,19 @@ export interface PaymentAttempt {
   transaction?: string;
   /** Gateway-reported payment status, if any */
   status?: string;
+  /**
+   * Idempotency-Key the request was sent with. Retrying the same operation with
+   * it (`idempotencyKey` option) is never charged twice: the gateway returns the
+   * first result instead.
+   */
+  idempotencyKey?: string;
+  /** Payment authorization nonce, when the gateway could not tell whether it settled */
+  nonce?: string;
+  /**
+   * Stamp the upload used. Pass it back as `stampId` together with
+   * `idempotencyKey`: a retry with another stamp is a different request.
+   */
+  stampId?: string;
 }
 
 /**
@@ -113,6 +126,31 @@ export class PaymentRefusedError extends PaymentError {
     super(message, 'PAYMENT_REFUSED');
     this.name = 'PaymentRefusedError';
     Object.setPrototypeOf(this, PaymentRefusedError.prototype);
+  }
+}
+
+/**
+ * A retry of a paid request (same Idempotency-Key) found that the first
+ * attempt's payment needs a person to follow up. Never retried automatically.
+ *
+ * - `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` (`outcome: 'unknown'`): the payment may
+ *   or may not have been collected. Check `payment.nonce` on-chain before paying again.
+ * - `IDEMPOTENCY_KEY_SETTLED_PENDING` (`outcome: 'settled_not_delivered'`): the
+ *   first attempt was paid (`payment.transaction`) and its result is not
+ *   available. Ask the gateway operator for the result or a refund.
+ * - `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` (`outcome: 'delivered'`): the first
+ *   attempt succeeded and was paid once, but the gateway kept no copy of its
+ *   response. The operation worked: do not pay for it again.
+ */
+export class PaymentOutcomeError extends PaymentError {
+  constructor(
+    message: string,
+    code: string,
+    public readonly outcome: 'unknown' | 'settled_not_delivered' | 'delivered',
+  ) {
+    super(message, code);
+    this.name = 'PaymentOutcomeError';
+    Object.setPrototypeOf(this, PaymentOutcomeError.prototype);
   }
 }
 

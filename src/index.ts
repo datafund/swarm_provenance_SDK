@@ -38,6 +38,7 @@ export {
   PaymentRefusedError,
   type PaymentAttempt,
   PaymentRateLimitError,
+  PaymentOutcomeError,
 } from './errors.js';
 
 // Utilities (for advanced use)

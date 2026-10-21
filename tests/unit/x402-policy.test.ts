@@ -23,6 +23,8 @@ const wallet = createWalletClient({
 const USDC_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const GATEWAY_PAYTO = '0x1111111111111111111111111111111111111111';
 const STAMP = 'a'.repeat(64);
+/** Matches the generated Idempotency-Key (#102) */
+const ANY_KEY: unknown = expect.any(String);
 
 function requirement(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -239,7 +241,7 @@ describe('a paid request is never retried (#107)', () => {
     const error = await new ProvenanceClient({
       gatewayUrl: 'http://gateway.test',
       payment: { wallet, onBeforePayment: () => new Promise((resolve) => setTimeout(() => resolve(true), 100)) },
-      timeout: 30,
+      paidTimeout: 30,
       retry: { maxRetries: 0 },
     })
       .upload('hello', { stampId: STAMP })
@@ -262,7 +264,12 @@ describe('a paid request is never retried (#107)', () => {
 
     expect(payments()).toBe(1);
     expect(error).toBeInstanceOf(GatewayConnectionError);
-    expect((error as GatewayConnectionError).payment).toEqual({ paymentSent: true, transaction: '0xabc123' });
+    expect((error as GatewayConnectionError).payment).toEqual({
+      paymentSent: true,
+      transaction: '0xabc123',
+      idempotencyKey: ANY_KEY,
+      stampId: STAMP,
+    });
     expect((error as Error).message).toMatch(/may have been charged; transaction 0xabc123/);
   });
 
@@ -271,7 +278,7 @@ describe('a paid request is never retried (#107)', () => {
     const error = await new ProvenanceClient({
       gatewayUrl: 'http://gateway.test',
       payment: { wallet },
-      timeout: 50,
+      paidTimeout: 50,
       retry: { maxRetries: 2, baseDelayMs: 1 },
     })
       .upload('hello', { stampId: STAMP })
@@ -280,13 +287,21 @@ describe('a paid request is never retried (#107)', () => {
     expect(payments()).toBe(1);
     expect(error).toBeInstanceOf(GatewayConnectionError);
     expect((error as GatewayConnectionError).code).toBe('TIMEOUT');
-    expect((error as GatewayConnectionError).payment).toEqual({ paymentSent: true });
+    expect((error as GatewayConnectionError).payment).toEqual({
+      paymentSent: true,
+      idempotencyKey: ANY_KEY,
+      stampId: STAMP,
+    });
   });
 
   it('the payment flag survives the NotaryError conversion (sign: notary)', async () => {
     afterPayment = { status: 503, body: { detail: 'notary down' } };
     const error = await client().upload('hello', { stampId: STAMP, sign: 'notary' }).catch((e: unknown) => e);
-    expect((error as { payment?: unknown }).payment).toEqual({ paymentSent: true });
+    expect((error as { payment?: unknown }).payment).toEqual({
+      paymentSent: true,
+      idempotencyKey: ANY_KEY,
+      stampId: STAMP,
+    });
     expect(payments()).toBe(1);
   });
 });
@@ -359,7 +374,7 @@ describe('review round 3 (#138)', () => {
     const error = await new ProvenanceClient({
       gatewayUrl: 'http://gateway.test',
       payment: { wallet, onBeforePayment: () => new Promise<boolean>(() => undefined) },
-      timeout: 50,
+      paidTimeout: 50,
       retry: { maxRetries: 0 },
     })
       .upload('hello', { stampId: STAMP })
@@ -384,7 +399,11 @@ describe('review round 3 (#138)', () => {
     try {
       const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
       expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
-      expect((error as GatewayConnectionError).payment).toEqual({ paymentSent: true });
+      expect((error as GatewayConnectionError).payment).toEqual({
+        paymentSent: true,
+        idempotencyKey: ANY_KEY,
+        stampId: STAMP,
+      });
       expect(payments()).toBe(1);
     } finally {
       vi.stubGlobal('fetch', gateway);

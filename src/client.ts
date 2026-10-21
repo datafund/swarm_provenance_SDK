@@ -29,6 +29,7 @@ import {
   NotaryError,
   PaymentRateLimitError,
   PaymentError,
+  PaymentOutcomeError,
   type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
@@ -46,6 +47,12 @@ import {
 
 const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
+/** Default timeout for an attempt that may pay: settlement is on-chain (#102) */
+const DEFAULT_PAID_TIMEOUT = 120000;
+/** Retries with the same Idempotency-Key while the gateway says to (IN_PROGRESS / UNAVAILABLE) */
+const MAX_IDEMPOTENT_RETRIES = 3;
+/** Longest Retry-After honoured for IDEMPOTENCY_KEY_IN_PROGRESS, in seconds */
+const MAX_IN_PROGRESS_WAIT_S = 30;
 
 /**
  * Main client for interacting with the Swarm Provenance Gateway
@@ -53,6 +60,7 @@ const DEFAULT_TIMEOUT = 30000;
 export class ProvenanceClient {
   private readonly gatewayUrl: string;
   private readonly timeout: number;
+  private readonly paidTimeout: number;
   private readonly paymentMode: PaymentMode;
   private readonly retryConfig: Required<GatewayRetryConfig>;
   /** Notary address reported by /notary/info (see gatewayNotaryAddress) */
@@ -63,13 +71,14 @@ export class ProvenanceClient {
   private notaryRecheckedAt = 0;
   private x402Transport: { fetchFor(state: PaymentAttemptState): typeof fetch } | undefined;
   private paymentPolicy: PaymentPolicy | undefined;
-  /** Responses to attempts that sent a payment (see fetch, handleError) */
-  private readonly paidResponses = new WeakSet<Response>();
+  /** Responses to attempts that sent a payment, with their Idempotency-Key (see fetch, handleError) */
+  private readonly paidResponses = new WeakMap<Response, string | undefined>();
   private x402TransportPromise: Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> | undefined;
 
   constructor(config: ProvenanceClientConfig = {}) {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
+    this.paidTimeout = config.paidTimeout ?? Math.max(this.timeout, DEFAULT_PAID_TIMEOUT);
     this.paymentMode = config.payment ?? 'free';
     // Resolve (and reject a bad) payment policy now, not on the first paid request
     if (typeof this.paymentMode === 'object') this.paymentPolicy = resolvePaymentPolicy(this.paymentMode);
@@ -166,17 +175,27 @@ export class ProvenanceClient {
   }
 
   /**
-   * Acquire a stamp from the pool
+   * Acquire a stamp from the pool.
+   *
+   * `options.idempotencyKey` (x402 mode): see `UploadOptions.idempotencyKey`.
    */
-  async acquireStamp(size: 'small' | 'medium' | 'large' = 'small'): Promise<AcquiredStamp> {
-    const response = await this.fetch('/api/v1/pool/acquire', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ size }),
-    });
+  async acquireStamp(
+    size: 'small' | 'medium' | 'large' = 'small',
+    options: { idempotencyKey?: string } = {}
+  ): Promise<AcquiredStamp> {
+    const response = await this.fetch(
+      '/api/v1/pool/acquire',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ size }),
+      },
+      { idempotencyKey: this.operationKey(options.idempotencyKey) }
+    );
 
     if (!response.ok) {
       const error = await this.handleError(response);
+      if (error instanceof PaymentOutcomeError) throw error;
       throw withPayment(
         new StampError(error.suggestion ? `${error.message}. ${error.suggestion}` : error.message, error.code),
         error,
@@ -212,9 +231,28 @@ export class ProvenanceClient {
     content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
     options: UploadOptions = {}
   ): Promise<UploadResult | DocumentUploadResult> {
+    // One key for the whole operation: the pool acquisition and the upload are
+    // different paths, so the gateway keeps them apart (#102)
+    const idempotencyKey = this.operationKey(options.idempotencyKey);
     // Get stamp - either from options or acquire from pool
-    const stampId = await this.resolveStampId(options);
+    const stampId = await this.resolveStampId(options, idempotencyKey);
 
+    try {
+      const withKey: UploadOptions = { ...options };
+      if (idempotencyKey !== undefined) withKey.idempotencyKey = idempotencyKey;
+      return await this.uploadWithStamp(content, stampId, withKey);
+    } catch (error) {
+      // A retry with the same key must reuse the stamp: name it next to the key
+      if (error instanceof ProvenanceError && error.payment) error.payment.stampId = stampId;
+      throw error;
+    }
+  }
+
+  private async uploadWithStamp(
+    content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
+    stampId: string,
+    options: UploadOptions
+  ): Promise<UploadResult | DocumentUploadResult> {
     if (options.raw) {
       return this.uploadRawDocument(content as string | Record<string, unknown>, stampId, options);
     }
@@ -390,7 +428,7 @@ export class ProvenanceClient {
     return this.notaryLookup;
   }
 
-  private async resolveStampId(options: UploadOptions): Promise<string> {
+  private async resolveStampId(options: UploadOptions, idempotencyKey: string | undefined): Promise<string> {
     if (options.stampId) {
       return options.stampId;
     }
@@ -409,7 +447,7 @@ export class ProvenanceClient {
       // Pool status check failed — proceed with acquire anyway
     }
 
-    const stamp = await this.acquireStamp(options.poolSize ?? 'small');
+    const stamp = await this.acquireStamp(options.poolSize ?? 'small', idempotencyKey === undefined ? {} : { idempotencyKey });
     return stamp.batchId;
   }
 
@@ -472,14 +510,15 @@ export class ProvenanceClient {
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' });
     formData.append('file', metadataBlob, 'provenance.json');
 
-    const response = await this.fetch(`/api/v1/data/?${params.toString()}`, {
-      method: 'POST',
-      body: formData,
-    });
+    const response = await this.fetch(
+      `/api/v1/data/?${params.toString()}`,
+      { method: 'POST', body: formData },
+      { idempotencyKey: options.idempotencyKey }
+    );
 
     if (!response.ok) {
       const error = await this.handleError(response);
-      if (options.sign === 'notary') {
+      if (options.sign === 'notary' && !(error instanceof PaymentOutcomeError)) {
         throw withPayment(new NotaryError(error.message, error.code), error);
       }
       throw error;
@@ -570,14 +609,34 @@ export class ProvenanceClient {
   }
 
   /**
+   * The Idempotency-Key for one logical operation (#102): the caller's, checked,
+   * or a new random one in x402 mode. Undefined when nothing is paid.
+   */
+  private operationKey(given: string | undefined): string | undefined {
+    if (given !== undefined && !IDEMPOTENCY_KEY.test(given)) {
+      throw new ProvenanceError(
+        `Invalid idempotencyKey: expected 1-255 printable ASCII characters, got ${JSON.stringify(given)}`,
+        'INVALID_INPUT'
+      );
+    }
+    if (given !== undefined || typeof this.paymentMode !== 'object') return given;
+    return newIdempotencyKey();
+  }
+
+  /**
    * Make a fetch request to the gateway.
    *
    * x402 mode: writes go through the paying fetch; reads use the free tier
    * unless `payForReads`. Each attempt gets its own paying fetch and state, so
    * the SDK knows whether it sent a payment: a paid attempt is never retried
    * (the gateway may already have settled, #107) and its errors carry `payment`.
+   *
+   * Paid writes carry `idempotencyKey` (#102). The only paid attempts retried
+   * are those the gateway answers with IDEMPOTENCY_KEY_IN_PROGRESS or
+   * IDEMPOTENCY_UNAVAILABLE: with the same key and a new authorization, which
+   * the gateway verifies but never settles.
    */
-  private async fetch(path: string, init?: RequestInit): Promise<Response> {
+  private async fetch(path: string, init?: RequestInit, options: { idempotencyKey?: string | undefined } = {}): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
 
     const x402 = typeof this.paymentMode === 'object' ? this.paymentMode : undefined;
@@ -587,15 +646,19 @@ export class ProvenanceClient {
     // Unpaid requests in x402 mode use the free tier, as in 'free' mode
     const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
     const transport = paying ? await this.getX402Transport() : undefined;
+    const idempotencyKey = paying && !isRead ? options.idempotencyKey : undefined;
+    const timeout = transport ? this.paidTimeout : this.timeout;
 
+    let idempotentRetries = 0;
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
 
       const headers = new Headers(init?.headers);
       if (freeTier && !headers.has('X-Payment-Mode')) {
         headers.set('X-Payment-Mode', 'free');
       }
+      if (idempotencyKey !== undefined) headers.set('Idempotency-Key', idempotencyKey);
       // Each attempt gets its own paying fetch, which records whether it paid
       const state: PaymentAttemptState = { paid: false };
       const fetchFn: typeof fetch = transport ? transport.fetchFor(state) : fetch;
@@ -611,7 +674,7 @@ export class ProvenanceClient {
           controller.signal
         );
         const paid = state.paid;
-        if (paid) this.paidResponses.add(response);
+        if (paid) this.paidResponses.set(response, idempotencyKey);
 
         // Detect free-tier rate limiting
         if (response.status === 429 && freeTier) {
@@ -629,6 +692,18 @@ export class ProvenanceClient {
           );
         }
 
+        // The gateway asks for a retry with the same key: the first request is
+        // still running, or its key store is briefly unreadable. Not charged.
+        if (paid && idempotencyKey !== undefined && idempotentRetries < MAX_IDEMPOTENT_RETRIES) {
+          const delay = await this.idempotentRetryDelay(response, idempotentRetries);
+          if (delay !== undefined) {
+            idempotentRetries++;
+            attempt--; // not a transient-error retry
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+
         // Retry transient errors, but never an attempt that sent a payment
         const retryable = response.status === 502 || response.status === 503 || response.status === 429;
         if (!paid && attempt < this.retryConfig.maxRetries && retryable) {
@@ -639,7 +714,7 @@ export class ProvenanceClient {
 
         return response;
       } catch (error) {
-        throw this.requestFailure(error, state);
+        throw this.requestFailure(error, state, idempotencyKey);
       } finally {
         clearTimeout(timeoutId);
       }
@@ -649,12 +724,34 @@ export class ProvenanceClient {
     throw new GatewayConnectionError('Request failed after retries', undefined, 'CONNECTION_FAILED');
   }
 
+  /**
+   * How long to wait before retrying a paid attempt with the same key, or
+   * undefined if the response does not ask for that retry.
+   */
+  private async idempotentRetryDelay(response: Response, retry: number): Promise<number | undefined> {
+    if (response.status !== 409 && response.status !== 503) return undefined;
+    const code = await response
+      .clone()
+      .json()
+      .then((body: GatewayErrorResponse) => errorCode(body))
+      .catch(() => undefined);
+    if (code === 'IDEMPOTENCY_KEY_IN_PROGRESS' && response.status === 409) {
+      const seconds = Number(response.headers.get('Retry-After') ?? '5');
+      return Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 5, MAX_IN_PROGRESS_WAIT_S) * 1000;
+    }
+    if (code === 'IDEMPOTENCY_UNAVAILABLE' && response.status === 503) {
+      return this.retryConfig.baseDelayMs * Math.pow(2, retry);
+    }
+    return undefined;
+  }
+
   /** Map a thrown fetch/x402 error to an SDK error, flagging a sent payment. */
-  private requestFailure(error: unknown, state: PaymentAttemptState): ProvenanceError {
+  private requestFailure(error: unknown, state: PaymentAttemptState, idempotencyKey?: string): ProvenanceError {
     const flag = <E extends ProvenanceError>(e: E): E => {
       if (state.paid) {
         e.payment = { paymentSent: true };
-        e.message += ' (a payment was sent with this request and may have been charged)';
+        if (idempotencyKey !== undefined) e.payment.idempotencyKey = idempotencyKey;
+        e.message += ` (a payment was sent with this request and may have been charged${retryHint(idempotencyKey)})`;
       }
       return e;
     };
@@ -692,8 +789,8 @@ export class ProvenanceClient {
         'INVALID_RESPONSE'
       );
       if (this.paidResponses.has(response)) {
-        failure.payment = paymentAttempt(response);
-        failure.message += ' (a payment was sent with this request and may have been charged)';
+        failure.payment = paymentAttempt(response, this.paidResponses.get(response));
+        failure.message += ` (a payment was sent with this request and may have been charged${retryHint(failure.payment.idempotencyKey)})`;
       }
       throw failure;
     }
@@ -702,10 +799,11 @@ export class ProvenanceClient {
   /**
    * Handle error responses from the gateway
    */
-  private async handleError(response: Response): Promise<GatewayConnectionError> {
+  private async handleError(response: Response): Promise<GatewayConnectionError | PaymentOutcomeError> {
     let message = `Gateway error: ${response.status} ${response.statusText}`;
     let code: string | undefined;
     let suggestion: string | undefined;
+    let fields: Record<string, unknown> = {};
 
     try {
       const data = (await response.json()) as GatewayErrorResponse;
@@ -719,23 +817,98 @@ export class ProvenanceClient {
         const structured = data.detail as { message: string; suggestion?: string };
         message = structured.message;
         suggestion = structured.suggestion;
+      } else if (typeof data.message === 'string' && data.message) {
+        // The gateway's error envelope: top-level {code, message}
+        message = data.message;
       }
-      code = data.code;
+      code = errorCode(data);
+      if (data.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)) {
+        fields = data.detail as Record<string, unknown>;
+      }
     } catch {
       // Ignore JSON parse errors
     }
 
+    const paid = this.paidResponses.has(response);
+    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)) : undefined;
+    if (payment && typeof fields['nonce'] === 'string' && fields['nonce']) payment.nonce = fields['nonce'];
+    if (payment && !payment.transaction && typeof fields['transaction'] === 'string' && fields['transaction'] !== 'unknown') {
+      payment.transaction = fields['transaction'];
+    }
+
+    const outcome = code === undefined ? undefined : PAYMENT_OUTCOMES[code];
+    if (payment && outcome) {
+      const error = new PaymentOutcomeError(`${outcomeMessage(outcome, payment)} Gateway: ${message}`, code!, outcome);
+      error.payment = payment;
+      return error;
+    }
+
     const error = new GatewayConnectionError(message, response.status, code, suggestion);
-    if (this.paidResponses.has(response)) {
+    if (payment) {
       // The request carried a signed payment: say so, with whatever the gateway reported
-      const payment = paymentAttempt(response);
       error.payment = payment;
       error.message += ` (a payment was sent with this request and may have been charged${
         payment.transaction ? `; transaction ${payment.transaction}` : ''
-      })`;
+      }${retryHint(payment.idempotencyKey)})`;
     }
     return error;
   }
+}
+
+/** Idempotency-Key the gateway accepts: 1-255 printable ASCII characters */
+const IDEMPOTENCY_KEY = /^[\x20-\x7e]{1,255}$/;
+
+/**
+ * A random key for one logical operation. Undefined without Web Crypto: x402
+ * mode then fails with its own configuration error before anything is paid.
+ */
+function newIdempotencyKey(): string | undefined {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (typeof c?.randomUUID === 'function') return c.randomUUID();
+  if (typeof c?.getRandomValues !== 'function') return undefined;
+  const bytes = new Uint8Array(16);
+  c.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** The gateway's error code: top level (error envelope) or inside `detail` */
+function errorCode(body: GatewayErrorResponse | undefined): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  if (typeof body.code === 'string') return body.code;
+  const detail = body.detail as unknown;
+  if (detail && typeof detail === 'object' && typeof (detail as { code?: unknown }).code === 'string') {
+    return (detail as { code: string }).code;
+  }
+  return undefined;
+}
+
+/** Idempotency answers that need a person, never a retry (#102) */
+const PAYMENT_OUTCOMES: Record<string, PaymentOutcomeError['outcome']> = {
+  IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN: 'unknown',
+  IDEMPOTENCY_KEY_SETTLED_PENDING: 'settled_not_delivered',
+  IDEMPOTENCY_KEY_DELIVERED_NOT_STORED: 'delivered',
+};
+
+function outcomeMessage(outcome: PaymentOutcomeError['outcome'], payment: PaymentAttempt): string {
+  switch (outcome) {
+    case 'unknown':
+      return `The first attempt's payment may or may not have been collected${
+        payment.nonce ? ` (authorization nonce ${payment.nonce})` : ''
+      }. Check it on-chain before paying again.`;
+    case 'settled_not_delivered':
+      return `The first attempt was paid${
+        payment.transaction ? ` (transaction ${payment.transaction})` : ''
+      } but its result is not available. Contact the gateway operator for the result or a refund.`;
+    case 'delivered':
+      return `The first attempt succeeded and was paid once${
+        payment.transaction ? ` (transaction ${payment.transaction})` : ''
+      }, but the gateway kept no copy of its response. Do not pay for it again.`;
+  }
+}
+
+/** How to retry an operation that failed after paying, without paying twice */
+function retryHint(idempotencyKey: string | undefined): string {
+  return idempotencyKey === undefined ? '' : `; retry with idempotencyKey "${idempotencyKey}" to avoid paying twice`;
 }
 
 /**
@@ -766,8 +939,9 @@ function assertNotaryAddress(options: DownloadOptions): void {
 }
 
 /** Payment details the gateway attached to a response for a paid request */
-function paymentAttempt(response: Response): PaymentAttempt {
+function paymentAttempt(response: Response, idempotencyKey?: string): PaymentAttempt {
   const attempt: PaymentAttempt = { paymentSent: true };
+  if (idempotencyKey !== undefined) attempt.idempotencyKey = idempotencyKey;
   let transaction = response.headers.get('X-Payment-Transaction') ?? undefined;
   const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
   if (!transaction && encoded) {
