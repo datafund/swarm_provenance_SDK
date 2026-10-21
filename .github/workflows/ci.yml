@@ -52,7 +52,11 @@ jobs:
           test -f dist/chain/browser.js
           test -f dist/chain/browser.cjs
           test -f dist/chain/browser.d.ts
-          ! grep -q fromPrivateKey dist/chain/browser.js
+          test -f dist/chain/browser.d.cts
+          # The browser build has no fromPrivateKey, in code or types (#123)
+          for f in browser.js browser.cjs browser.d.ts browser.d.cts; do
+            if grep -q fromPrivateKey "dist/chain/$f"; then echo "dist/chain/$f mentions fromPrivateKey"; exit 1; fi
+          done
           # The viem guard (#99) is applied to both CJS chain entries (#123)
           grep -qF "npm install viem" dist/chain/index.cjs
           grep -qF "npm install viem" dist/chain/browser.cjs
