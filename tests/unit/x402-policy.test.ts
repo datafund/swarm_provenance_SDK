@@ -623,6 +623,9 @@ describe('error handling (#112)', () => {
     expect(error).toBeInstanceOf(PaymentRefusedError);
     expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
     expect((error as Error).message).toMatch(/rejected in the wallet/);
+    // The amount as a price, like a 402's; the atomic value stays in `refusals`
+    expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
+    expect((error as Error).message).not.toContain('10000');
     expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('10000');
     expect(payments()).toBe(0);
   });

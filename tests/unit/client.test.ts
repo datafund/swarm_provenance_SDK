@@ -1344,6 +1344,26 @@ describe('ProvenanceClient', () => {
       expect((error as Error).message).toBe('Gateway error: 502 Bad Gateway');
     });
 
+    it('a long gateway message is capped at 4 KiB, with an ellipsis', async () => {
+      mockFetch.mockResolvedValueOnce(json({ code: 'X', message: 'm'.repeat(10_000) }, 400));
+      const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+      expect((error as Error).message).toBe(`${'m'.repeat(4096)}…`);
+
+      mockFetch.mockResolvedValueOnce(json({ detail: { error: 'e'.repeat(3000), detail: 'd'.repeat(3000) } }, 400));
+      const nested = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+      expect((nested as Error).message).toBe(`${'e'.repeat(3000)}: ${'d'.repeat(4096 - 3002)}…`);
+    });
+
+    it('a JSON body over 16 KiB is kept as its first 4 KiB of text; its code and message are still read', async () => {
+      const body = { code: 'BIG_ERROR', message: 'Too much detail.', detail: { list: 'x'.repeat(20_000) } };
+      mockFetch.mockResolvedValueOnce(json(body, 400));
+      const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+      expect((error as GatewayConnectionError).code).toBe('BIG_ERROR');
+      expect((error as Error).message).toBe('Too much detail.');
+      const kept = (error as ProvenanceError).body;
+      expect(kept).toBe(`${JSON.stringify(body).slice(0, 4096)}…`);
+    });
+
     it('the body survives the StampError conversion', async () => {
       const body = envelope({ code: 'POOL_EXHAUSTED', message: 'No stamps.' });
       mockFetch.mockResolvedValueOnce(json(body, 409));

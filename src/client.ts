@@ -833,9 +833,10 @@ export class ProvenanceClient {
     if (isWalletRejection(state.creationFailure) || ((state.creationFailure !== undefined || state.handedToLibrary) && isWalletRejection(error))) {
       // The person declined to sign in the wallet: a refusal, not a failure (#112)
       const request = state.approved;
+      const price = request ? describePrice(request, this.paymentPolicy?.decimals) : undefined;
       return new PaymentRefusedError(
         `Payment refused: the signature was rejected in the wallet${
-          request ? ` (${request.amount} on ${request.network} to ${request.payTo})` : ''
+          request ? ` (${price ?? `${request.amount} on ${request.network}`} to ${request.payTo})` : ''
         }`,
         request ? [{ request, reasons: ['rejected in the wallet'] }] : []
       );
@@ -896,10 +897,10 @@ export class ProvenanceClient {
     let fields: Record<string, unknown> = {};
     /** Transaction named in the body: in `detail`, or top level (the gateway's paid-request crash answer) */
     let bodyTransaction: unknown;
-    const body = await readErrorBody(response);
+    const { parsed, body } = await readErrorBody(response);
 
-    if (body && typeof body === 'object' && !Array.isArray(body)) {
-      const data = body as GatewayErrorResponse & Record<string, unknown>;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const data = parsed as GatewayErrorResponse & Record<string, unknown>;
       message = gatewayMessage(data) ?? message;
       code = errorCode(data);
       if (data.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)) {
@@ -1191,22 +1192,34 @@ function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceErr
   return target;
 }
 
-/** Longest error body text kept on `error.body`: a proxy's error page is not kept whole */
-const MAX_ERROR_BODY_TEXT = 4096;
+/** Longest gateway text kept on an error (`body` text, message): a proxy's error page is not kept whole */
+const MAX_ERROR_TEXT = 4096;
+/** Largest JSON error body kept parsed on `error.body`; a larger one is kept as capped text */
+const MAX_ERROR_JSON = 16384;
 
-/** An error response's body: parsed JSON, else its text (capped), else undefined. */
-async function readErrorBody(response: Response): Promise<unknown> {
+/** `text` cut to MAX_ERROR_TEXT characters, with an ellipsis when cut */
+function capText(text: string): string {
+  return text.length > MAX_ERROR_TEXT ? `${text.slice(0, MAX_ERROR_TEXT)}…` : text;
+}
+
+/**
+ * An error response's body. `parsed` is the JSON (read for code and message);
+ * `body` is what the error keeps: the JSON up to MAX_ERROR_JSON characters as
+ * sent, else the text capped at MAX_ERROR_TEXT.
+ */
+async function readErrorBody(response: Response): Promise<{ parsed: unknown; body: unknown }> {
   let text: string;
   try {
     text = await response.text();
   } catch {
-    return undefined;
+    return { parsed: undefined, body: undefined };
   }
-  if (!text) return undefined;
+  if (!text) return { parsed: undefined, body: undefined };
   try {
-    return JSON.parse(text) as unknown;
+    const parsed = JSON.parse(text) as unknown;
+    return { parsed, body: text.length > MAX_ERROR_JSON ? capText(text) : parsed };
   } catch {
-    return text.length > MAX_ERROR_BODY_TEXT ? `${text.slice(0, MAX_ERROR_BODY_TEXT)}…` : text;
+    return { parsed: undefined, body: capText(text) };
   }
 }
 
@@ -1221,6 +1234,11 @@ function nonEmpty(value: unknown): string | undefined {
  * `{detail: {error, detail}}`) is added when the message does not contain it.
  */
 function gatewayMessage(data: GatewayErrorResponse & Record<string, unknown>): string | undefined {
+  const message = composeMessage(data);
+  return message === undefined ? undefined : capText(message);
+}
+
+function composeMessage(data: GatewayErrorResponse & Record<string, unknown>): string | undefined {
   const detail = data.detail as unknown;
   if (Array.isArray(detail)) {
     const fields = detail.map((e: { msg?: unknown } | null) => nonEmpty(e?.msg)).filter((m): m is string => m !== undefined);
@@ -1249,14 +1267,24 @@ function priceOf(data: Record<string, unknown>): string | undefined {
   if (!request) return undefined;
   const prices = request.accepts
     .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
-    .map((o) => toPaymentRequest(request.x402Version, o))
-    .filter((r) => /^\d+$/.test(r.amount))
-    .map((r) => {
-      const network = r.network || '?';
-      const usdc = Object.hasOwn(USDC_BY_NETWORK, r.network) ? USDC_BY_NETWORK[r.network] : undefined;
-      return usdc && usdc.toLowerCase() === r.asset.toLowerCase()
-        ? `${formatAtomic(BigInt(r.amount), 6)} USDC on ${network}`
-        : `${r.amount} smallest units of ${r.asset || '?'} on ${network}`;
-    });
+    .map((o) => describePrice(toPaymentRequest(request.x402Version, o)))
+    .filter((p): p is string => p !== undefined);
   return prices.length > 0 ? prices.join(' or ') : undefined;
+}
+
+/**
+ * A requested payment as a price, e.g. "0.01 USDC on base-sepolia". USDC is
+ * known to have 6 decimals; another asset uses `decimals` (the policy's) when
+ * given, else is shown in its smallest units. Undefined if the amount is not an integer.
+ */
+function describePrice(request: PaymentRequest, decimals?: number): string | undefined {
+  if (!/^\d+$/.test(request.amount)) return undefined;
+  const network = request.network || '?';
+  const usdc = Object.hasOwn(USDC_BY_NETWORK, request.network) ? USDC_BY_NETWORK[request.network] : undefined;
+  if (usdc && usdc.toLowerCase() === request.asset.toLowerCase()) {
+    return `${formatAtomic(BigInt(request.amount), 6)} USDC on ${network}`;
+  }
+  return decimals !== undefined
+    ? `${formatAtomic(BigInt(request.amount), decimals)} of token ${request.asset || '?'} on ${network}`
+    : `${request.amount} smallest units of ${request.asset || '?'} on ${network}`;
 }
