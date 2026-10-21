@@ -304,8 +304,8 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object |
 | `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
 | `PAYMENT_REFUSED` | PaymentRefusedError | 402 outside the payment policy, vetoed by `onBeforePayment`, or the signature declined in the wallet (code 4001); nothing signed |
-| `FILE_TOO_LARGE` | ProvenanceError / GatewayConnectionError | Upload metadata over `maxUploadBytes` (checked before any request), or the gateway's or its proxy's 413 |
-| gateway codes | GatewayConnectionError / StampError | Any other gateway `code` passes through, e.g. the quota 429s `DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_SPEND_BUDGET_EXHAUSTED`, `FREE_QUOTA_EXCEEDED` (not rate limits, not retried) |
+| `FILE_TOO_LARGE` | ProvenanceError / GatewayConnectionError / NotaryError | Upload metadata over `maxUploadBytes` (ProvenanceError, checked before any request), or the gateway's or its proxy's 413 (GatewayConnectionError; NotaryError with `sign: 'notary'`) |
+| gateway codes | GatewayConnectionError / StampError / NotaryError | Any other gateway `code` passes through: StampError from pool acquisition, NotaryError from an upload with `sign: 'notary'`, else GatewayConnectionError. E.g. the quota 429s `DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_SPEND_BUDGET_EXHAUSTED`, `FREE_QUOTA_EXCEEDED` (not rate limits, not retried) |
 | `PAYMENT_FAILED` | PaymentError | x402 library could not build or sign the payment; nothing sent |
 | `PAYMENT_UNCONFIRMED` | PaymentError | Payment sent, but the response could not be processed; `error.payment` is set |
 | `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | PaymentOutcomeError (`outcome: 'unknown'`) | First attempt's payment may or may not have settled; `error.payment.nonce`. Never retried |

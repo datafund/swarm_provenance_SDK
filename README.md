@@ -425,9 +425,9 @@ try {
 Errors from a gateway response carry the gateway's `code` (for example
 `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) and its message, cut to 4096 characters. `error.body` is
 the response body: the parsed JSON when its text is at most 16384 characters, otherwise its
-first 4096 characters as text (ending in `…`), and for a body that is not JSON its text,
-also at most 4096 characters. Characters are UTF-16 code units, as JavaScript counts string
-length; a cut never splits a surrogate pair. A 402 message names the price asked, for
+text cut to 4096 characters, and for a body that is not JSON its text, also at most 4096
+characters. A cut text ends in `…`, which counts toward the 4096. Characters are UTF-16
+code units, as JavaScript counts string length; a cut never splits a surrogate pair. A 402 message names the price asked, for
 example `0.01 USDC on base-sepolia`: at most three options, then how many more (all are in
 `error.body`). The gateway's message is cut to leave room for the price, so both fit
 within the 4096-character cap. A signature declined in the wallet throws
@@ -740,8 +740,8 @@ message comes from Node itself.
   idempotent replay. All fields are new and optional. Unpaid results carry no `payment`.
 - Error handling (#112): gateway errors show the envelope's top-level `message` first, and
   `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
-  4096 characters; a JSON body over 16384 characters is kept as its first 4096 characters of
-  text), and gateway messages are cut to 4096 characters. A 402 message names the price. A 429 whose code is not a rate limit
+  4096 characters; a JSON body over 16384 characters is kept as text cut to 4096
+  characters), and gateway messages are cut to 4096 characters. A 402 message names the price. A 429 whose code is not a rate limit
   (`DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`,
   `DAILY_SPEND_BUDGET_EXHAUSTED`, `FREE_QUOTA_EXCEEDED`) is no longer retried, and in `'free'`
   mode is reported with its code instead of as `PaymentRateLimitError`. `health()` returns

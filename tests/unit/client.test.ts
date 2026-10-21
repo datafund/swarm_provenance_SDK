@@ -1327,7 +1327,7 @@ describe('ProvenanceClient', () => {
       expect((error as ProvenanceError).body).toEqual(body);
     });
 
-    it('a 402 lists at most 3 prices and stays within the 4 KiB cap', async () => {
+    it('a 402 lists at most 3 prices and stays within the 4096-character cap', async () => {
       const many = { ...x402Body, accepts: Array.from({ length: 2000 }, () => x402Body.accepts[0]) };
       mockFetch.mockResolvedValueOnce(json({ ...many, code: 'HTTP_402', message: x402Body.error }, 402));
       const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
@@ -1337,7 +1337,7 @@ describe('ProvenanceClient', () => {
 
       mockFetch.mockResolvedValueOnce(json({ ...x402Body, code: 'HTTP_402', message: 'p'.repeat(5000) }, 402));
       const long = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
-      expect((long as Error).message.length).toBeLessThanOrEqual(4097);
+      expect((long as Error).message.length).toBeLessThanOrEqual(4096);
       // The price always appears: the gateway's message is cut to make room for it
       expect((long as Error).message).toMatch(/…\s\(price: 0\.01 USDC on base-sepolia\)$/);
     });
@@ -1349,41 +1349,42 @@ describe('ProvenanceClient', () => {
       expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
     });
 
-    it('a non-JSON error body is kept as text, capped at 4 KiB', async () => {
+    it('a non-JSON error body is kept as text, capped at 4096 characters', async () => {
       const page = `<html><body>${'Bad gateway. '.repeat(1000)}</body></html>`;
       mockFetch.mockResolvedValueOnce(new Response(page, { status: 502, statusText: 'Bad Gateway' }));
       const error = await new ProvenanceClient({ retry: { maxRetries: 0 } }).notaryInfo().catch((e: unknown) => e);
       const body = (error as ProvenanceError).body;
       expect(typeof body).toBe('string');
-      expect((body as string).length).toBeLessThanOrEqual(4096 + 32);
+      expect((body as string).length).toBe(4096);
       expect(page.startsWith((body as string).slice(0, 100))).toBe(true);
       expect((error as Error).message).toBe('Gateway error: 502 Bad Gateway');
     });
 
-    it('a long gateway message is capped at 4 KiB, with an ellipsis', async () => {
+    it('a long gateway message is capped at 4096 characters, with an ellipsis', async () => {
       mockFetch.mockResolvedValueOnce(json({ code: 'X', message: 'm'.repeat(10_000) }, 400));
       const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
-      expect((error as Error).message).toBe(`${'m'.repeat(4096)}…`);
+      expect((error as Error).message).toBe(`${'m'.repeat(4095)}…`);
 
       mockFetch.mockResolvedValueOnce(json({ detail: { error: 'e'.repeat(3000), detail: 'd'.repeat(3000) } }, 400));
       const nested = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
-      expect((nested as Error).message).toBe(`${'e'.repeat(3000)}: ${'d'.repeat(4096 - 3002)}…`);
+      expect((nested as Error).message).toBe(`${'e'.repeat(3000)}: ${'d'.repeat(4095 - 3002)}…`);
     });
 
     it('a cut never splits a surrogate pair', async () => {
-      mockFetch.mockResolvedValueOnce(json({ code: 'X', message: `${'a'.repeat(4095)}\u{1F600}${'b'.repeat(10)}` }, 400));
+      // The emoji's high surrogate would be the last unit kept (index 4094)
+      mockFetch.mockResolvedValueOnce(json({ code: 'X', message: `${'a'.repeat(4094)}\u{1F600}${'b'.repeat(10)}` }, 400));
       const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
-      expect((error as Error).message).toBe(`${'a'.repeat(4095)}…`);
+      expect((error as Error).message).toBe(`${'a'.repeat(4094)}…`);
     });
 
-    it('a JSON body over 16 KiB is kept as its first 4 KiB of text; its code and message are still read', async () => {
+    it('a JSON body over 16384 characters is kept as its first 4096 characters of text; its code and message are still read', async () => {
       const body = { code: 'BIG_ERROR', message: 'Too much detail.', detail: { list: 'x'.repeat(20_000) } };
       mockFetch.mockResolvedValueOnce(json(body, 400));
       const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
       expect((error as GatewayConnectionError).code).toBe('BIG_ERROR');
       expect((error as Error).message).toBe('Too much detail.');
       const kept = (error as ProvenanceError).body;
-      expect(kept).toBe(`${JSON.stringify(body).slice(0, 4096)}…`);
+      expect(kept).toBe(`${JSON.stringify(body).slice(0, 4095)}…`);
     });
 
     it('a suggestion after a message ending in a full stop gets no second full stop', async () => {
@@ -1393,7 +1394,10 @@ describe('ProvenanceClient', () => {
     });
 
     it.each([Infinity, 1.5, 0, -1, NaN, '1000'])('maxUploadBytes %s is a configuration error', (value) => {
-      expect(() => new ProvenanceClient({ maxUploadBytes: value as number })).toThrow(/maxUploadBytes must be a positive integer/);
+      const named = typeof value === 'string' ? JSON.stringify(value) : String(value);
+      expect(() => new ProvenanceClient({ maxUploadBytes: value as number })).toThrow(
+        `maxUploadBytes must be a positive integer (bytes), got ${named}`
+      );
     });
 
     it('the body survives the StampError conversion', async () => {

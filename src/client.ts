@@ -95,7 +95,9 @@ export class ProvenanceClient {
     this.maxUploadBytes = config.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES;
     if (!Number.isSafeInteger(this.maxUploadBytes) || this.maxUploadBytes <= 0) {
       throw new ProvenanceError(
-        `maxUploadBytes must be a positive integer (bytes), got ${JSON.stringify(config.maxUploadBytes) ?? String(config.maxUploadBytes)}`,
+        `maxUploadBytes must be a positive integer (bytes), got ${
+          typeof config.maxUploadBytes === 'string' ? JSON.stringify(config.maxUploadBytes) : String(config.maxUploadBytes)
+        }`,
         'INVALID_INPUT'
       );
     }
@@ -1274,7 +1276,7 @@ const MAX_ERROR_JSON = 16384;
  */
 function capText(text: string, max = MAX_ERROR_TEXT): string {
   if (text.length <= max) return text;
-  let end = max;
+  let end = max - 1; // room for the ellipsis: a cut text is at most `max` characters
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end--; // a high surrogate whose pair would be cut off
   return `${text.slice(0, end)}…`;
