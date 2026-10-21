@@ -731,6 +731,13 @@ export class ProvenanceClient {
           this.paidResponses.set(response, record);
         }
 
+        // A 429 that refuses a quota (pool allowance, spend budget, free chunk
+        // quota) is not a rate limit: no Retry-After, and waiting seconds does
+        // not help. Report it with its code, without a retry (#112).
+        if (response.status === 429 && !RATE_LIMIT_CODES.has(await peekErrorCode(response))) {
+          return response;
+        }
+
         // Detect free-tier rate limiting
         if (response.status === 429 && freeTier) {
           const retryAfter = response.headers.get('Retry-After');
@@ -951,6 +958,22 @@ function errorCode(body: GatewayErrorResponse | undefined): string | undefined {
     return (detail as { code: string }).code;
   }
   return undefined;
+}
+
+/**
+ * The gateway's 429 codes that are rate limits: its global limiter, and the
+ * free tier (raised without a code, so HTTP_429). Undefined: no code (an older
+ * gateway, or no JSON body), treated as a rate limit as before.
+ */
+const RATE_LIMIT_CODES = new Set<string | undefined>([undefined, 'RATE_LIMIT_EXCEEDED', 'HTTP_429']);
+
+/** An error response's code, read from a copy so the body stays readable */
+async function peekErrorCode(response: Response): Promise<string | undefined> {
+  try {
+    return errorCode(JSON.parse(await response.clone().text()) as GatewayErrorResponse);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Idempotency answers that need a person, never a retry (#102) */

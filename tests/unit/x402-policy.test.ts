@@ -7,6 +7,7 @@ import {
   GatewayConnectionError,
   PaymentConfigurationError,
   PaymentRefusedError,
+  StampError,
 } from '../../src/errors.js';
 import type { PaymentRequest, X402PaymentConfig } from '../../src/types.js';
 
@@ -579,6 +580,18 @@ describe('final review (#140)', () => {
 });
 
 describe('error handling (#112)', () => {
+  it('a pool allowance 429 is not retried in x402 mode and keeps its code', async () => {
+    const code = 'DAILY_STAMP_ALLOWANCE_EXHAUSTED';
+    const message = 'The daily free allowance of 10 small stamps for this application has been used up.';
+    const answer = { status: 429, body: { detail: { code, message }, code, message } };
+    beforePayment = [answer, answer, answer];
+    const error = await client().acquireStamp().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as StampError).code).toBe(code);
+    expect((error as Error).message).toContain('daily free allowance');
+    expect(seen).toHaveLength(1);
+  });
+
   it('a paid attempt answered 402 keeps its message and body', async () => {
     const error402 = 'Payment verification failed: invalid_exact_evm_payload_signature';
     const body = { x402Version: 1, error: error402, accepts, code: 'HTTP_402', message: error402 };

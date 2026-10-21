@@ -1235,6 +1235,54 @@ describe('ProvenanceClient', () => {
     /** The gateway's error envelope (swarm_connect app/main.py error_envelope) */
     const envelope = (detail: Record<string, unknown>) => ({ detail, code: detail['code'], message: detail['message'] });
 
+    const QUOTA_CODES = [
+      'DAILY_STAMP_ALLOWANCE_EXHAUSTED',
+      'DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED',
+      'DAILY_SPEND_BUDGET_EXHAUSTED',
+      'FREE_QUOTA_EXCEEDED',
+    ];
+    const quota = (code: string) =>
+      envelope({
+        code,
+        message: 'The daily free allowance of 10 small stamps for this application has been used up.',
+        resets_at: '2026-10-22T00:00:00Z',
+      });
+
+    it.each(QUOTA_CODES)("a 429 %s in 'free' mode is reported with its code, not as the free-tier rate limit", async (code) => {
+      mockFetch.mockImplementation(() => Promise.resolve(json(quota(code), 429, 'Too Many Requests')));
+      const error = await new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } })
+        .acquireStamp()
+        .catch((e: unknown) => e);
+      expect(error).not.toBeInstanceOf(PaymentRateLimitError);
+      expect(error).toBeInstanceOf(StampError);
+      expect((error as StampError).code).toBe(code);
+      expect((error as Error).message).toContain('daily free allowance');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(QUOTA_CODES)("a 429 %s in 'none' mode is not retried", async (code) => {
+      mockFetch.mockImplementation(() => Promise.resolve(json(quota(code), 429, 'Too Many Requests')));
+      const error = await new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } })
+        .acquireStamp()
+        .catch((e: unknown) => e);
+      expect((error as StampError).code).toBe(code);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('the global limiter 429 (RATE_LIMIT_EXCEEDED) is still a rate limit', async () => {
+      mockFetch.mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ detail: 'Too many requests.', retry_after: 7, code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.' }),
+            { status: 429, headers: { 'Retry-After': '7' } }
+          )
+        )
+      );
+      const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PaymentRateLimitError);
+      expect((error as PaymentRateLimitError).retryAfterSeconds).toBe(7);
+    });
+
     it('{detail: {error, detail}} shows both texts, with or without the envelope', async () => {
       const detail = { error: 'Payment verification failed', detail: 'Could not verify payment with facilitator. Please try again.' };
       for (const body of [{ detail }, { detail, code: 'HTTP_400', message: 'Payment verification failed' }]) {
