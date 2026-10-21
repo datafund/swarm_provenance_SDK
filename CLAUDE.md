@@ -56,7 +56,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 ### Download (default)
 1. Validate the reference (`checkedReference`: 64 or 128 hex, optional `0x` removed; else `INVALID_INPUT`, no request), then GET it from the gateway
 2. Parse response as ProvenanceMetadata (+ optional signatures)
-3. Verify content_hash matches decoded data (base64)
+3. Verify content_hash matches decoded data (base64). Self-consistency only: hash and data come from the same response, so this does not bind the data to the reference (#123)
 4. If signed, verify signatures against notary address
 5. Return decoded file content as `Uint8Array`
 

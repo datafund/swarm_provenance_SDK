@@ -231,8 +231,12 @@ await chain.anchor(contentHash, 'dataset');
 
 What the SDK checks, and what it does not:
 
-- **`content_hash`** is recomputed on every download. It proves the content matches the hash
-  stored next to it, not who wrote either: anyone can compute it.
+- **`content_hash`** is recomputed on every download. It is a self-consistency check: it proves
+  the content matches the hash stored next to it in the same response, so it detects
+  corruption. It does not prove who wrote either (anyone can compute it), and it does not bind
+  the data to the Swarm reference you asked for: a gateway, or anyone between you and an `http`
+  gateway URL, can return a different document whose hash matches its own content. Use
+  `https`, notary signatures and on-chain anchors for those guarantees.
 - **Notary signatures** prove that the notary key signed this exact `data` together with a
   timestamp. The timestamp is the gateway's claim, not independent proof of time: whoever
   holds the notary key can sign any timestamp. For time you can verify, anchor the hash

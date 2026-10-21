@@ -50,7 +50,11 @@ export function extractContent(metadata: ProvenanceMetadata): Uint8Array {
 }
 
 /**
- * Verify that the content hash in metadata matches the actual content
+ * Verify that the content hash in metadata matches the actual content.
+ *
+ * Self-consistency only: `content_hash` and `data` come from the same
+ * document, so this detects corruption, not substitution. It does not bind the
+ * data to the Swarm reference it was fetched by, nor to its author.
  */
 export function verifyContentHash(metadata: ProvenanceMetadata): boolean {
   const content = extractContent(metadata);
@@ -107,7 +111,8 @@ export function buildDocumentMetadata(
  * pass `canonicalData` from canonicalizeJsonText on the response text for an
  * exact result with floats and large integers), or of JSON.stringify(data),
  * which SDK versions up to 0.6.x wrote. This is a self-consistency check only:
- * anyone can compute it, so it does not bind the data to its author.
+ * anyone can compute it, so it does not bind the data to its author or to the
+ * Swarm reference it was fetched by.
  */
 export function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: string): boolean {
   if (metadata.data === undefined && canonicalData === undefined) return false;

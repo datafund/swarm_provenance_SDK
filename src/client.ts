@@ -304,6 +304,9 @@ export class ProvenanceClient {
    * Download a raw JSON document from Swarm.
    * Use this for documents uploaded with `raw: true` where the `data` field
    * contains structured JSON instead of base64-encoded content.
+   *
+   * As in download(), the content-hash check is self-consistency only: it does
+   * not bind the document to `reference`.
    */
   async downloadDocument(reference: string, options: DownloadOptions = {}): Promise<DocumentDownloadResult> {
     const ref = checkedReference(reference);
@@ -553,7 +556,12 @@ export class ProvenanceClient {
   }
 
   /**
-   * Download and optionally verify provenance data from Swarm
+   * Download and optionally verify provenance data from Swarm.
+   *
+   * The content-hash check is self-consistency only: `content_hash` and `data`
+   * come from the same response, so it detects corruption but does not prove
+   * the gateway returned the document stored at `reference`. Notary signatures
+   * and on-chain anchors are what bind the data to an author or a time.
    */
   async download(reference: string, options: DownloadOptions = {}): Promise<DownloadResult> {
     const ref = checkedReference(reference);
