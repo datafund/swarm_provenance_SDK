@@ -729,13 +729,26 @@ export class ProvenanceClient {
     const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
     const transport = paying ? await this.getX402Transport() : undefined;
     const idempotencyKey = paying && !isRead ? options.idempotencyKey : undefined;
-    const timeout = transport ? this.paidTimeout : this.timeout;
+    // An owner proof may wait for a person to approve a wallet prompt, as a payment does
+    const timeout = transport || options.attemptHeaders ? this.paidTimeout : this.timeout;
 
     let idempotentRetries = 0;
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
-      const extraHeaders = options.attemptHeaders ? await options.attemptHeaders() : undefined;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeout);
+      let extraHeaders: Record<string, string> | undefined;
+      if (options.attemptHeaders) {
+        // Bounded by the timeout, like payment signing
+        try {
+          extraHeaders = await untilAborted(options.attemptHeaders(), controller.signal);
+        } catch (error) {
+          clearTimeout(timeoutId);
+          if (controller.signal.aborted) {
+            throw new GatewayConnectionError('Request timed out waiting for the owner-proof signature', undefined, 'TIMEOUT');
+          }
+          throw error;
+        }
+      }
 
       const headers = new Headers(init?.headers);
       if (freeTier && !headers.has('X-Payment-Mode')) {

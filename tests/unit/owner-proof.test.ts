@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import { createWalletClient, http, publicActions, recoverMessageAddress } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -270,5 +270,38 @@ describe('owner-proof uploads', () => {
 
     expect(headersOf(0).has('X-Owner-Timestamp')).toBe(false);
     expect(headersOf(0).has('X-Owner-Signature')).toBe(false);
+  });
+});
+
+describe('owner-proof signing timeout', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('bounds a signer that never answers by paidTimeout, and sends nothing', async () => {
+    const signer: OwnerSigner = { signMessage: () => new Promise<`0x${string}`>(() => undefined) };
+    const c = new ProvenanceClient({ gatewayUrl: GATEWAY, timeout: 200, paidTimeout: 1000, retry: { maxRetries: 0 } });
+
+    let settled: unknown = 'pending';
+    const upload = c.upload('hello', { stampId: STAMP, ownerSigner: signer }).then(
+      () => 'resolved',
+      (e: unknown) => e
+    );
+    void upload.then((v) => (settled = v));
+
+    // A person may be approving a wallet prompt: the short timeout does not apply
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe('pending');
+
+    await vi.advanceTimersByTimeAsync(600);
+    const error = await upload;
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect(error).toMatchObject({ code: 'TIMEOUT' });
+    expect((error as Error).message).toContain('owner-proof signature');
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
