@@ -3,7 +3,7 @@ import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
-import { GatewayConnectionError } from '../../src/errors.js';
+import { GatewayConnectionError, PaymentRefusedError } from '../../src/errors.js';
 import type { ProvenanceClientConfig } from '../../src/types.js';
 
 // The payment receipt (#111), with the REAL @x402/fetch + @x402/evm against a
@@ -262,19 +262,26 @@ describe('no charge is reported that did not happen (#111)', () => {
   });
 });
 
+/** swarm_connect _paid_request_crashed: a paid handler raised after settlement (top-level body, no receipt header) */
+const crashed = (transaction: string): Answer => ({
+  status: 500,
+  headers: { 'X-Payment-Transaction': transaction, 'X-Payment-Status': 'settled_not_delivered' },
+  body: {
+    code: 'DELIVERY_FAILED_AFTER_PAYMENT',
+    message: 'The payment was collected but the request failed before completing. Contact the operator with this transaction for a refund.',
+    transaction,
+    x402_status: 'settled_not_delivered',
+  },
+});
+
 describe('errors after payment carry the receipt (#111)', () => {
-  it('500 DELIVERY_FAILED_AFTER_PAYMENT: transaction, network, payer and amount on error.payment', async () => {
+  it('a handler error after settlement (_finish_paid): transaction, network, payer and amount on error.payment', async () => {
+    // _finish_paid passes the handler's own error body through and adds the
+    // receipt headers, with X-Payment-Status when the status is not 2xx
     answers[UPLOAD] = {
-      status: 500,
+      status: 502,
       headers: { ...settled(TX_UPLOAD), 'X-Payment-Status': 'settled_not_delivered' },
-      body: {
-        detail: {
-          code: 'DELIVERY_FAILED_AFTER_PAYMENT',
-          message: 'Payment settled but the upload failed. Contact the operator with this transaction for a refund.',
-          transaction: TX_UPLOAD,
-          x402_status: 'settled_not_delivered',
-        },
-      },
+      body: { detail: 'Upload to Swarm failed' },
     };
     const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
     expect(payments).toBe(1);
@@ -289,4 +296,71 @@ describe('errors after payment carry the receipt (#111)', () => {
     expect((error as Error).message).toContain(`transaction ${TX_UPLOAD}`);
   });
 
+  it('500 DELIVERY_FAILED_AFTER_PAYMENT (_paid_request_crashed): transaction and status, no receipt fields', async () => {
+    answers[UPLOAD] = crashed(TX_UPLOAD);
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('DELIVERY_FAILED_AFTER_PAYMENT');
+    expect((error as GatewayConnectionError).payment).toEqual({
+      paymentSent: true,
+      transaction: TX_UPLOAD,
+      status: 'settled_not_delivered',
+      idempotencyKey: ANY_KEY,
+      stampId: STAMP,
+    });
+  });
+
+  it('a top-level transaction in the body is read when no header names one; "unknown" is not', async () => {
+    const { body } = crashed(TX_UPLOAD);
+    answers[UPLOAD] = { status: 500, body };
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect((error as GatewayConnectionError).payment?.transaction).toBe(TX_UPLOAD);
+
+    answers[UPLOAD] = { status: 500, body: { ...(body as Record<string, unknown>), transaction: 'unknown' } };
+    const unknown = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect((unknown as GatewayConnectionError).payment).toBeDefined();
+    expect((unknown as GatewayConnectionError).payment?.transaction).toBeUndefined();
+  });
+});
+
+describe('a failed upload() keeps the receipt of the pool stamp it paid for (#157 review)', () => {
+  it('a paid upload that fails reports both payments and the stamp', async () => {
+    poolPaid = true;
+    answers[ACQUIRE] = { status: 200, headers: settled(TX_POOL) };
+    answers[UPLOAD] = crashed(TX_UPLOAD);
+    const error = (await client().upload('hello').catch((e: unknown) => e)) as GatewayConnectionError;
+    expect(payments).toBe(2);
+    expect(error.payment?.transaction).toBe(TX_UPLOAD);
+    expect(error.payment?.stampId).toBe(POOL_STAMP);
+    expect(error.stampId).toBe(POOL_STAMP);
+    expect(error.stampPayment).toEqual({ ...UPLOAD_RECEIPT, transaction: TX_POOL });
+    expect(error.message).toMatch(new RegExp(`call upload\\(\\) again with idempotencyKey ".+" and stampId "${POOL_STAMP}"`));
+  });
+
+  it('an upload refused after the stamp was paid: no payment of its own, but the stamp and its receipt', async () => {
+    poolPaid = true;
+    answers[ACQUIRE] = { status: 200, headers: settled(TX_POOL) };
+    let approvals = 0;
+    const error = (await client({ payment: { wallet, onBeforePayment: () => ++approvals === 1 } })
+      .upload('hello')
+      .catch((e: unknown) => e)) as PaymentRefusedError;
+    expect(payments).toBe(1); // the stamp only
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect(error.payment).toBeUndefined();
+    expect(error.stampId).toBe(POOL_STAMP);
+    expect(error.stampPayment?.transaction).toBe(TX_POOL);
+    expect(error.message).toContain(`The pool stamp was paid for (transaction ${TX_POOL})`);
+    expect(error.message).toContain(`call upload() again with stampId "${POOL_STAMP}"`);
+  });
+
+  it('a stamp passed by the caller is not repeated on the error, and a free pool stamp has no stampPayment', async () => {
+    answers[UPLOAD] = crashed(TX_UPLOAD);
+    const given = (await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e)) as GatewayConnectionError;
+    expect(given.stampId).toBeUndefined();
+    expect(given.stampPayment).toBeUndefined();
+
+    const free = (await client().upload('hello').catch((e: unknown) => e)) as GatewayConnectionError;
+    expect(free.stampId).toBe(POOL_STAMP);
+    expect(free.stampPayment).toBeUndefined();
+  });
 });
