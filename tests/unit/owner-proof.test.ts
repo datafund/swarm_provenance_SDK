@@ -537,6 +537,45 @@ describe('owner-proof timestamps across uploads', () => {
   });
 });
 
+describe('owner-proof clock wait timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 9, 21, 12, 0, 0, 100));
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(() => Promise.resolve(json(200, { reference: REFERENCE })));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('says the upload timed out waiting for the clock, not the signature, and never signs it', async () => {
+    const sign = vi.fn((args: { message: string }) => OWNER.signMessage(args));
+    const c = new ProvenanceClient({ gatewayUrl: GATEWAY, paidTimeout: 5000, retry: { maxRetries: 0 } });
+
+    const results = Promise.all(
+      Array.from({ length: 40 }, (_, n) =>
+        c.upload(`n${n}`, { stampId: STAMP, ownerSigner: { signMessage: sign } }).then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      )
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    const errors = (await results).filter((e) => e !== undefined);
+
+    // Timestamps more than 30 s ahead wait for the clock; those waiting over 5 s time out
+    expect(errors.length).toBeGreaterThan(0);
+    for (const error of errors) {
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect(error).toMatchObject({ code: 'TIMEOUT' });
+      expect((error as Error).message).toContain('waiting for the clock');
+      expect((error as Error).message).not.toContain('signature');
+    }
+    expect(sign).toHaveBeenCalledTimes(40 - errors.length);
+    expect(mockFetch).toHaveBeenCalledTimes(40 - errors.length);
+  });
+});
+
 describe("owner-proof 429 in 'none' mode", () => {
   beforeEach(() => {
     mockFetch.mockReset();

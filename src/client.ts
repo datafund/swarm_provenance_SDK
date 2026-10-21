@@ -758,7 +758,7 @@ export class ProvenanceClient {
       /** Never pay, even in x402 mode: the request uses the free tier */
       unpaid?: boolean;
       /** Headers made anew for each attempt (owner proofs are single use) */
-      attemptHeaders?: (signal: AbortSignal) => Promise<Record<string, string>>;
+      attemptHeaders?: AttemptHeaders;
     } = {}
   ): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
@@ -783,11 +783,11 @@ export class ProvenanceClient {
       if (options.attemptHeaders) {
         // Bounded by the timeout, like payment signing
         try {
-          extraHeaders = await untilAborted(options.attemptHeaders(controller.signal), controller.signal);
+          extraHeaders = await untilAborted(options.attemptHeaders.make(controller.signal), controller.signal);
         } catch (error) {
           clearTimeout(timeoutId);
           if (controller.signal.aborted) {
-            throw new GatewayConnectionError('Request timed out waiting for the owner-proof signature', undefined, 'TIMEOUT');
+            throw new GatewayConnectionError(options.attemptHeaders.timeoutMessage(), undefined, 'TIMEOUT');
           }
           throw error;
         }
@@ -1173,6 +1173,15 @@ function assertOwnerProofOptions(options: UploadOptions): void {
   }
 }
 
+/**
+ * Headers made anew for each request attempt (owner proofs are single use),
+ * and the message for a timeout while they are being made.
+ */
+interface AttemptHeaders {
+  make(signal: AbortSignal): Promise<Record<string, string>>;
+  timeoutMessage(): string;
+}
+
 /** The signer's address, when it exposes one (viem LocalAccount or WalletClient) */
 function signerAddress(signer: OwnerSigner): string | undefined {
   const s = signer as { address?: unknown; account?: { address?: unknown } };
@@ -1191,10 +1200,18 @@ function ownerProofHeaders(
   signer: OwnerSigner,
   stampId: string,
   reserve: (key: string, signal: AbortSignal) => Promise<number>
-): (signal: AbortSignal) => Promise<Record<string, string>> {
+): AttemptHeaders {
   const key = `${stampId.toLowerCase()}|${signerAddress(signer) ?? ''}`;
-  return async (signal) => {
+  // What the current attempt is waiting for; attempts of one upload run one at a time
+  let waitingFor: 'clock' | 'signature' = 'clock';
+  const timeoutMessage = () =>
+    waitingFor === 'clock'
+      ? `Request timed out waiting for the clock: too many owner-proof uploads to this stamp are in flight (one client signs at most one proof per second per stamp, up to ${OWNER_PROOF_MAX_LEAD_S} s ahead)`
+      : 'Request timed out waiting for the owner-proof signature';
+  const make = async (signal: AbortSignal): Promise<Record<string, string>> => {
+    waitingFor = 'clock';
     const timestamp = await reserve(key, signal);
+    waitingFor = 'signature';
     let signature: unknown;
     try {
       signature = await signer.signMessage({ message: ownerProofMessage(stampId, timestamp) });
@@ -1213,4 +1230,5 @@ function ownerProofHeaders(
     }
     return { 'X-Owner-Timestamp': String(timestamp), 'X-Owner-Signature': signature };
   };
+  return { make, timeoutMessage };
 }
