@@ -157,12 +157,13 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
 
 /**
  * The node's answer to a raw transaction it already holds. geth (and op-geth)
- * send "already known" (core/txpool/errors.go ErrAlreadyKnown); viem also
- * recognises "transaction already imported" and older geth's "known
- * transaction: <hash>". Anchored so "unknown transaction ..." does not match:
- * that is a failed send, and its hash would never get a receipt (#123).
+ * send "already known" (core/txpool/errors.go ErrAlreadyKnown); Nethermind
+ * sends "AlreadyKnown"; viem also recognises "transaction already imported"
+ * and older geth's "known transaction: <hash>". Anchored so "unknown
+ * transaction ..." or "NotAlreadyKnown" does not match: that is a failed send,
+ * and its hash would never get a receipt (#123).
  */
-const ALREADY_KNOWN = /\balready known\b|^known transaction\b|\balready imported\b/i;
+const ALREADY_KNOWN = /\balready known\b|\bAlreadyKnown\b|^known transaction\b|\balready imported\b/i;
 
 function isAlreadyKnown(error: unknown): boolean {
   for (let e = error as { message?: unknown; details?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {

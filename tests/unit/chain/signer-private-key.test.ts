@@ -97,17 +97,17 @@ describe('fromPrivateKey (#123)', () => {
     expect(tx).toMatchObject({ chainId: 84532, to: TO.toLowerCase(), data: DATA, gas: 100_000n, nonce: 7 });
   });
 
-  it.each(['unknown transaction type', 'transaction type not supported: unknown transaction'])(
+  it.each(['unknown transaction type', 'transaction type not supported: unknown transaction', 'NotAlreadyKnownTransaction'])(
     'does not treat "%s" as already known: the send failed',
     async (message) => {
       nodes.set('https://rpc.test', { chainId: 84532, sendRaw: () => ({ error: { code: -32000, message } }) });
       const signer = await fromPrivateKey(generatePrivateKey(), 'https://rpc.test');
 
-      await expect(signer.sendTransaction({ to: TO, data: DATA, chainId: 84532 })).rejects.toThrow(/unknown transaction/);
+      await expect(signer.sendTransaction({ to: TO, data: DATA, chainId: 84532 })).rejects.toThrow(/unknown transaction|NotAlreadyKnown/i);
     },
   );
 
-  it.each(['already known', 'known transaction: 0x1234', 'Transaction already imported', 'ALREADY KNOWN'])(
+  it.each(['already known', 'known transaction: 0x1234', 'Transaction already imported', 'ALREADY KNOWN', 'AlreadyKnown'])(
     'treats the node answer "%s" as already known',
     async (message) => {
       let sent: Hex | undefined;
