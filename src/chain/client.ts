@@ -22,7 +22,20 @@ import {
   rpcErrorMessage,
   sanitizeErrorText,
 } from './errors.js';
-import { normalizeHash, validateDataType, validateAddress } from './validation.js';
+import {
+  normalizeHash,
+  normalizeRegisteredHash,
+  normalizeStorageRef,
+  validateDataType,
+  validateDescription,
+  validateAddress,
+  validateNonZeroAddress,
+  validateNoDuplicates,
+  validateStatus,
+  validateStorageRefFor,
+  validateCount,
+} from './validation.js';
+import { isAddress } from '../utils.js';
 import {
   encodeRegisterData,
   encodeRegisterDataFor,
@@ -110,12 +123,17 @@ export class ChainClient {
     this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
-    this.gasLimit = config.gasLimit != null ? BigInt(config.gasLimit) : undefined;
+    this.gasLimit = config.gasLimit != null ? checkedGasLimit(config.gasLimit) : undefined;
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 2,
       baseDelayMs: config.retry?.baseDelayMs ?? 1000,
     };
 
+    if (!isAddress(this.contractAddress)) {
+      throw new ChainConfigurationError(
+        `Invalid contract address: expected 0x followed by 40 hex characters, got ${JSON.stringify(this.contractAddress)}`
+      );
+    }
     if (this.contractAddress === ZERO_ADDRESS) {
       throw new ChainConfigurationError(
         `Contract not yet deployed on ${this.preset.name}. Use a chain with a deployed contract.`
@@ -542,6 +560,8 @@ export class ChainClient {
    */
   async getUserDataRecordsPaginated(user: string, offset: number, limit: number): Promise<string[]> {
     validateAddress(user);
+    validateCount(offset, 'offset');
+    validateCount(limit, 'limit');
 
     try {
       const result = await this.publicClient.readContract({
@@ -641,8 +661,9 @@ export class ChainClient {
     this.requireSigner();
     validateDataType(dataType);
 
-    const hash = normalizeHash(dataHash);
-    const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
+    const hash = normalizeRegisteredHash(dataHash);
+    const normalizedStorageRef = storageRef ? normalizeStorageRef(storageRef) : undefined;
+    validateStorageRefFor(hash, normalizedStorageRef);
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
     await this.checkNotRegistered(hash, dataHash);
@@ -703,10 +724,11 @@ export class ChainClient {
   async anchorFor(dataHash: string, dataType: string, actualOwner: string, storageRef?: string): Promise<AnchorResult> {
     this.requireSigner();
     validateDataType(dataType);
-    validateAddress(actualOwner);
+    validateNonZeroAddress(actualOwner, 'owner');
 
-    const hash = normalizeHash(dataHash);
-    const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
+    const hash = normalizeRegisteredHash(dataHash);
+    const normalizedStorageRef = storageRef ? normalizeStorageRef(storageRef) : undefined;
+    validateStorageRefFor(hash, normalizedStorageRef);
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
     await this.checkNotRegistered(hash, dataHash);
@@ -773,6 +795,10 @@ export class ChainClient {
 
     const origHash = normalizeHash(originalHash);
     const nHash = normalizeHash(newHash);
+    validateDescription(description);
+    if (origHash.toLowerCase() === nHash.toLowerCase()) {
+      throw new ChainValidationError('The new hash must differ from the original hash');
+    }
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
@@ -835,8 +861,14 @@ export class ChainClient {
       );
     }
 
-    const normalizedSources = sourceHashes.map((h) => normalizeHash(h));
+    const normalizedSources = sourceHashes.map((h) => normalizeRegisteredHash(h, 'source hash'));
     const normalizedNew = normalizeHash(newHash);
+    validateNoDuplicates(normalizedSources, 'source hash');
+    if (normalizedSources.some((h) => h.toLowerCase() === normalizedNew.toLowerCase())) {
+      throw new ChainValidationError(`The new hash ${newHash} must not be one of the source hashes`);
+    }
+    validateDescription(description);
+    validateDataType(newDataType);
 
     // Check for duplicate merge (saves gas)
     // After local validation, before any network call (#115/#116)
@@ -882,6 +914,7 @@ export class ChainClient {
     this.requireSigner();
 
     const hash = normalizeHash(dataHash);
+    validateStatus(newStatus);
     const data = encodeSetDataStatus(hash, newStatus as number);
 
     // After local validation, before any network call (#115/#116)
@@ -901,7 +934,7 @@ export class ChainClient {
    */
   async transferOwnership(dataHash: string, newOwner: string): Promise<TransferResult> {
     this.requireSigner();
-    validateAddress(newOwner);
+    validateNonZeroAddress(newOwner, 'new owner');
 
     const hash = normalizeHash(dataHash);
     const data = encodeTransferDataOwnership(hash, newOwner as Address);
@@ -923,7 +956,7 @@ export class ChainClient {
    */
   async setDelegate(delegate: string, authorized: boolean): Promise<DelegateResult> {
     this.requireSigner();
-    validateAddress(delegate);
+    validateNonZeroAddress(delegate, 'delegate');
 
     const data = encodeSetDelegate(delegate as Address, authorized);
 
@@ -947,18 +980,24 @@ export class ChainClient {
     this.requireSigner();
     this.validateBatchSize(items.length);
 
-    const hashes = items.map((item) => normalizeHash(item.dataHash));
+    const hashes = items.map((item) => normalizeRegisteredHash(item.dataHash));
     const types = items.map((item) => {
       validateDataType(item.dataType);
       return item.dataType;
     });
+    // The contract registers items in order, so a repeat reverts the whole batch
+    validateNoDuplicates(hashes, 'data hash in batch');
 
     const hasAnyStorageRef = items.some((item) => item.storageRef);
     let storageRefs: Hex[] | undefined;
     if (hasAnyStorageRef) {
-      storageRefs = items.map((item) =>
-        item.storageRef ? normalizeHash(item.storageRef) : ZERO_BYTES32
-      );
+      storageRefs = items.map((item, i) => {
+        if (!item.storageRef) return ZERO_BYTES32;
+        const ref = normalizeStorageRef(item.storageRef);
+        validateStorageRefFor(hashes[i]!, ref);
+        return ref;
+      });
+      validateNoDuplicates(storageRefs.filter((ref) => ref !== ZERO_BYTES32), 'storageRef in batch');
     }
 
     const data = encodeBatchRegisterData(hashes, types, storageRefs);
@@ -1003,6 +1042,7 @@ export class ChainClient {
     this.validateBatchSize(items.length);
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
+    items.forEach((item) => validateStatus(item.status));
     const statuses = items.map((item) => item.status as number);
     const data = encodeBatchSetDataStatus(hashes, statuses);
     // After local validation, before any network call (#115/#116)
@@ -1370,3 +1410,12 @@ export interface ExpectedEvent {
 declare const checkedWriteTarget: unique symbol;
 type CheckedWriteTarget = { readonly [checkedWriteTarget]: true };
 const CHECKED = {} as CheckedWriteTarget;
+
+/** A gas limit must be a positive integer (number or bigint) */
+function checkedGasLimit(gasLimit: bigint | number): bigint {
+  const valid = typeof gasLimit === 'bigint' ? gasLimit > 0n : Number.isSafeInteger(gasLimit) && gasLimit > 0;
+  if (!valid) {
+    throw new ChainConfigurationError(`Invalid gasLimit ${String(gasLimit)}: expected a positive integer`);
+  }
+  return BigInt(gasLimit);
+}

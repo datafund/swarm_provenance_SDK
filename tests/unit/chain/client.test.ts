@@ -788,6 +788,128 @@ describe('ChainClient', () => {
     });
   });
 
+  describe('input validation gaps (#123)', () => {
+    // Each case is refused locally: no RPC read, no chain check, nothing sent.
+    // Contract rules marked "deployed" were confirmed by eth_call against the
+    // Base Sepolia contract (revert reason in the comment).
+    const H1: Hex = `0x${'11'.repeat(32)}`;
+    const H2: Hex = `0x${'22'.repeat(32)}`;
+    const H3: Hex = `0x${'33'.repeat(32)}`;
+    const OTHER: Address = '0x9999999999999999999999999999999999999999';
+    const ZERO_ADDR = '0x' + '00'.repeat(20);
+    let sendTransaction: ReturnType<typeof vi.fn<[unknown], Promise<Hex>>>;
+    let client: ChainClient;
+
+    beforeEach(() => {
+      sendTransaction = vi.fn<[unknown], Promise<Hex>>().mockResolvedValue(MOCK_TX_HASH);
+      client = new ChainClient({
+        chain: 'base-sepolia',
+        signer: { ...createMockSigner(), sendTransaction },
+      });
+    });
+
+    const refusedLocally = async (call: () => Promise<unknown>, pattern: RegExp) => {
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainValidationError);
+      expect((error as Error).message).toMatch(pattern);
+      expect(mockReadContract).not.toHaveBeenCalled();
+      expect(mockGetChainId).not.toHaveBeenCalled();
+      expect(sendTransaction).not.toHaveBeenCalled();
+    };
+
+    // deployed: "Invalid data hash"
+    it('anchor, anchorFor and batchAnchor refuse the zero hash', async () => {
+      await refusedLocally(() => client.anchor(ZERO_HASH, 'dataset'), /zero hash/);
+      await refusedLocally(() => client.anchorFor(ZERO_HASH, 'dataset', OTHER), /zero hash/);
+      await refusedLocally(() => client.batchAnchor([{ dataHash: H1, dataType: 'a' }, { dataHash: ZERO_HASH, dataType: 'b' }]), /zero hash/);
+    });
+
+    // deployed: "Data type too long"
+    it('refuses a data type over 64 UTF-8 bytes (anchor, batchAnchor, mergeTransform)', async () => {
+      await refusedLocally(() => client.anchor(H1, 'a'.repeat(65)), /64 bytes/);
+      await refusedLocally(() => client.anchor(H1, '€'.repeat(22)), /64 bytes/); // 66 bytes, 22 characters
+      await refusedLocally(() => client.batchAnchor([{ dataHash: H1, dataType: 'a'.repeat(65) }]), /64 bytes/);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', 'a'.repeat(65)), /64 bytes/);
+    });
+
+    // deployed: "Data type cannot be empty"
+    it('mergeTransform refuses an empty newDataType', async () => {
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', ''), /Data type/);
+    });
+
+    // deployed: "Transformation cannot be empty" / "Transformation too long"
+    it('refuses an empty description or one over 256 UTF-8 bytes', async () => {
+      await refusedLocally(() => client.recordTransformation(H1, H2, ''), /description/i);
+      await refusedLocally(() => client.recordTransformation(H1, H2, 'd'.repeat(257)), /256 bytes/);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, ''), /description/i);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'd'.repeat(257)), /256 bytes/);
+    });
+
+    // deployed: "Storage ref cannot equal data hash"
+    it('refuses a storageRef equal to the data hash', async () => {
+      await refusedLocally(() => client.anchor(H1, 'dataset', H1.toUpperCase().replace('0X', '0x')), /storageRef/);
+      await refusedLocally(() => client.anchorFor(H1, 'dataset', OTHER, H1), /storageRef/);
+      await refusedLocally(() => client.batchAnchor([{ dataHash: H1, dataType: 'a', storageRef: H1 }]), /storageRef/);
+    });
+
+    it('explains that an encrypted (128-hex) Swarm reference does not fit the contract', async () => {
+      await refusedLocally(() => client.anchor(H1, 'dataset', 'ab'.repeat(64)), /encrypted.*bytes32/);
+    });
+
+    // deployed: "Data already registered" / "Storage ref already mapped" on the second item
+    it('batchAnchor refuses duplicate data hashes or storageRefs within the batch', async () => {
+      await refusedLocally(
+        () => client.batchAnchor([{ dataHash: H1, dataType: 'a' }, { dataHash: H1.toUpperCase().replace('0X', '0x'), dataType: 'b' }]),
+        /[Dd]uplicate/,
+      );
+      await refusedLocally(
+        () => client.batchAnchor([{ dataHash: H1, dataType: 'a', storageRef: H3 }, { dataHash: H2, dataType: 'b', storageRef: H3 }]),
+        /[Dd]uplicate/,
+      );
+    });
+
+    // deployed: "Invalid source hash", "Duplicate source hash", "New data hash already exists"
+    it('mergeTransform refuses a zero source, duplicate sources, and a new hash among the sources', async () => {
+      await refusedLocally(() => client.mergeTransform([H1, ZERO_HASH], H3, 'merge'), /zero hash/);
+      await refusedLocally(() => client.mergeTransform([H1, H2, H1], H3, 'merge'), /[Dd]uplicate/);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H2, 'merge'), /source/);
+    });
+
+    // deployed: "New data hash already exists"
+    it('recordTransformation refuses the same original and new hash', async () => {
+      await refusedLocally(() => client.recordTransformation(H1, H1, 'step'), /differ/);
+    });
+
+    it('setDataStatus and batchSetDataStatus accept only DataStatus values 0, 1 and 2', async () => {
+      await refusedLocally(() => client.setDataStatus(H1, 3 as DataStatus), /status/);
+      await refusedLocally(() => client.setDataStatus(H1, 1.5 as DataStatus), /status/);
+      await refusedLocally(() => client.setDataStatus(H1, -1 as DataStatus), /status/);
+      await refusedLocally(() => client.batchSetDataStatus([{ dataHash: H1, status: DataStatus.ACTIVE }, { dataHash: H2, status: 7 as DataStatus }]), /status/);
+    });
+
+    it('refuses the zero address as owner, new owner or delegate', async () => {
+      await refusedLocally(() => client.anchorFor(H1, 'dataset', ZERO_ADDR), /zero address/);
+      await refusedLocally(() => client.transferOwnership(H1, ZERO_ADDR), /zero address/);
+      await refusedLocally(() => client.setDelegate(ZERO_ADDR, true), /zero address/);
+    });
+
+    it('getUserDataRecordsPaginated accepts only non-negative safe integers', async () => {
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, -1, 10), /offset/);
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, 0, 1.5), /limit/);
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, Number.NaN, 10), /offset/);
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, 0, 2 ** 60), /limit/);
+    });
+
+    it('the constructor refuses a malformed contract address or gas limit', () => {
+      expect(() => new ChainClient({ chain: 'base-sepolia', contractAddress: '0x1234' as Address })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: { ...BASE_SEPOLIA, contractAddress: 'not-an-address' as Address } })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: 0 })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: 1.5 })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: -1n })).toThrow(ChainConfigurationError);
+      expect(new ChainClient({ chain: 'base-sepolia', gasLimit: 500_000n })).toBeInstanceOf(ChainClient);
+    });
+  });
+
   describe('getExplorerUrl', () => {
     it('should return correct explorer URL', () => {
       const client = new ChainClient({ chain: 'base-sepolia' });

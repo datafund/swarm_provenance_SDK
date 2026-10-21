@@ -554,6 +554,14 @@ await chain.batchSetDataStatus([
 ]);
 ```
 
+**Input checks.** Writes refuse, with `ChainValidationError` and before any network call, input
+the contract would revert on: a zero data hash or merge source hash; a data type over 64 UTF-8
+bytes; a transformation description that is empty or over 256 UTF-8 bytes; a `storageRef` equal
+to its data hash, or an encrypted (128 hex) Swarm reference, which does not fit the contract's
+`bytes32`; duplicate hashes or storage references in one `batchAnchor()` call; duplicate merge
+sources, or a merge's new hash among its sources; a transformation from a hash to itself; a
+status other than 0, 1 or 2; and the zero address as owner, new owner or delegate.
+
 ### Signer Factories
 
 ```typescript
@@ -667,6 +675,13 @@ message comes from Node itself.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
+- Chain input checks (#123): the writes listed under "Input checks" now throw
+  `ChainValidationError` before any network call, instead of sending a transaction that the
+  contract reverts. `mergeTransform()` now validates `newDataType`.
+  `getUserDataRecordsPaginated()` throws `ChainValidationError` for a negative or non-integer
+  `offset` or `limit` (was a mislabelled `ChainConnectionError`). `new ChainClient()` throws
+  `ChainConfigurationError` for a malformed `contractAddress` or a `gasLimit` that is not a
+  positive integer. Reads such as `verifyOnChain()` still accept the zero hash.
 - `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
   tell a lineage cut off by `maxDepth` from a whole one. `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
