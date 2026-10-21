@@ -306,6 +306,8 @@ export interface PaymentAttemptState {
   creationFailure?: unknown;
   /** An approved 402 was handed to the library to select, sign and send */
   handedToLibrary?: boolean;
+  /** The requirement the library was cleared to sign (#111: the receipt's amount) */
+  approved?: PaymentRequest;
 }
 
 function isRequest(input: unknown): input is Request {
@@ -403,7 +405,10 @@ export async function createX402Transport(
       const requirement = context.selectedRequirements as unknown as Record<string, unknown>;
       const request = toPaymentRequest(context.paymentRequired.x402Version, requirement);
       const reasons = checkPaymentRequest(request, requirement['extra'] as Record<string, unknown> | undefined, policy, requirement);
-      if (reasons.length === 0) return Promise.resolve();
+      if (reasons.length === 0) {
+        state.approved = request;
+        return Promise.resolve();
+      }
       state.refusal = new PaymentRefusedError(`Payment refused before signing: ${reasons.join('; ')}`, [{ request, reasons }]);
       return Promise.resolve({ abort: true as const, reason: state.refusal.message });
     });
