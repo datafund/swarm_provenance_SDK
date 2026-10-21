@@ -965,6 +965,10 @@ export class ChainClient {
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
+    // The contract reverts a transfer to the sender: "Already the owner" (#123)
+    if (await this.isSigner(newOwner)) {
+      throw new ChainValidationError(`Invalid new owner ${newOwner}: it is the signer's own address`);
+    }
     const receipt = await this.sendAndWait(data, { event: 'DataOwnershipTransferred' }, target);
 
     return {
@@ -986,6 +990,10 @@ export class ChainClient {
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
+    // The contract reverts both authorize and revoke for the sender: "Cannot delegate to self" (#123)
+    if (await this.isSigner(delegate)) {
+      throw new ChainValidationError(`Invalid delegate ${delegate}: it is the signer's own address (you cannot delegate to yourself)`);
+    }
     const receipt = await this.sendAndWait(data, { event: 'DelegateAuthorized' }, target);
 
     return {

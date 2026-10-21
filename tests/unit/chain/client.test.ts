@@ -11,7 +11,7 @@ import {
 } from '../../../src/chain/errors.js';
 import { DataStatus } from '../../../src/chain/types.js';
 import type { Address, Hex, ChainSigner } from '../../../src/chain/types.js';
-import { encodeAbiParameters, encodeEventTopics, type AbiEvent } from 'viem';
+import { encodeAbiParameters, encodeEventTopics, getAddress, type AbiEvent } from 'viem';
 import { DATA_PROVENANCE_ABI } from '../../../src/chain/abi.js';
 import { BASE_SEPOLIA } from '../../../src/chain/constants.js';
 
@@ -620,11 +620,13 @@ describe('ChainClient', () => {
         gasUsed: BigInt(35000),
       });
 
+      // Not the signer's own address: the contract reverts that ("Cannot delegate to self", #123)
+      const DELEGATE: Address = '0x9999999999999999999999999999999999999999';
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
-      const result = await client.setDelegate(MOCK_ADDRESS, true);
+      const result = await client.setDelegate(DELEGATE, true);
 
-      expect(result.delegate).toBe(MOCK_ADDRESS);
+      expect(result.delegate).toBe(DELEGATE);
       expect(result.authorized).toBe(true);
     });
   });
@@ -891,6 +893,25 @@ describe('ChainClient', () => {
       await refusedLocally(() => client.anchorFor(H1, 'dataset', ZERO_ADDR), /zero address/);
       await refusedLocally(() => client.transferOwnership(H1, ZERO_ADDR), /zero address/);
       await refusedLocally(() => client.setDelegate(ZERO_ADDR, true), /zero address/);
+    });
+
+    // deployed: "Already the owner" / "Cannot delegate to self" (checked against the signer
+    // after the chain check, so the chain check runs but nothing is sent)
+    it('transferOwnership refuses the signer\'s own address as the new owner', async () => {
+      // The checksummed spelling: compared case-insensitively with the signer's lowercase address
+      const error = await client.transferOwnership(H1, getAddress(MOCK_ADDRESS)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainValidationError);
+      expect((error as Error).message).toMatch(/already the owner|signer/i);
+      expect(sendTransaction).not.toHaveBeenCalled();
+    });
+
+    it('setDelegate refuses the signer\'s own address as delegate', async () => {
+      for (const authorized of [true, false]) {
+        const error = await client.setDelegate(getAddress(MOCK_ADDRESS), authorized).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ChainValidationError);
+        expect((error as Error).message).toMatch(/yourself|own address|self/i);
+      }
+      expect(sendTransaction).not.toHaveBeenCalled();
     });
 
     it('getUserDataRecordsPaginated accepts only non-negative safe integers', async () => {
