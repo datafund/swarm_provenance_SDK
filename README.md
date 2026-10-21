@@ -307,7 +307,7 @@ The limit applies to the metadata JSON the SDK sends, with the content base64-en
 so the largest content that fits is 7864191 bytes (7.5 MiB); a raw document (`raw: true`)
 can be about 10 MiB of JSON. A larger upload throws `ProvenanceError` with code
 `FILE_TOO_LARGE` before any request, so no stamp is acquired for it. Set `maxUploadBytes`
-for a gateway with another limit.
+for a gateway with another limit; it must be a positive integer.
 
 ### Upload
 
@@ -426,7 +426,8 @@ Errors from a gateway response carry the gateway's `code` (for example
 `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) and its message, cut to 4 KiB. `error.body` is the
 response body: the parsed JSON when it is at most 16 KiB, otherwise its first 4 KiB as
 text (ending in `…`), and for a body that is not JSON its text, also at most 4 KiB. A 402
-message names the price asked, for example `0.01 USDC on base-sepolia`. A signature
+message names the price asked, for example `0.01 USDC on base-sepolia`: at most three
+options, then how many more (all are in `error.body`), within the 4 KiB cap. A signature
 declined in the wallet throws `PaymentRefusedError` (`PAYMENT_REFUSED`).
 
 How a 429 is handled depends on its code and on the request:
