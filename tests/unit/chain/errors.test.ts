@@ -58,6 +58,12 @@ describe('ChainError hierarchy', () => {
     expect(err.dataType).toBe('dataset');
   });
 
+  it('DataAlreadyRegisteredError carries ownedBySigner when given (#123)', () => {
+    expect(new DataAlreadyRegisteredError('0x1', '0xo', 1, 't').ownedBySigner).toBeUndefined();
+    expect(new DataAlreadyRegisteredError('0x1', '0xo', 1, 't', true).ownedBySigner).toBe(true);
+    expect(new DataAlreadyRegisteredError('0x1', '0xo', 1, 't', false).ownedBySigner).toBe(false);
+  });
+
   it('DataNotRegisteredError includes hash in message', () => {
     const err = new DataNotRegisteredError('0x123');
     expect(err).toBeInstanceOf(ChainError);

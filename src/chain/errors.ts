@@ -144,6 +144,12 @@ export class DataAlreadyRegisteredError extends ChainError {
     public readonly owner: string,
     public readonly timestamp: number,
     public readonly dataType: string,
+    /**
+     * Whether `owner` is the signer's address (#123). Check it before treating
+     * this error as "already done": the record may belong to someone else.
+     * Undefined when the owner could not be read (`owner` is then '').
+     */
+    public readonly ownedBySigner?: boolean,
   ) {
     super(`Data hash ${dataHash} is already registered on-chain`, 'DATA_ALREADY_REGISTERED');
     this.name = 'DataAlreadyRegisteredError';

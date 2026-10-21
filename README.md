@@ -574,6 +574,7 @@ const signer = fromViemWalletClient(walletClient);
 import {
   ChainConfigurationError,
   ChainTransactionError,
+  DataAlreadyRegisteredError,
   ReceiptTimeoutError,
   SignerRequiredError,
 } from '@datafund/swarm-provenance/chain';
@@ -583,6 +584,11 @@ try {
 } catch (error) {
   if (error instanceof SignerRequiredError) {
     console.error('Connect a wallet first');
+  } else if (error instanceof DataAlreadyRegisteredError) {
+    // anchor()/anchorFor(): the hash is registered. Check whose record it is before
+    // treating it as done: ownedBySigner is false if another address owns it, and
+    // undefined if the owner could not be read (error.owner is then '')
+    if (error.ownedBySigner !== true) console.error('Registered by', error.owner || 'unknown owner');
   } else if (error instanceof ChainConfigurationError) {
     // Before anything was sent: wrong chain (RPC or wallet), or no contract at the address
     console.error(error.message);
@@ -645,6 +651,10 @@ message comes from Node itself.
   receipt instead of failing. The signer now prepares, signs and sends the raw transaction itself,
   the same steps viem's `sendTransaction` takes for a local account (same nonce, gas and fee
   handling, still signed for the preset's chain ID).
+- `DataAlreadyRegisteredError` has `ownedBySigner` (new, optional; #123): `true` if the
+  registered owner is the signer's address, `false` if another address owns the record,
+  `undefined` if the owner could not be read. For `anchorFor()`, compare `error.owner` with the
+  owner you passed.
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch

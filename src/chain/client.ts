@@ -1035,12 +1035,23 @@ export class ChainClient {
         record.owner,
         record.timestamp,
         record.dataType,
+        await this.isSigner(record.owner),
       );
     } catch (error) {
       // Only "not registered" means the hash is free. Any other failure (RPC
       // down, wrong contract) is surfaced instead of anchoring blind (#116).
       if (error instanceof DataNotRegisteredError) return;
       throw error;
+    }
+  }
+
+  /** Whether `owner` is the signer's address (case-insensitive); undefined if that cannot be told */
+  private async isSigner(owner: string): Promise<boolean | undefined> {
+    if (!owner || !this.signer) return undefined;
+    try {
+      return (await this.signer.getAddress()).toLowerCase() === owner.toLowerCase();
+    } catch {
+      return undefined;
     }
   }
 
@@ -1059,6 +1070,7 @@ export class ChainClient {
         record.owner,
         record.timestamp,
         record.dataType,
+        await this.isSigner(record.owner),
       );
     } catch (error) {
       if (error instanceof DataAlreadyRegisteredError) {

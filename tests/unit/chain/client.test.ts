@@ -282,6 +282,75 @@ describe('ChainClient', () => {
       await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow(DataAlreadyRegisteredError);
     });
 
+    describe('ownedBySigner on DataAlreadyRegisteredError (#123)', () => {
+      const registeredBy = (owner: string) => ({
+        dataHash: SAMPLE_HASH_0X,
+        owner,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+      const notRegistered = {
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      };
+
+      it('is true when the signer owns the record (address case ignored)', async () => {
+        mockReadContract.mockResolvedValueOnce(registeredBy(MOCK_ADDRESS.toUpperCase().replace('0X', '0x')));
+        const client = new ChainClient({ chain: 'base-sepolia', signer: createMockSigner() });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DataAlreadyRegisteredError);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(true);
+      });
+
+      it('is false when another address owns the record', async () => {
+        mockReadContract.mockResolvedValueOnce(registeredBy('0x' + '99'.repeat(20)));
+        const client = new ChainClient({ chain: 'base-sepolia', signer: createMockSigner() });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(false);
+        expect((error as DataAlreadyRegisteredError).owner).toBe('0x' + '99'.repeat(20));
+      });
+
+      it('is set by anchorFor too (compared with the signer, not the owner passed)', async () => {
+        mockReadContract.mockResolvedValueOnce(registeredBy('0x' + '99'.repeat(20)));
+        const client = new ChainClient({ chain: 'base-sepolia', signer: createMockSigner() });
+        const error = await client.anchorFor(SAMPLE_HASH, 'dataset', '0x' + '99'.repeat(20)).catch((e: unknown) => e);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(false);
+      });
+
+      it('is set after an already-registered revert when the record can be read', async () => {
+        mockReadContract.mockResolvedValueOnce(notRegistered).mockResolvedValueOnce(registeredBy(MOCK_ADDRESS));
+        const signer: ChainSigner = {
+          ...createMockSigner(),
+          sendTransaction: () => Promise.reject(new Error('execution reverted: Data already registered')),
+        };
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DataAlreadyRegisteredError);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(true);
+      });
+
+      it('is undefined when the owner could not be read', async () => {
+        mockReadContract.mockResolvedValueOnce(notRegistered).mockRejectedValueOnce(new Error('rpc down'));
+        const signer: ChainSigner = {
+          ...createMockSigner(),
+          sendTransaction: () => Promise.reject(new Error('execution reverted: Data already registered')),
+        };
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DataAlreadyRegisteredError);
+        expect((error as DataAlreadyRegisteredError).owner).toBe('');
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBeUndefined();
+      });
+    });
+
     it('should proceed when hash is not registered', async () => {
       // Pre-check: hash not registered (getDataRecord returns zero)
       mockReadContract.mockResolvedValueOnce({
