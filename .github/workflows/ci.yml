@@ -57,7 +57,7 @@ jobs:
           # bound. Keep in sync with peerDependencies.
           for v in 2.23.0 2.28.0; do
             pnpm add -D @x402/fetch@$v @x402/evm@$v
-            pnpm vitest run tests/unit/x402-policy.test.ts tests/unit/payment.test.ts
+            pnpm vitest run tests/unit/x402-policy.test.ts tests/unit/payment.test.ts tests/unit/idempotency.test.ts
           done
           git checkout -- package.json pnpm-lock.yaml
           pnpm install --frozen-lockfile

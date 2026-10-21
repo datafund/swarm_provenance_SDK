@@ -81,8 +81,51 @@ Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Pe
 approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
 A request that sent a payment is never retried automatically (unpaid attempts still retry
 on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
-(`{ paymentSent: true, transaction? }`). A timeout while the wallet is still approving the
-payment is not reported as paid: nothing was sent. The receipt for a
+(`{ paymentSent: true, transaction?, idempotencyKey?, stampId? }`). A timeout while the wallet
+is still approving the payment is not reported as paid: nothing was sent.
+
+**Retrying without paying twice.** Paid writes carry an `Idempotency-Key`: one random key per
+`upload()` or `acquireStamp()` call, or yours (`idempotencyKey` option, 1-255 printable ASCII
+characters). A retry with the same key, from the same wallet, within 24 hours, for the same
+request is not charged a second time: the gateway returns the first result. For an upload "the
+same request" includes the stamp, so a retry must pass the stamp the first attempt used. To
+retry an upload that failed after paying (a timeout, a 502), pass both from the error; its
+message also names them:
+
+```typescript
+import { ProvenanceError, PaymentOutcomeError } from '@datafund/swarm-provenance';
+
+try {
+  await client.upload(data);
+} catch (error) {
+  // PaymentOutcomeError needs a person, not a retry (see below)
+  if (
+    error instanceof ProvenanceError &&
+    !(error instanceof PaymentOutcomeError) &&
+    error.code !== 'IDEMPOTENCY_KEY_REUSED' &&
+    error.payment?.idempotencyKey
+  ) {
+    const { idempotencyKey, stampId } = error.payment;
+    await client.upload(data, { idempotencyKey, ...(stampId ? { stampId } : {}) });
+  }
+}
+```
+
+The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
+`Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
+(so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
+for its pool stamp makes two paid requests). The gateway does not charge
+those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
+upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
+
+| `code` | `outcome` | What to do |
+|--------|-----------|------------|
+| `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | `unknown` | The payment may or may not have been collected: check `payment.nonce` on-chain before paying again |
+| `IDEMPOTENCY_KEY_SETTLED_PENDING` | `settled_not_delivered` | Paid (`payment.transaction`), result not available: ask the gateway operator for it or a refund |
+| `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | `delivered` | It worked and was paid once; the gateway kept no copy of the response. Do not pay again |
+
+An attempt that may pay is bounded by `paidTimeout` (default 120 s, or `timeout` if longer),
+not `timeout`: settlement happens on-chain. The receipt for a
 successful payment is not returned yet (#111). Tested with `@x402/*` 2.5.0 to 2.28.x.
 x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
@@ -217,6 +260,7 @@ What the SDK checks, and what it does not:
 const client = new ProvenanceClient({
   gatewayUrl?: string,          // default: https://provenance-gateway.datafund.io
   timeout?: number,             // default: 30000ms
+  paidTimeout?: number,         // attempts that may pay (x402): default 120000ms, or timeout if longer
   payment?: PaymentMode,        // default: 'free' (see x402 Payment Mode)
   retry?: GatewayRetryConfig,   // auto-retry on 502/503/429 (default: 2 retries, 1s backoff)
 });
@@ -617,6 +661,13 @@ message comes from Node itself.
   `CHAIN_CONNECTION`) with `txHash` and `expected`, resumable with `waitForTransaction()`; RPC read errors in pre-checks (already
   registered? duplicate transformation?) are thrown instead of ignored; error messages no
   longer contain RPC URLs, and `ChainTransactionError.originalError` is not enumerable.
+- Paid writes send an `Idempotency-Key` (#102); see "Retrying without paying twice". Attempts that
+  may pay use `paidTimeout` (default 120 s, or `timeout` if longer) instead of `timeout`, so a
+  short `timeout` no longer cuts off a paid upload. Errors after a payment carry
+  `payment.idempotencyKey` (and `payment.stampId` for uploads). The three idempotency answers
+  that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
+  (not `StampError` / `NotaryError`). Gateway error messages are read from the top-level
+  `message` of the error envelope when `detail` has none.
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.

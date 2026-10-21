@@ -112,6 +112,12 @@ export interface ProvenanceClientConfig {
   gatewayUrl?: string;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
+  /**
+   * Timeout in milliseconds for an attempt that may pay (x402 mode): the 402,
+   * signing, and the paid request with its on-chain settlement
+   * (default: 120000, or `timeout` if that is longer)
+   */
+  paidTimeout?: number;
   /** Payment mode for gateway access (default: 'free') */
   payment?: PaymentMode;
   /** Retry config for transient gateway failures (default: 2 retries, 1s delay) */
@@ -132,6 +138,14 @@ export interface UploadOptions {
   poolSize?: 'small' | 'medium' | 'large';
   /** Content type of the file */
   contentType?: string;
+  /**
+   * Idempotency-Key for the paid requests of this upload (x402 mode), 1-255
+   * printable ASCII characters. Default: a new random key per call. To retry an
+   * upload that failed after paying, pass `error.payment.idempotencyKey` here and
+   * `error.payment.stampId` as `stampId`: the gateway then returns the first
+   * result instead of charging again.
+   */
+  idempotencyKey?: string;
   /**
    * Upload raw JSON document without base64 metadata wrapping.
    * When true, the content is embedded directly in the `data` field as a JSON object
@@ -396,6 +410,8 @@ export interface GatewayAcquireStampResponse {
 
 export interface GatewayErrorResponse {
   code?: string;
+  /** Top-level message of the gateway's error envelope */
+  message?: string;
   /** FastAPI detail — string, object with message, or validation error array */
   detail: string | { message: string; suggestion?: string } | Array<{ msg: string; loc?: unknown[] }>;
 }
