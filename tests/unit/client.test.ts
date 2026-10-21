@@ -1326,6 +1326,19 @@ describe('ProvenanceClient', () => {
       expect((error as ProvenanceError).body).toEqual(body);
     });
 
+    it('a 402 lists at most 3 prices and stays within the 4 KiB cap', async () => {
+      const many = { ...x402Body, accepts: Array.from({ length: 2000 }, () => x402Body.accepts[0]) };
+      mockFetch.mockResolvedValueOnce(json({ ...many, code: 'HTTP_402', message: x402Body.error }, 402));
+      const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      const message = (error as Error).message;
+      expect(message).toContain('0.01 USDC on base-sepolia or 0.01 USDC on base-sepolia or 0.01 USDC on base-sepolia (and 1997 more)');
+      expect(message.split('USDC')).toHaveLength(4);
+
+      mockFetch.mockResolvedValueOnce(json({ ...x402Body, code: 'HTTP_402', message: 'p'.repeat(5000) }, 402));
+      const long = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect((long as Error).message.length).toBeLessThanOrEqual(4097);
+    });
+
     it('a 402 with the payment request only under the deprecated detail still shows the price', async () => {
       mockFetch.mockResolvedValueOnce(json({ detail: x402Body }, 402, 'Payment Required'));
       const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
@@ -1362,6 +1375,16 @@ describe('ProvenanceClient', () => {
       expect((error as Error).message).toBe('Too much detail.');
       const kept = (error as ProvenanceError).body;
       expect(kept).toBe(`${JSON.stringify(body).slice(0, 4096)}…`);
+    });
+
+    it('a suggestion after a message ending in a full stop gets no second full stop', async () => {
+      mockFetch.mockResolvedValueOnce(json(envelope({ code: 'POOL_EXHAUSTED', message: 'Pool is exhausted.', suggestion: 'Buy a stamp.' }), 409));
+      const error = await new ProvenanceClient().acquireStamp().catch((e: unknown) => e);
+      expect((error as Error).message).toBe('Pool is exhausted. Buy a stamp.');
+    });
+
+    it.each([Infinity, 1.5, 0, -1, NaN, '1000'])('maxUploadBytes %s is a configuration error', (value) => {
+      expect(() => new ProvenanceClient({ maxUploadBytes: value as number })).toThrow(/maxUploadBytes must be a positive integer/);
     });
 
     it('the body survives the StampError conversion', async () => {
@@ -1429,6 +1452,57 @@ describe('ProvenanceClient', () => {
           .catch((e: unknown) => e);
         expect((error as ProvenanceError).code).toBe('FILE_TOO_LARGE');
         expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('a bare 413 without status text does not show an empty one', async () => {
+        mockFetch.mockResolvedValueOnce(new Response('', { status: 413 }));
+        const error = await new ProvenanceClient().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+        expect((error as Error).message).toContain('(413)');
+      });
+
+      /** The uploaded file (metadata JSON) of the mocked fetch call at `index` (negative: from the end) */
+      const sentFile = async (index: number) => {
+        const call = mockFetch.mock.calls.at(index) as [string, RequestInit];
+        const form = call[1].body as FormData;
+        return (form.get('file') as Blob).text();
+      };
+      const poolStatus = { enabled: true, current_levels: {}, reserve_config: {}, total_stamps: 3, low_reserve_warning: false };
+
+      it('a raw document changed during pool acquisition is sent as it was hashed', async () => {
+        const doc: Record<string, unknown> = { a: 1 };
+        mockFetch
+          .mockResolvedValueOnce(json(poolStatus, 200))
+          .mockImplementationOnce(() => {
+            doc['a'] = 2; // the caller changes the object while the stamp is acquired
+            return Promise.resolve(json({ batch_id: STAMP, depth: 17, size_name: 'small', fallback_used: false }, 200));
+          })
+          .mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+        await new ProvenanceClient().upload(doc, { raw: true });
+        const sent = JSON.parse(await sentFile(2)) as { data: unknown; content_hash: string };
+        expect(sent.data).toEqual({ a: 1 });
+        expect(sent.content_hash).toBe(sha256Hex(toBytes('{"a":1}')));
+      });
+
+      it('the body is the metadata JSON, and only the stamp_id field gets the stamp', async () => {
+        // A document can hold the placeholder's exact text: a nested stamp_id of 64 zeros
+        const decoy = `"stamp_id":"${'0'.repeat(64)}"`;
+        for (const [content, options] of [
+          [{ inner: { stamp_id: '0'.repeat(64) }, n: [1, 2.5] }, { raw: true, standard: 'std' }],
+          ['hello', { standard: 'std' }],
+        ] as const) {
+          mockFetch
+            .mockResolvedValueOnce(json(poolStatus, 200))
+            .mockResolvedValueOnce(json({ batch_id: STAMP, depth: 17, size_name: 'small', fallback_used: false }, 200))
+            .mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+          const result = await new ProvenanceClient().upload(content as never, options as never);
+          const sent = await sentFile(-1);
+          expect(sent).toBe(JSON.stringify(result.metadata));
+          expect((JSON.parse(sent) as { stamp_id: string }).stamp_id).toBe(STAMP);
+          if (options.raw) {
+            expect(sent).toContain(decoy);
+            expect((JSON.parse(sent) as { data: { inner: unknown } }).data.inner).toEqual({ stamp_id: '0'.repeat(64) });
+          }
+        }
       });
 
       it("the edge proxy's bare 413 is a clear FILE_TOO_LARGE error", async () => {

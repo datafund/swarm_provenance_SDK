@@ -93,8 +93,11 @@ export class ProvenanceClient {
     // Resolve (and reject a bad) payment policy now, not on the first paid request
     if (typeof this.paymentMode === 'object') this.paymentPolicy = resolvePaymentPolicy(this.paymentMode);
     this.maxUploadBytes = config.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES;
-    if (typeof this.maxUploadBytes !== 'number' || !(this.maxUploadBytes > 0)) {
-      throw new ProvenanceError(`maxUploadBytes must be a positive number, got ${String(config.maxUploadBytes)}`, 'INVALID_INPUT');
+    if (!Number.isSafeInteger(this.maxUploadBytes) || this.maxUploadBytes <= 0) {
+      throw new ProvenanceError(
+        `maxUploadBytes must be a positive integer (bytes), got ${JSON.stringify(config.maxUploadBytes) ?? String(config.maxUploadBytes)}`,
+        'INVALID_INPUT'
+      );
     }
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 2,
@@ -229,7 +232,10 @@ export class ProvenanceClient {
       const error = await this.handleError(response);
       if (error instanceof PaymentOutcomeError) throw error;
       throw withPayment(
-        new StampError(error.suggestion ? `${error.message}. ${error.suggestion}` : error.message, error.code),
+        new StampError(
+          error.suggestion ? `${error.message}${/[.!?]$/.test(error.message) ? '' : '.'} ${error.suggestion}` : error.message,
+          error.code
+        ),
         error,
       );
     }
@@ -481,17 +487,22 @@ export class ProvenanceClient {
   }
 
   /**
-   * Build the upload's metadata before a stamp is acquired, and refuse it if
-   * it is larger than the gateway accepts (#112): a stamp (maybe paid for) is
-   * not acquired for an upload that cannot succeed. `stamp_id` is the caller's
-   * stamp or a placeholder of a batch ID's length, so the size is exact;
-   * uploadPrepared() sets the real one.
+   * Build and serialise the upload's metadata before a stamp is acquired, and
+   * refuse it if it is larger than the gateway accepts (#112): a stamp (maybe
+   * paid for) is not acquired for an upload that cannot succeed.
+   *
+   * The JSON is built once, here, so a raw document the caller changes later
+   * is sent exactly as it was hashed. It is kept in two parts around the
+   * stamp_id value, which uploadPrepared() fills in: nothing else in the body
+   * can be replaced, and the bytes equal JSON.stringify(metadata) with that stamp.
    */
   private async prepareMetadata(
     content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
     options: UploadOptions
-  ): Promise<ProvenanceMetadata | DocumentMetadata> {
-    const metadataOptions: { stampId: string; standard?: string } = { stampId: options.stampId ?? STAMP_PLACEHOLDER };
+  ): Promise<PreparedUpload> {
+    // The caller's stamp, or a placeholder of a batch ID's length: the size is exact
+    const sizedStampId = options.stampId ?? STAMP_PLACEHOLDER;
+    const metadataOptions: { stampId: string; standard?: string } = { stampId: sizedStampId };
     if (options.standard !== undefined) {
       metadataOptions.standard = options.standard;
     }
@@ -507,7 +518,20 @@ export class ProvenanceClient {
       metadata = buildMetadata(bytes, metadataOptions);
     }
 
-    const size = new TextEncoder().encode(JSON.stringify(metadata)).length;
+    // {..fields before stamp_id.., "stamp_id": <value>, ..fields after..}
+    const keys = Object.keys(metadata);
+    const at = keys.indexOf('stamp_id');
+    const record = metadata as unknown as Record<string, unknown>;
+    const part = (names: string[]) => JSON.stringify(Object.fromEntries(names.map((k) => [k, record[k]])));
+    const head = part(keys.slice(0, at)); // '{...}', or '{}' with no fields before
+    const tail = part(keys.slice(at + 1));
+    const prepared: PreparedUpload = {
+      metadata,
+      before: `${head.slice(0, -1)}${head === '{}' ? '' : ','}"stamp_id":`,
+      after: tail === '{}' ? '}' : `,${tail.slice(1)}`,
+    };
+
+    const size = utf8Length(prepared.before) + utf8Length(JSON.stringify(sizedStampId)) + utf8Length(prepared.after);
     if (size > this.maxUploadBytes) {
       throw new ProvenanceError(
         options.raw
@@ -517,19 +541,21 @@ export class ProvenanceClient {
         'FILE_TOO_LARGE'
       );
     }
-    return metadata;
+    return prepared;
   }
 
   /** Upload metadata from prepareMetadata() with the stamp acquired for it. */
   private async uploadPrepared(
-    metadata: ProvenanceMetadata | DocumentMetadata,
+    prepared: PreparedUpload,
     stampId: string,
     options: UploadOptions
   ): Promise<UploadResult | DocumentUploadResult> {
-    // Same position in the JSON as the placeholder: a retry with this stamp
-    // sends the same body (the gateway hashes it for the Idempotency-Key)
+    // Only the stamp_id value differs from the size-checked JSON: a retry with
+    // this stamp sends the same body (the gateway hashes it for the Idempotency-Key)
+    const { metadata } = prepared;
     metadata.stamp_id = stampId;
-    const { data, payment } = await this.postMetadata(JSON.stringify(metadata), stampId, options);
+    const body = `${prepared.before}${JSON.stringify(stampId)}${prepared.after}`;
+    const { data, payment } = await this.postMetadata(body, stampId, options);
 
     const result: { reference: string; metadata: ProvenanceMetadata | DocumentMetadata; expiresAt?: string; payment?: PaymentReceipt } = {
       reference: data.reference,
@@ -909,11 +935,13 @@ export class ProvenanceClient {
       }
       bodyTransaction = reported(fields['transaction']) ?? reported(data['transaction']);
       const price = response.status === 402 ? priceOf(data) : undefined;
-      if (price) message += ` (price: ${price})`;
+      // The gateway's message and the price together stay within the cap
+      if (price) message = capText(`${message} (price: ${price})`);
     } else if (response.status === 413) {
       // Not the gateway's JSON 413 (FILE_TOO_LARGE): the proxy in front of it refused the body
       code = 'FILE_TOO_LARGE';
-      message = `Upload too large: the gateway's proxy refused the request body (${response.status} ${response.statusText}). Send less data.`;
+      const status = response.statusText ? `${response.status} ${response.statusText}` : String(response.status);
+      message = `Upload too large: the gateway's proxy refused the request body (${status}). Send less data.`;
     }
 
     const paid = this.paidResponses.has(response);
@@ -955,6 +983,28 @@ function isWalletRejection(error: unknown): boolean {
     if (code === 4001 || name === 'UserRejectedRequestError') return true;
   }
   return false;
+}
+
+/** Upload metadata serialised around its stamp_id value: before + JSON.stringify(stampId) + after */
+interface PreparedUpload {
+  metadata: ProvenanceMetadata | DocumentMetadata;
+  before: string;
+  after: string;
+}
+
+/** UTF-8 byte length of a string, without encoding it */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      bytes += 4; // a surrogate pair
+      i++;
+    } else bytes += 3; // other BMP characters; a lone surrogate encodes as U+FFFD
+  }
+  return bytes;
 }
 
 /** Stand-in stamp_id while the stamp is not known yet: as long as a batch ID (64 hex characters) */
@@ -1252,6 +1302,9 @@ function composeMessage(data: GatewayErrorResponse & Record<string, unknown>): s
   return `${base}${/[.!?]$/.test(base) ? ' ' : ': '}${extra}`;
 }
 
+/** Prices named in a 402's message; the rest are counted, and all are in `error.body` */
+const MAX_PRICES_SHOWN = 3;
+
 /** An x402 payment request: top level (the gateway now), else under the deprecated `detail` */
 function paymentRequestOf(data: Record<string, unknown>): { x402Version: number; accepts: unknown[] } | undefined {
   const isRequest = (v: unknown): v is { x402Version: number; accepts: unknown[] } =>
@@ -1269,7 +1322,9 @@ function priceOf(data: Record<string, unknown>): string | undefined {
     .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
     .map((o) => describePrice(toPaymentRequest(request.x402Version, o)))
     .filter((p): p is string => p !== undefined);
-  return prices.length > 0 ? prices.join(' or ') : undefined;
+  if (prices.length === 0) return undefined;
+  const shown = prices.slice(0, MAX_PRICES_SHOWN).join(' or ');
+  return prices.length > MAX_PRICES_SHOWN ? `${shown} (and ${prices.length - MAX_PRICES_SHOWN} more)` : shown;
 }
 
 /**
