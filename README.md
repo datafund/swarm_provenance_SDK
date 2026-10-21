@@ -557,8 +557,9 @@ await chain.batchSetDataStatus([
 ```
 
 **Input checks.** Writes refuse, with `ChainValidationError` and before any network call, input
-the contract would revert on: a zero data hash or merge source hash; a data type over 64 UTF-8
-bytes; a transformation description that is empty or over 256 UTF-8 bytes; a `storageRef` equal
+the contract would revert on: a zero data hash or merge source hash; a data type that is empty
+or over 64 UTF-8 bytes (a data type of only whitespace is refused too: stricter than the
+contract, which requires only a non-empty byte string); a transformation description that is empty or over 256 UTF-8 bytes; a `storageRef` equal
 to its data hash, or an encrypted (128 hex) Swarm reference, which does not fit the contract's
 `bytes32`; duplicate hashes or storage references in one `batchAnchor()` call; duplicate merge
 sources, or a merge's new hash among its sources; a transformation from a hash to itself; a
@@ -695,7 +696,9 @@ message comes from Node itself.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
 - Chain input checks (#123): the writes listed under "Input checks" now throw
   `ChainValidationError` before any network call, instead of sending a transaction that the
-  contract reverts. `mergeTransform()` now validates `newDataType`.
+  contract reverts. `mergeTransform()` now validates `newDataType` like the other data types:
+  empty, whitespace-only or over 64 UTF-8 bytes is refused. Whitespace-only is stricter than the
+  contract, which accepts it; `anchor()`, `anchorFor()` and `batchAnchor()` already refused it.
   `getUserDataRecordsPaginated()` throws `ChainValidationError` for a negative or non-integer
   `offset` or `limit` (was a mislabelled `ChainConnectionError`). `new ChainClient()` throws
   `ChainConfigurationError` for a malformed `contractAddress` or a `gasLimit` that is not a

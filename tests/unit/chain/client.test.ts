@@ -841,6 +841,12 @@ describe('ChainClient', () => {
       await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', ''), /Data type/);
     });
 
+    // Stricter than the contract (which accepts any non-empty bytes), as for anchor()
+    // and batchAnchor(): kept for consistency across methods (#123)
+    it('mergeTransform refuses a whitespace-only newDataType', async () => {
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', '   '), /Data type must not be empty/);
+    });
+
     // deployed: "Transformation cannot be empty" / "Transformation too long"
     it('refuses an empty description or one over 256 UTF-8 bytes', async () => {
       await refusedLocally(() => client.recordTransformation(H1, H2, ''), /description/i);
