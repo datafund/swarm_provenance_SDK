@@ -584,7 +584,8 @@ const signer = fromViemWalletClient(walletClient);
 `fromPrivateKey` is not exported to browser builds: the `/chain` entry has a `browser` export
 condition that points to a build without it, so a bundler that targets the browser fails with
 "No matching export" instead of shipping code that expects a raw key. Node `import` and
-`require` are unchanged.
+`require` are unchanged. TypeScript applies the condition only with
+`customConditions: ["browser"]`; otherwise the editor still offers `fromPrivateKey`.
 
 ### Chain Error Handling
 
@@ -658,7 +659,8 @@ message comes from Node itself.
 - A `Retry-After` header given as an HTTP date is honoured (#123). Before, it was read as `NaN`:
   the 429 retry (`payment: 'none'` and x402 mode) did not wait, and
   `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
-  date now falls back to the normal backoff.
+  date now falls back to the normal backoff. This includes a non-integer value such as `"1.5"`:
+  RFC 9110 allows only whole delta-seconds. Before, `parseInt` read it as 1 second.
 - Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
   transaction with that nonce is already pending, and a resend could write twice. That error and
   "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
@@ -694,6 +696,9 @@ message comes from Node itself.
   also get this build**, for example Cloudflare Workers (wrangler) and esbuild with
   `platform: 'browser'`. Server code there that used `fromPrivateKey` must create a viem wallet
   client with `privateKeyToAccount` and pass it to `fromViemWalletClient` instead.
+  TypeScript does not apply the `browser` condition unless `customConditions: ["browser"]` is
+  set in `tsconfig.json`. Without it, your editor still shows `fromPrivateKey` in browser code,
+  and only the bundler reports the error.
 - `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
   tell a lineage cut off by `maxDepth` from a whole one. `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
