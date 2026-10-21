@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeHash,
   validateAddress,
+  normalizeAddress,
   validateDataType,
   validateDescription,
   normalizeRegisteredHash,
@@ -108,5 +109,28 @@ describe('contract limits (#123)', () => {
     expect(() => validateCount(0, 'offset')).not.toThrow();
     expect(() => validateCount(Number.MAX_SAFE_INTEGER, 'offset')).not.toThrow();
     [-1, 1.5, Number.NaN, Infinity, 2 ** 60, '3'].forEach((v) => expect(() => validateCount(v, 'offset')).toThrow(ChainValidationError));
+  });
+});
+
+describe('validateAddress: EIP-55 checksum for mixed case (#123)', () => {
+  const lower = '0x1234567890abcdef1234567890abcdef12345678';
+  const checksummed = '0x1234567890AbcdEF1234567890aBcdef12345678'; // viem getAddress(lower)
+  const wrongChecksum = '0x1234567890ABCDEF1234567890abcdef12345678';
+
+  it('accepts all-lowercase, all-uppercase and correctly checksummed addresses', () => {
+    expect(() => validateAddress(lower)).not.toThrow();
+    expect(() => validateAddress('0x' + lower.slice(2).toUpperCase())).not.toThrow();
+    expect(() => validateAddress(checksummed)).not.toThrow();
+  });
+
+  it('refuses a mixed-case address with a wrong checksum', () => {
+    expect(() => validateAddress(wrongChecksum)).toThrow(ChainValidationError);
+    expect(() => validateAddress(wrongChecksum)).toThrow(/checksum/);
+  });
+
+  it('normalizeAddress gives viem a form it accepts: uppercase becomes lowercase, others unchanged', () => {
+    expect(normalizeAddress('0x' + lower.slice(2).toUpperCase())).toBe(lower);
+    expect(normalizeAddress(lower)).toBe(lower);
+    expect(normalizeAddress(checksummed)).toBe(checksummed);
   });
 });

@@ -914,6 +914,35 @@ describe('ChainClient', () => {
       expect(sendTransaction).not.toHaveBeenCalled();
     });
 
+    // A mixed-case address must carry a valid EIP-55 checksum, or viem's encoder throws a raw
+    // InvalidAddressError; all-uppercase is passed to viem in lowercase
+    const BAD_MIXED = '0x1234567890ABCDEF1234567890abcdef12345678';
+
+    it('refuses a mixed-case address with a wrong checksum before any network call', async () => {
+      await refusedLocally(() => client.getUserDataRecords(BAD_MIXED), /checksum/);
+      await refusedLocally(() => client.isAuthorizedDelegate(BAD_MIXED, OTHER), /checksum/);
+      await refusedLocally(() => client.transferOwnership(H1, BAD_MIXED), /checksum/);
+      await refusedLocally(() => client.setDelegate(BAD_MIXED, true), /checksum/);
+      await refusedLocally(() => client.anchorFor(H1, 'dataset', BAD_MIXED), /checksum/);
+    });
+
+    it('accepts an all-uppercase address and passes it to viem in lowercase', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        logs: eventLogs('DataOwnershipTransferred'),
+        blockNumber: BigInt(1),
+        gasUsed: BigInt(1),
+      });
+      const upper = '0xABCDEF1234567890ABCDEF1234567890ABCDEF12';
+      // The calldata is encoded by the real viem, which rejects all-uppercase hex
+      await expect(client.transferOwnership(H1, upper)).resolves.toMatchObject({ newOwner: upper });
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+
+      mockReadContract.mockResolvedValueOnce([]);
+      await client.getUserDataRecords(upper);
+      expect((mockReadContract.mock.calls.at(-1) as [{ args: unknown[] }])[0].args).toEqual([upper.toLowerCase()]);
+    });
+
     it('getUserDataRecordsPaginated accepts only non-negative safe integers', async () => {
       await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, -1, 10), /offset/);
       await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, 0, 1.5), /limit/);
@@ -924,6 +953,7 @@ describe('ChainClient', () => {
     it('the constructor refuses a malformed contract address or gas limit', () => {
       expect(() => new ChainClient({ chain: 'base-sepolia', contractAddress: '0x1234' as Address })).toThrow(ChainConfigurationError);
       expect(() => new ChainClient({ chain: { ...BASE_SEPOLIA, contractAddress: 'not-an-address' as Address } })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', contractAddress: '0x1234567890ABCDEF1234567890abcdef12345678' })).toThrow(/checksum/);
       expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: 0 })).toThrow(ChainConfigurationError);
       expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: 1.5 })).toThrow(ChainConfigurationError);
       expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: -1n })).toThrow(ChainConfigurationError);

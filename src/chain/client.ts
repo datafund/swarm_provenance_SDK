@@ -29,14 +29,13 @@ import {
   normalizeStorageRef,
   validateDataType,
   validateDescription,
-  validateAddress,
-  validateNonZeroAddress,
+  normalizeAddress,
+  normalizeNonZeroAddress,
   validateNoDuplicates,
   validateStatus,
   validateStorageRefFor,
   validateCount,
 } from './validation.js';
-import { isAddress } from '../utils.js';
 import {
   encodeRegisterData,
   encodeRegisterDataFor,
@@ -121,7 +120,7 @@ export class ChainClient {
 
     this.builtinPresetName = Object.keys(CHAIN_PRESETS).find((name) => CHAIN_PRESETS[name] === this.preset);
     const rpcUrls = this.resolveRpcUrls(config);
-    this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
+    this.contractAddress = checkedContractAddress(config.contractAddress ?? this.preset.contractAddress);
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
     this.gasLimit = config.gasLimit != null ? checkedGasLimit(config.gasLimit) : undefined;
@@ -130,11 +129,6 @@ export class ChainClient {
       baseDelayMs: config.retry?.baseDelayMs ?? 1000,
     };
 
-    if (!isAddress(this.contractAddress)) {
-      throw new ChainConfigurationError(
-        `Invalid contract address: expected 0x followed by 40 hex characters, got ${JSON.stringify(this.contractAddress)}`
-      );
-    }
     if (this.contractAddress === ZERO_ADDRESS) {
       throw new ChainConfigurationError(
         `Contract not yet deployed on ${this.preset.name}. Use a chain with a deployed contract.`
@@ -287,14 +281,14 @@ export class ChainClient {
    * Get all data record hashes owned by a user.
    */
   async getUserDataRecords(user: string): Promise<string[]> {
-    validateAddress(user);
+    const userAddress = normalizeAddress(user);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'getUserDataRecords',
-        args: [user as Address],
+        args: [userAddress],
       });
 
       return [...(result as readonly Hex[])];
@@ -310,14 +304,14 @@ export class ChainClient {
    */
   async hasAddressAccessed(dataHash: string, accessor: string): Promise<boolean> {
     const hash = normalizeHash(dataHash);
-    validateAddress(accessor);
+    const accessorAddress = normalizeAddress(accessor);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'hasAddressAccessed',
-        args: [hash, accessor as Address],
+        args: [hash, accessorAddress],
       });
 
       return result;
@@ -332,15 +326,15 @@ export class ChainClient {
    * Check if an address is an authorized delegate for an owner.
    */
   async isAuthorizedDelegate(owner: string, delegate: string): Promise<boolean> {
-    validateAddress(owner);
-    validateAddress(delegate);
+    const ownerAddress = normalizeAddress(owner);
+    const delegateAddress = normalizeAddress(delegate);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'isAuthorizedDelegate',
-        args: [owner as Address, delegate as Address],
+        args: [ownerAddress, delegateAddress],
       });
 
       return result;
@@ -562,14 +556,14 @@ export class ChainClient {
    * Get the count of data records owned by a user.
    */
   async getUserDataRecordsCount(user: string): Promise<number> {
-    validateAddress(user);
+    const userAddress = normalizeAddress(user);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'getUserDataRecordsCount',
-        args: [user as Address],
+        args: [userAddress],
       });
 
       return Number(result);
@@ -584,7 +578,7 @@ export class ChainClient {
    * Get paginated data record hashes owned by a user.
    */
   async getUserDataRecordsPaginated(user: string, offset: number, limit: number): Promise<string[]> {
-    validateAddress(user);
+    const userAddress = normalizeAddress(user);
     validateCount(offset, 'offset');
     validateCount(limit, 'limit');
 
@@ -593,7 +587,7 @@ export class ChainClient {
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'getUserDataRecordsPaginated',
-        args: [user as Address, BigInt(offset), BigInt(limit)],
+        args: [userAddress, BigInt(offset), BigInt(limit)],
       });
 
       return [...(result as readonly Hex[])];
@@ -749,7 +743,7 @@ export class ChainClient {
   async anchorFor(dataHash: string, dataType: string, actualOwner: string, storageRef?: string): Promise<AnchorResult> {
     this.requireSigner();
     validateDataType(dataType);
-    validateNonZeroAddress(actualOwner, 'owner');
+    const ownerAddress = normalizeNonZeroAddress(actualOwner, 'owner');
 
     const hash = normalizeRegisteredHash(dataHash);
     const normalizedStorageRef = storageRef ? normalizeStorageRef(storageRef) : undefined;
@@ -758,7 +752,7 @@ export class ChainClient {
     const target = await this.ensureWriteTarget();
     await this.checkNotRegistered(hash, dataHash);
 
-    const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address, normalizedStorageRef);
+    const data = encodeRegisterDataFor(hash, dataType, ownerAddress, normalizedStorageRef);
 
     let receipt: TransactionResult;
     try {
@@ -959,10 +953,10 @@ export class ChainClient {
    */
   async transferOwnership(dataHash: string, newOwner: string): Promise<TransferResult> {
     this.requireSigner();
-    validateNonZeroAddress(newOwner, 'new owner');
+    const newOwnerAddress = normalizeNonZeroAddress(newOwner, 'new owner');
 
     const hash = normalizeHash(dataHash);
-    const data = encodeTransferDataOwnership(hash, newOwner as Address);
+    const data = encodeTransferDataOwnership(hash, newOwnerAddress);
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
@@ -985,9 +979,9 @@ export class ChainClient {
    */
   async setDelegate(delegate: string, authorized: boolean): Promise<DelegateResult> {
     this.requireSigner();
-    validateNonZeroAddress(delegate, 'delegate');
+    const delegateAddress = normalizeNonZeroAddress(delegate, 'delegate');
 
-    const data = encodeSetDelegate(delegate as Address, authorized);
+    const data = encodeSetDelegate(delegateAddress, authorized);
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
@@ -1451,4 +1445,15 @@ function checkedGasLimit(gasLimit: bigint | number): bigint {
     throw new ChainConfigurationError(`Invalid gasLimit ${String(gasLimit)}: expected a positive integer`);
   }
   return BigInt(gasLimit);
+}
+
+/** The configured contract address, in the form viem accepts (see normalizeAddress) */
+function checkedContractAddress(address: string): Address {
+  try {
+    return normalizeAddress(address);
+  } catch (error) {
+    throw new ChainConfigurationError(
+      `Invalid contract address ${JSON.stringify(address)}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }

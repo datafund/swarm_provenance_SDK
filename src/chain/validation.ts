@@ -1,4 +1,5 @@
-import type { Hex } from './types.js';
+import { getAddress } from 'viem';
+import type { Address, Hex } from './types.js';
 import { ChainValidationError } from './errors.js';
 import { isAddress } from '../utils.js';
 
@@ -27,12 +28,38 @@ export function normalizeHash(hash: string): Hex {
 }
 
 /**
- * Validate that a string is a valid Ethereum address (0x + 40 hex chars).
+ * Validate an Ethereum address (0x + 40 hex characters) and return the form to
+ * pass to viem (#123). All-lowercase is returned as is; all-uppercase (EIP-55:
+ * no checksum) is returned in lowercase, because viem's encoder rejects it; a
+ * mixed-case address must carry a valid EIP-55 checksum, as viem requires.
  */
-export function validateAddress(address: string): void {
+export function normalizeAddress(address: string): Address {
   if (!isAddress(address)) {
     throw new ChainValidationError(`Invalid Ethereum address: "${address}"`);
   }
+  const hex = address.slice(2);
+  if (hex === hex.toLowerCase()) return address as Address;
+  if (hex === hex.toUpperCase()) return `0x${hex.toLowerCase()}`;
+  let checksummed: string | undefined;
+  try {
+    checksummed = getAddress(address);
+  } catch {
+    checksummed = undefined;
+  }
+  if (checksummed !== address) {
+    throw new ChainValidationError(
+      `Invalid Ethereum address: "${address}" is mixed case but its EIP-55 checksum is wrong. Use the checksummed form or all lowercase.`
+    );
+  }
+  return address as Address;
+}
+
+/**
+ * Validate that a string is a valid Ethereum address (0x + 40 hex chars; a
+ * mixed-case address must have a valid EIP-55 checksum).
+ */
+export function validateAddress(address: string): void {
+  normalizeAddress(address);
 }
 
 /** Longest data type the contract accepts, in UTF-8 bytes ("Data type too long") */
@@ -103,12 +130,13 @@ export function validateStorageRefFor(dataHash: Hex, storageRef: Hex | undefined
   }
 }
 
-/** Validate an address and refuse the zero address (the contract reverts on it) */
-export function validateNonZeroAddress(address: string, what: string): void {
-  validateAddress(address);
-  if (address.toLowerCase() === ZERO_ADDRESS) {
+/** normalizeAddress, refusing the zero address (the contract reverts on it) */
+export function normalizeNonZeroAddress(address: string, what: string): Address {
+  const normalized = normalizeAddress(address);
+  if (normalized.toLowerCase() === ZERO_ADDRESS) {
     throw new ChainValidationError(`Invalid ${what}: the zero address is not allowed`);
   }
+  return normalized;
 }
 
 /** Throw if two hashes in the list are equal (case-insensitive) */

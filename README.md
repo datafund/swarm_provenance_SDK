@@ -563,6 +563,9 @@ to its data hash, or an encrypted (128 hex) Swarm reference, which does not fit 
 sources, or a merge's new hash among its sources; a transformation from a hash to itself; a
 status other than 0, 1 or 2; the zero address as owner, new owner or delegate; and the signer's
 own address as new owner or delegate (checked after the chain check, still before sending).
+Addresses, in reads and writes, may be all lowercase, all uppercase or EIP-55 checksummed; a
+mixed-case address with a wrong checksum is refused (`ChainValidationError`, or
+`ChainConfigurationError` for `contractAddress`).
 
 ### Signer Factories
 
@@ -692,7 +695,10 @@ message comes from Node itself.
   `getUserDataRecordsPaginated()` throws `ChainValidationError` for a negative or non-integer
   `offset` or `limit` (was a mislabelled `ChainConnectionError`). `new ChainClient()` throws
   `ChainConfigurationError` for a malformed `contractAddress` or a `gasLimit` that is not a
-  positive integer. Reads such as `verifyOnChain()` still accept the zero hash.
+  positive integer. Reads such as `verifyOnChain()` still accept the zero hash. A mixed-case
+  address with a wrong EIP-55 checksum now throws `ChainValidationError` before any network
+  call (it used to reach viem and throw a raw `InvalidAddressError`); an all-uppercase address,
+  which viem rejected, is now accepted and passed to viem in lowercase.
 - `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
   now has a `browser` export condition, listed first, that resolves to a build without
   `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node
