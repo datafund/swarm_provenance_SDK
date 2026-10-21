@@ -576,14 +576,14 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce(helloBody());
       const client = new ProvenanceClient({ gatewayUrl: 'https://gw.test' });
       await client.download(`0x${'ab'.repeat(32)}`);
-      expect(mockFetch.mock.calls[0]![0]).toBe(`https://gw.test/api/v1/data/${'ab'.repeat(32)}`);
+      expect((mockFetch.mock.calls[0] as unknown[])[0]).toBe(`https://gw.test/api/v1/data/${'ab'.repeat(32)}`);
     });
 
     it('accepts a 128-hex encrypted reference', async () => {
       mockFetch.mockResolvedValueOnce(helloBody());
       const client = new ProvenanceClient({ gatewayUrl: 'https://gw.test' });
       await client.download('cd'.repeat(64));
-      expect(mockFetch.mock.calls[0]![0]).toBe(`https://gw.test/api/v1/data/${'cd'.repeat(64)}`);
+      expect((mockFetch.mock.calls[0] as unknown[])[0]).toBe(`https://gw.test/api/v1/data/${'cd'.repeat(64)}`);
     });
   });
 
@@ -954,7 +954,7 @@ describe('ProvenanceClient', () => {
       const createX402Transport = vi
         .fn()
         .mockRejectedValueOnce(new Error('@x402/fetch could not be loaded'))
-        .mockResolvedValueOnce({ fetchFor: () => (url: string, init: RequestInit) => mockFetch(url, init) });
+        .mockResolvedValueOnce({ fetchFor: () => (url: string, init: RequestInit) => mockFetch(url, init) as Promise<Response> });
       vi.resetModules();
       vi.doMock('../../src/payment.js', async (importOriginal) => ({
         ...(await importOriginal<typeof import('../../src/payment.js')>()),
