@@ -494,6 +494,11 @@ await chain.getProvenanceChain(dataHash, 10);
 // => ChainProvenanceRecord[]: ancestors + descendants up to maxDepth, in BFS order (not topological).
 //    Edges: transformationLinks (children) and parents. Rejects if any lookup fails.
 
+// The same, plus whether maxDepth cut the traversal off
+await chain.getProvenanceChainResult(dataHash, 10);
+// => { records, complete, truncated }: complete is false if some nodes reached maxDepth
+//    (their parents were not fetched); truncated lists their hashes.
+
 // Detect v2 contract support
 await chain.supportsTransformationLinks();  // => boolean
 
@@ -662,6 +667,8 @@ message comes from Node itself.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
+- `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
+  tell a lineage cut off by `maxDepth` from a whole one. `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
   (false for a wrong contract address; true if any fallback RPC serves the call).
 - The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);

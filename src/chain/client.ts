@@ -43,6 +43,7 @@ import type {
   ChainPreset,
   ChainProvenanceRecord,
   ChainSigner,
+  ProvenanceChainResult,
   RetryConfig,
   TransformationLink,
   AnchorResult,
@@ -424,6 +425,15 @@ export class ChainClient {
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
+    return (await this.getProvenanceChainResult(dataHash, maxDepth)).records;
+  }
+
+  /**
+   * getProvenanceChain, plus whether the result is the whole DAG (#123):
+   * `complete` is false when some nodes reached `maxDepth` and were not
+   * expanded; `truncated` lists them. Errors are as for getProvenanceChain.
+   */
+  async getProvenanceChainResult(dataHash: string, maxDepth = 10): Promise<ProvenanceChainResult> {
     // Coerce like the clamp always did ('5' -> 5, null -> 0 -> clamped to 1), but reject NaN: it
     // survives Math.min/max and makes `depth >= NaN` always false, i.e. no limit.
     const requestedDepth = Number(maxDepth);
@@ -434,6 +444,7 @@ export class ChainClient {
     const startHash = normalizeHash(dataHash);
 
     const records: ChainProvenanceRecord[] = [];
+    const truncated: string[] = [];
     // BFS queue of [hash, depth]. Hashes are marked when enqueued (BFS reaches
     // each at its minimum depth first), so every node is queued once; `head`
     // replaces O(n) shift().
@@ -462,7 +473,11 @@ export class ChainClient {
       const record = recordResult.value;
       records.push(record);
 
-      if (!expand) continue; // at maxDepth: parents not fetched, stays undefined
+      if (!expand) {
+        // at maxDepth: parents not fetched (stays undefined), edges not followed
+        truncated.push(record.dataHash);
+        continue;
+      }
       if (parentsResult.status === 'rejected') {
         throw this.traversalError(hash, depth, parentsResult.reason);
       }
@@ -480,7 +495,7 @@ export class ChainClient {
       }
     }
 
-    return records;
+    return { records, complete: truncated.length === 0, truncated };
   }
 
   /**

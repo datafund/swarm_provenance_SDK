@@ -910,6 +910,49 @@ describe('ChainClient', () => {
       expect(chain.map((r) => r.parents)).toEqual([[], [hashA], [hashB]]);
     });
 
+    describe('getProvenanceChainResult: result-level completeness (#123)', () => {
+      it('is complete when no node reached maxDepth', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [hashC], parents: [hashA] },
+          [hashC]: { children: [], parents: [hashB] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB, hashC]);
+        expect(result.complete).toBe(true);
+        expect(result.truncated).toEqual([]);
+      });
+
+      it('is incomplete and names the unexpanded nodes when maxDepth cuts the traversal', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [hashC], parents: [hashA] },
+          [hashC]: { children: [], parents: [hashB] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB]);
+        expect(result.complete).toBe(false);
+        expect(result.truncated).toEqual([hashB]);
+        expect(result.records[1]!.parents).toBeUndefined();
+      });
+
+      it('an unregistered start hash gives no records and a complete result', async () => {
+        mockDag({});
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        await expect(client.getProvenanceChainResult(SAMPLE_HASH)).resolves.toEqual({ records: [], complete: true, truncated: [] });
+      });
+
+      it('getProvenanceChain still returns the plain array', async () => {
+        mockDag({ [hashA]: { children: [hashB], parents: [] }, [hashB]: { children: [], parents: [hashA] } });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const chain = await client.getProvenanceChain(SAMPLE_HASH, 1);
+        expect(Array.isArray(chain)).toBe(true);
+        expect(Object.keys(chain)).toEqual(['0', '1']);
+      });
+    });
+
     it('starting from the leaf, walks ancestors and the leaf carries its parent edge', async () => {
       mockDag({
         [hashA]: { children: [hashB], parents: [] },
