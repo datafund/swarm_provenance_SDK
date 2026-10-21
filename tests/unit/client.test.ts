@@ -950,6 +950,42 @@ describe('ProvenanceClient', () => {
       expect(client).toBeInstanceOf(ProvenanceClient);
     });
 
+    it('does not cache a failed x402 transport setup: the next paid request tries again (#123)', async () => {
+      const createX402Transport = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('@x402/fetch could not be loaded'))
+        .mockResolvedValueOnce({ fetchFor: () => (url: string, init: RequestInit) => mockFetch(url, init) });
+      vi.resetModules();
+      vi.doMock('../../src/payment.js', async (importOriginal) => ({
+        ...(await importOriginal<typeof import('../../src/payment.js')>()),
+        createX402Transport,
+      }));
+      try {
+        const { ProvenanceClient: Client } = await import('../../src/client.js');
+        const client = new Client({
+          payment: {
+            wallet: {
+              address: '0x1234567890abcdef1234567890abcdef12345678',
+              signTypedData: vi.fn(),
+              readContract: vi.fn(),
+            },
+          },
+        });
+
+        await expect(client.acquireStamp()).rejects.toThrow('@x402/fetch could not be loaded');
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ batch_id: 'b'.repeat(64), depth: 17, size_name: 'small', fallback_used: false }),
+        });
+        await expect(client.acquireStamp()).resolves.toMatchObject({ batchId: 'b'.repeat(64) });
+        expect(createX402Transport).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.doUnmock('../../src/payment.js');
+        vi.resetModules();
+      }
+    });
+
     it('should throw PaymentRateLimitError on 429 in free mode', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
