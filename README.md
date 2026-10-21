@@ -327,6 +327,11 @@ How it works:
   be approving a wallet prompt. The same timer covers the wallet prompt and the upload, so
   time spent approving comes out of the time left for the upload. If the signer does not
   answer in time, `upload()` throws `GatewayConnectionError` (`TIMEOUT`) and sends nothing.
+- The timestamp is chosen before the wallet prompt opens. The gateway refuses a timestamp
+  more than 300 seconds old, and the timestamp can already be up to 30 seconds ahead of the
+  clock (see below). With a `paidTimeout` above about 270 seconds, a slow approval can
+  therefore end in 401 `OWNER_PROOF_INVALID` because the proof is stale. For owner-proof
+  uploads, keep `paidTimeout` at or below 270000 ms.
 - Signing is deterministic, so two proofs for the same stamp, signer and second are
   identical, and the gateway refuses the second. A client therefore gives every proof
   for a stamp and signer a later timestamp than the one before, including concurrent
@@ -334,6 +339,10 @@ How it works:
   seconds ahead, the upload waits for the clock. Separate clients or processes do not
   share this state: if they sign for the same stamp in the same second, the second upload
   gets `OWNER_PROOF_INVALID`. Use one client per stamp owner.
+- One client signs at most one proof per second for each stamp, up to 30 seconds ahead of
+  the clock. Uploads in a larger burst wait for the clock, and they can time out:
+  `upload()` then throws `TIMEOUT` with a message that says it was waiting for the clock.
+  Limit the number of concurrent owner-proof uploads to each stamp.
 - If the free-tier rate limit is reached, `upload()` throws `PaymentRateLimitError` in every
   payment mode, without retrying. Wait for `retryAfterSeconds`, or in x402 mode upload
   without `ownerSigner` to pay instead.
