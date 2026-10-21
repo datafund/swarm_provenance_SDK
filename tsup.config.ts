@@ -13,7 +13,10 @@ export default defineConfig([{
   entry: ['src/index.ts', 'src/chain/index.ts', 'src/chain/browser.ts'],
   format: ['esm', 'cjs'],
   dts: { entry: ['src/index.ts', 'src/chain/index.ts'] },
-  clean: true,
+  // No clean in either config: tsup builds the two configs concurrently, and a
+  // clean in one (it also deletes *.d.ts when its declaration build starts)
+  // could remove the other's output. `pnpm build` empties dist/ first.
+  clean: false,
   sourcemap: true,
   splitting: false,
   treeshake: true,

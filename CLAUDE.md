@@ -188,7 +188,7 @@ Chain entry (`@datafund/swarm-provenance/chain`):
 - Types: `dist/chain/index.d.ts`
 - Browser (`browser` export condition, listed first; #123): `dist/chain/browser.{js,cjs,d.ts,d.cts}` from `src/chain/browser.ts`, the same exports minus `fromPrivateKey`. `src/chain/index.ts` and `browser.ts` keep explicit export lists; `tests/unit/build/browser-entry.test.ts` checks they differ only by `fromPrivateKey`. The browser types come from a second tsup config (`dts: { only: true }`): one declaration build over both entries would put the shared declarations in `browser.d.ts` and re-export `fromPrivateKey` from it under a generated alias.
 
-Built with tsup for dual ESM/CJS output. viem is externalized.
+Built with tsup for dual ESM/CJS output. viem is externalized. `tsup.config.ts` has two configs that tsup builds concurrently, so neither uses `clean`; `pnpm build` deletes `dist/` before running tsup. The viem require guard (#99) is applied to both `dist/chain/index.cjs` and `dist/chain/browser.cjs`.
 
 ## Dev Commands
 
