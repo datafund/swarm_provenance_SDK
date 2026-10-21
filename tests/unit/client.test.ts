@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
+import { verifyDocumentHash } from '../../src/metadata.js';
 
 // Mock fetch globally. The mocks are plain objects with json(); the client
 // reads download bodies with text() (to canonicalise them losslessly), so
@@ -1367,6 +1368,12 @@ describe('ProvenanceClient', () => {
       expect((nested as Error).message).toBe(`${'e'.repeat(3000)}: ${'d'.repeat(4096 - 3002)}…`);
     });
 
+    it('a cut never splits a surrogate pair', async () => {
+      mockFetch.mockResolvedValueOnce(json({ code: 'X', message: `${'a'.repeat(4095)}\u{1F600}${'b'.repeat(10)}` }, 400));
+      const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+      expect((error as Error).message).toBe(`${'a'.repeat(4095)}…`);
+    });
+
     it('a JSON body over 16 KiB is kept as its first 4 KiB of text; its code and message are still read', async () => {
       const body = { code: 'BIG_ERROR', message: 'Too much detail.', detail: { list: 'x'.repeat(20_000) } };
       mockFetch.mockResolvedValueOnce(json(body, 400));
@@ -1477,10 +1484,14 @@ describe('ProvenanceClient', () => {
             return Promise.resolve(json({ batch_id: STAMP, depth: 17, size_name: 'small', fallback_used: false }, 200));
           })
           .mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
-        await new ProvenanceClient().upload(doc, { raw: true });
+        const result = await new ProvenanceClient().upload(doc, { raw: true });
         const sent = JSON.parse(await sentFile(2)) as { data: unknown; content_hash: string };
         expect(sent.data).toEqual({ a: 1 });
         expect(sent.content_hash).toBe(sha256Hex(toBytes('{"a":1}')));
+        // The result describes what was sent, not the caller's changed object
+        expect(result.metadata.data).toEqual({ a: 1 });
+        expect(result.metadata.content_hash).toBe(sent.content_hash);
+        expect(verifyDocumentHash(result.metadata)).toBe(true);
       });
 
       it('the body is the metadata JSON, and only the stamp_id field gets the stamp', async () => {

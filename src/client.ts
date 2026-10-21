@@ -508,8 +508,17 @@ export class ProvenanceClient {
     }
 
     let metadata: ProvenanceMetadata | DocumentMetadata;
+    /** A raw document's JSON: serialised once, then hashed, sent and returned as parsed from it */
+    let dataJson: string | undefined;
     if (options.raw) {
-      metadata = buildDocumentMetadata(rawDocument(content), metadataOptions);
+      dataJson = JSON.stringify(rawDocument(content)) as string | undefined;
+      const snapshot = dataJson === undefined ? undefined : (JSON.parse(dataJson) as unknown);
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+        throw new ProvenanceError('Raw mode requires valid JSON string or plain object', 'INVALID_INPUT');
+      }
+      // The caller's object may change while the stamp is acquired: the
+      // snapshot is what is hashed, sent and returned
+      metadata = buildDocumentMetadata(snapshot as Record<string, unknown>, metadataOptions);
     } else {
       const bytes =
         content instanceof Blob
@@ -522,7 +531,12 @@ export class ProvenanceClient {
     const keys = Object.keys(metadata);
     const at = keys.indexOf('stamp_id');
     const record = metadata as unknown as Record<string, unknown>;
-    const part = (names: string[]) => JSON.stringify(Object.fromEntries(names.map((k) => [k, record[k]])));
+    // As JSON.stringify of those fields, reusing a raw document's JSON instead of serialising it again
+    const part = (names: string[]) =>
+      `{${names
+        .filter((k) => record[k] !== undefined)
+        .map((k) => `${JSON.stringify(k)}:${k === 'data' && dataJson !== undefined ? dataJson : JSON.stringify(record[k])}`)
+        .join(',')}}`;
     const head = part(keys.slice(0, at)); // '{...}', or '{}' with no fields before
     const tail = part(keys.slice(at + 1));
     const prepared: PreparedUpload = {
@@ -1242,14 +1256,21 @@ function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceErr
   return target;
 }
 
-/** Longest gateway text kept on an error (`body` text, message): a proxy's error page is not kept whole */
+/** Longest gateway text kept on an error (`body` text, message), in characters: a proxy's error page is not kept whole */
 const MAX_ERROR_TEXT = 4096;
-/** Largest JSON error body kept parsed on `error.body`; a larger one is kept as capped text */
+/** Largest JSON error body (characters of its text) kept parsed on `error.body`; a larger one is kept as capped text */
 const MAX_ERROR_JSON = 16384;
 
-/** `text` cut to MAX_ERROR_TEXT characters, with an ellipsis when cut */
+/**
+ * `text` cut to MAX_ERROR_TEXT characters (UTF-16 code units), with an
+ * ellipsis when cut. A cut never splits a surrogate pair.
+ */
 function capText(text: string): string {
-  return text.length > MAX_ERROR_TEXT ? `${text.slice(0, MAX_ERROR_TEXT)}…` : text;
+  if (text.length <= MAX_ERROR_TEXT) return text;
+  let end = MAX_ERROR_TEXT;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--; // a high surrogate whose pair would be cut off
+  return `${text.slice(0, end)}…`;
 }
 
 /**
