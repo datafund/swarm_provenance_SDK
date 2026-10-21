@@ -32,7 +32,8 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 | `/api/v1/notary/info` | GET | Notary service status |
 | `/api/v1/pool/status` | GET | Stamp pool status |
 | `/api/v1/pool/acquire` | POST | Acquire stamp from pool |
-| `/api/v1/data/` | POST | Upload data |
+| `/api/v1/data/` | POST | Upload data (owner proof: `X-Owner-Timestamp`, `X-Owner-Signature`) |
+| `/api/v1/pricing` | GET | Price quotes for paid operations (`pricing()`), never charged |
 | `/api/v1/data/{reference}` | GET | Download data |
 
 ## Data Flow
@@ -276,6 +277,10 @@ Never hard-code keys in examples, and never use a raw key in browser code: brows
 
 The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an address: top-level `address`, or `account.address` as on viem's `WalletClient.extend(publicActions)`. A wallet with neither does not typecheck (`tests/unit/payment-wallet-types.test.ts`). `@x402/evm`'s `toClientEvmSigner()` also fits.
 
+**Pricing** (#124): `pricing()` → `GET /api/v1/pricing?size=&depth=&duration_hours=&upload_bytes=&mb=`, sending only the options set. It maps snake_case to camelCase (`toPriceQuote`). With x402 off the gateway answers only `{x402_enabled:false, quotes:{}}` (swarm_connect `app/api/endpoints/pricing.py`), so every other field is optional. `max_amount_required` is a string and `price_usd` is a number. Errors go through `handleError()` unchanged: 422 `FILE_TOO_LARGE` / `TOPUP_TOO_LARGE` / validation, 503 `PRICING_UNAVAILABLE` (retried as a transient error first). `tests/unit/pricing.test.ts`.
+
+**Owner proof** (#124; gateway `app/services/signed_auth.py`, `app/api/endpoints/data.py` `_check_stamp_access`): `UploadOptions.ownerSigner` (`OwnerSigner` = `{ signMessage({ message }) }`; a viem `WalletClient` or `LocalAccount` fits, so the x402 wallet works) signs `ownerProofMessage(stampId, ts)` = `swarm-connect-owner-upload:<stampId lowercase>:<unix s>` (EIP-191). The SDK sends it as `X-Owner-Signature` and `X-Owner-Timestamp`, with `X-Payment-Mode: free`. `postMetadata()` passes two additive `fetch()` options. `unpaid` forces the free tier, so the upload uses no paying transport and sends no Idempotency-Key, even in x402 mode. Reason: the gateway checks the free opt-in before a payment header, so a paid retry carrying `X-Payment-Mode: free` would get the same 402. `attemptHeaders` is called before every attempt. The gateway accepts a proof once (keyed on message|signer), so each attempt signs a strictly later timestamp. Gateway rules: a ±300 s window (`DEBUG_SIG_MAX_AGE_SECONDS`), no proof signed before the gateway process started, a proof examined only when the x402 payer alone is not allowed, and no checks at all with x402 off. The route accepts `stamp_id` only as 64 hex characters without 0x; `assertOwnerProofStamp()` checks that before signing (`INVALID_INPUT`). A signer failure is `OWNER_PROOF_FAILED`. 401 `OWNER_PROOF_INVALID` and 403 `STAMP_OWNERSHIP_DENIED` arrive as `GatewayConnectionError` (`NotaryError` with `sign: 'notary'`). The proof is a bearer credential: never put it in an error message or a log. The SDK has no manifest upload, so there is no owner proof for `/data/manifest`. `tests/unit/owner-proof.test.ts`.
+
 ## Related Projects
 
 - `swarm_connect` - Gateway server (Python/FastAPI)
@@ -301,7 +306,11 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
-| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object |
+| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object; `ownerSigner` without a 64-hex `stampId` |
+| `OWNER_PROOF_FAILED` | ProvenanceError | `ownerSigner.signMessage` failed; nothing sent |
+| `OWNER_PROOF_INVALID` | GatewayConnectionError (401) | Owner proof missing, stale, already used or not a valid signature |
+| `STAMP_OWNERSHIP_DENIED` | GatewayConnectionError (403) | Uploader (payer or owner-proof signer) does not own the stamp |
+| `PRICING_UNAVAILABLE` | GatewayConnectionError (503) | Gateway could not read the chain price for `pricing()` |
 | `PAYMENT_RATE_LIMIT` | PaymentRateLimitError | 429 free tier limit exceeded |
 | `PAYMENT_REFUSED` | PaymentRefusedError | 402 outside the payment policy, or vetoed by `onBeforePayment`; nothing signed |
 | `PAYMENT_FAILED` | PaymentError | x402 library could not build or sign the payment; nothing sent |

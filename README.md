@@ -275,6 +275,9 @@ const result = await client.upload(content, {
   stampId?: string,                        // Use existing stamp (skip pool)
   poolSize?: 'small' | 'medium' | 'large', // Pool size preset
   contentType?: string,                    // Content type
+  raw?: boolean,                           // Upload a JSON document without base64 wrapping
+  idempotencyKey?: string,                 // x402 mode: see "Retrying without paying twice"
+  ownerSigner?: OwnerSigner,               // Upload to your own stamp without paying (see below)
 });
 
 // Returns:
@@ -283,6 +286,100 @@ const result = await client.upload(content, {
 //   metadata: ProvenanceMetadata,
 // }
 ```
+
+### Owner-proof uploads
+
+On a gateway with x402 on, a stamp bought with a payment belongs to the paying wallet.
+Only that wallet may upload to it. Without an owner proof you prove ownership by paying
+for the upload from that wallet, which costs at least the gateway's minimum price
+(`minPriceUsd` from `pricing()`, $0.01 by default). An owner proof proves it with a signature instead,
+so the upload is free.
+
+Pass the stamp and a signer that owns it. The x402 payment wallet works as the signer:
+
+```typescript
+const client = new ProvenanceClient({ payment: { wallet } });
+
+// stampId: the stamp this wallet bought, 64 hex characters without 0x
+const result = await client.upload(content, { stampId, ownerSigner: wallet });
+```
+
+`ownerSigner` is any object with viem's `signMessage({ message })`: a viem `WalletClient`
+with an account (including a browser wallet on `custom(window.ethereum)`), or a
+`LocalAccount` from `privateKeyToAccount`.
+
+How it works:
+
+- The SDK signs `swarm-connect-owner-upload:<stampId in lowercase>:<unix seconds>` with
+  EIP-191 `personal_sign`. It sends the signature and the timestamp as `X-Owner-Signature`
+  and `X-Owner-Timestamp`, with `X-Payment-Mode: free`. `ownerProofMessage(stampId, timestamp)`
+  returns this text if you sign elsewhere.
+- An owner-proof upload never pays, in any payment mode. It uses the free tier, so the
+  free-tier rate limit applies. If the gateway's free tier is off, the gateway answers
+  402 and the upload fails with a `GatewayConnectionError` (status 402). The SDK does not fall
+  back to paying. To pay instead, upload without `ownerSigner` from the owner wallet.
+- The gateway accepts a proof only if its timestamp is within 300 seconds of the
+  gateway's clock, in either direction. If your clock is off by more than that, the proof is rejected.
+- The gateway accepts each proof once. The SDK signs a new proof for every request
+  attempt, including automatic retries. A browser wallet therefore asks you to sign once
+  per attempt.
+- A proof lets whoever holds it make one upload to your stamp. The SDK never puts it in an
+  error message. Do not log it.
+- `ownerSigner` requires `stampId`. Without one, or with one that is not 64 hex characters,
+  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything. If the
+  signer fails (for example, the user rejects the request), it throws `OWNER_PROOF_FAILED`.
+
+| Gateway answer | Error | Meaning |
+|----------------|-------|---------|
+| 401 `OWNER_PROOF_INVALID` | `GatewayConnectionError` | Proof missing a header, stale or in the future, signed before the gateway restarted, already used, or not a valid signature |
+| 403 `STAMP_OWNERSHIP_DENIED` | `GatewayConnectionError` | Valid proof, but the signer does not own the stamp |
+
+With `sign: 'notary'` these errors are `NotaryError` with the same code. The SDK has no
+manifest upload method, so owner proofs apply to `upload()` only.
+
+### Pricing
+
+`pricing()` returns the gateway's price for each paid operation, without paying
+(`GET /api/v1/pricing`):
+
+```typescript
+const prices = await client.pricing({
+  size?: 'small' | 'medium' | 'large', // stamp size preset
+  depth?: number,                      // stamp depth, 16-32
+  durationHours?: number,              // stamp duration, at least 24
+  uploadBytes?: number,                // upload body size in bytes (gateway default: 4096)
+  mb?: number,                         // bandwidth credit top-up in MB
+});
+// => {
+//   x402Enabled: boolean,
+//   currency?: 'USDC', network?: string, asset?: string, payTo?: string,
+//   minPriceUsd?: number, freeTier?: { enabled: boolean, header: string },
+//   quotes: { stampPurchase?, poolAcquire?, dataUpload?, bandwidthCredit? },
+// }
+// Each quote: { method, path, priceUsd: number, maxAmountRequired: string, description }
+```
+
+- Only the options you set are sent. The gateway validates them: an out-of-range value
+  throws `GatewayConnectionError` with status 422 (codes `FILE_TOO_LARGE`, `TOPUP_TOO_LARGE`, or a
+  validation message). If the chain price is unavailable, it throws status 503 `PRICING_UNAVAILABLE`.
+- `maxAmountRequired` is the amount the 402 would ask for, in the asset's smallest unit
+  (USDC has 6 decimals). Quotes follow the chain price, so treat them as current, not guaranteed.
+- `poolAcquire` and `bandwidthCredit` appear only when the gateway offers them. There are
+  no quotes for stamp extension, purchases for another owner, or manifests.
+- When x402 is off on the gateway, the result is `{ x402Enabled: false, quotes: {} }`.
+
+`payTo` can seed the payment policy, so the SDK pays only the gateway's own address:
+
+```typescript
+const prices = await new ProvenanceClient().pricing({ uploadBytes: 2048 });
+if (!prices.x402Enabled || !prices.payTo) throw new Error('This gateway does not charge');
+console.log(`An upload costs $${prices.quotes.dataUpload?.priceUsd}`);
+
+const client = new ProvenanceClient({ payment: { wallet, payTo: [prices.payTo] } });
+```
+
+Read `payTo` from a gateway you trust. A policy seeded from a gateway's own answer
+cannot detect a gateway that lies about its address.
 
 ### Download
 
@@ -343,6 +440,9 @@ await client.poolStatus();
 // Acquire stamp directly
 await client.acquireStamp('small');
 // => { batchId: string, depth: number, sizeName: string, fallbackUsed: boolean }
+
+// Price quotes for paid operations (see Pricing)
+await client.pricing({ uploadBytes: 2048 });
 ```
 
 ## Error Handling
@@ -668,6 +768,11 @@ message comes from Node itself.
   that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
   (not `StampError` / `NotaryError`). Gateway error messages are read from the top-level
   `message` of the error envelope when `detail` has none.
+- New (#124): `pricing()` returns the gateway's price quotes (`GET /api/v1/pricing`), and
+  `UploadOptions.ownerSigner` uploads to a stamp you own with a signed owner proof instead of
+  a payment. An owner-proof upload uses the free tier and never pays, in any payment mode.
+  New exports: `Pricing`, `PricingOptions`, `PriceQuote`, `OwnerSigner`, `ownerProofMessage`.
+  Uploads without `ownerSigner` are unchanged.
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.
