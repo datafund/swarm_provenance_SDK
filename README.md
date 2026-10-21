@@ -76,9 +76,18 @@ or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing 
 | `maxTimeoutSeconds` | `600` | Longest authorization validity the gateway may ask for |
 | `onBeforePayment` | none | `(payment) => boolean`: sees amount, asset, recipient, network; return `false` to refuse. A payment may still not happen after it (signing fails, timeout): do not count spend here |
 | `payForReads` | `false` | Also pay for reads; by default reads use the free tier (`X-Payment-Mode: free`, rate-limited) |
+| `payForPool` | `false` | Also pay for pool stamps when the gateway asks for payment; by default that 402 is not paid (see below) |
 
 Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Permit2
 approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
+
+**Pool stamps are not paid unless you set `payForPool`.** `acquireStamp()` and `upload()` without
+`stampId` take a stamp from the gateway's pool, which is free within a daily allowance. Callers
+without an `Origin` header, such as Node.js servers, share one allowance. When it is spent, the
+gateway answers with a 402 priced at what the pool paid for the stamp plus the gateway's markup
+(100% by default), so `medium` and `large` cost more. By default the SDK does not pay it: the call fails with a `StampError` that
+keeps the gateway's code (for example `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) and says how to continue.
+With `payForPool: true`, the SDK pays it, within the payment policy above.
 A request that sent a payment is never retried automatically (unpaid attempts still retry
 on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
 (`{ paymentSent: true, transaction?, idempotencyKey?, stampId? }`). A timeout while the wallet
@@ -114,7 +123,7 @@ try {
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
 (so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
-for its pool stamp makes two paid requests). The gateway does not charge
+for its pool stamp, with `payForPool`, makes two paid requests). The gateway does not charge
 those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
 upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
 
@@ -661,6 +670,10 @@ message comes from Node itself.
   `CHAIN_CONNECTION`) with `txHash` and `expected`, resumable with `waitForTransaction()`; RPC read errors in pre-checks (already
   registered? duplicate transformation?) are thrown instead of ignored; error messages no
   longer contain RPC URLs, and `ChainTransactionError.originalError` is not enumerable.
+- Paid pool acquisition is opt-in (#109): in x402 mode, `acquireStamp()` and `upload()` without
+  `stampId` no longer pay for pool stamps unless `payment.payForPool` is `true`. Without it, a 402
+  from `POST /api/v1/pool/acquire` is not paid and the call throws `StampError` (the gateway's
+  code, or `PAYMENT_REQUIRED`). The unpaid acquisition carries no `Idempotency-Key`.
 - Paid writes send an `Idempotency-Key` (#102); see "Retrying without paying twice". Attempts that
   may pay use `paidTimeout` (default 120 s, or `timeout` if longer) instead of `timeout`, so a
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry

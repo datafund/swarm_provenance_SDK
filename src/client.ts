@@ -202,12 +202,22 @@ export class ProvenanceClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ size }),
       },
-      { idempotencyKey }
+      // Paid pool acquisition is opt-in (#109): the pool answers 402 once the
+      // shared daily allowance is spent, at several times a stamp's cost
+      { idempotencyKey, payable: typeof this.paymentMode === 'object' && this.paymentMode.payForPool === true }
     );
 
     if (!response.ok) {
       const error = await this.handleError(response);
       if (error instanceof PaymentOutcomeError) throw error;
+      if (response.status === 402 && !error.payment) {
+        throw new StampError(
+          `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it. ` +
+            'To let the SDK pay for pool stamps within the payment policy, use x402 mode with payment.payForPool: true, ' +
+            'or pass a stampId you own.',
+          error.code ?? 'PAYMENT_REQUIRED'
+        );
+      }
       throw withPayment(
         new StampError(error.suggestion ? `${error.message}. ${error.suggestion}` : error.message, error.code),
         error,
@@ -651,7 +661,8 @@ export class ProvenanceClient {
    * Make a fetch request to the gateway.
    *
    * x402 mode: writes go through the paying fetch; reads use the free tier
-   * unless `payForReads`. Each attempt gets its own paying fetch and state, so
+   * unless `payForReads`, and a write with `payable: false` (pool acquisition
+   * without `payForPool`) uses plain fetch. Each attempt gets its own paying fetch and state, so
    * the SDK knows whether it sent a payment: a paid attempt is never retried
    * (the gateway may already have settled, #107) and its errors carry `payment`.
    *
@@ -660,13 +671,17 @@ export class ProvenanceClient {
    * IDEMPOTENCY_UNAVAILABLE: with the same key and a new authorization, which
    * the gateway verifies but never settles.
    */
-  private async fetch(path: string, init?: RequestInit, options: { idempotencyKey?: string | undefined } = {}): Promise<Response> {
+  private async fetch(
+    path: string,
+    init?: RequestInit,
+    options: { idempotencyKey?: string | undefined; payable?: boolean } = {}
+  ): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
 
     const x402 = typeof this.paymentMode === 'object' ? this.paymentMode : undefined;
     const method = (init?.method ?? 'GET').toUpperCase();
     const isRead = method === 'GET' || method === 'HEAD';
-    const paying = x402 !== undefined && (!isRead || x402.payForReads === true);
+    const paying = x402 !== undefined && (isRead ? x402.payForReads === true : options.payable !== false);
     // Unpaid requests in x402 mode use the free tier, as in 'free' mode
     const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
     const transport = paying ? await this.getX402Transport() : undefined;
