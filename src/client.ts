@@ -272,7 +272,13 @@ export class ProvenanceClient {
     } catch (error) {
       // The gateway hashes the query, stamp_id included: a retry with the same key
       // must reuse the stamp, or it is a different request (IDEMPOTENCY_KEY_REUSED)
-      if (error instanceof ProvenanceError && error.payment) error.payment.stampId = stampId;
+      if (error instanceof ProvenanceError) {
+        if (error.payment) error.payment.stampId = stampId;
+        // A stamp taken from the pool (and maybe paid for) outlives the failed
+        // upload: say which, even when the upload itself paid nothing
+        if (options.stampId === undefined) error.stampId = stampId;
+        if (stampPayment) error.stampPayment = stampPayment;
+      }
       throw withRetryHint(error, 'upload()', idempotencyKey, stampId);
     }
   }
@@ -866,6 +872,8 @@ export class ProvenanceClient {
     let code: string | undefined;
     let suggestion: string | undefined;
     let fields: Record<string, unknown> = {};
+    /** Transaction named in the body: in `detail`, or top level (the gateway's paid-request crash answer) */
+    let bodyTransaction: unknown;
 
     try {
       const data = (await response.json()) as GatewayErrorResponse;
@@ -887,6 +895,7 @@ export class ProvenanceClient {
       if (data.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)) {
         fields = data.detail as Record<string, unknown>;
       }
+      bodyTransaction = reported(fields['transaction']) ?? reported((data as { transaction?: unknown }).transaction);
     } catch {
       // Ignore JSON parse errors
     }
@@ -894,9 +903,7 @@ export class ProvenanceClient {
     const paid = this.paidResponses.has(response);
     const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals) : undefined;
     if (payment && typeof fields['nonce'] === 'string' && fields['nonce']) payment.nonce = fields['nonce'];
-    if (payment && !payment.transaction && typeof fields['transaction'] === 'string' && fields['transaction'] !== 'unknown') {
-      payment.transaction = fields['transaction'];
-    }
+    if (payment && !payment.transaction && typeof bodyTransaction === 'string') payment.transaction = bodyTransaction;
 
     const outcome = code === undefined ? undefined : PAYMENT_OUTCOMES[code];
     if (payment && outcome) {
@@ -985,7 +992,14 @@ const NOT_CHARGED = new Set([
  * a person (PaymentOutcomeError) or a key the gateway refused.
  */
 function withRetryHint(error: unknown, operation: string, idempotencyKey: string | undefined, stampId?: string): unknown {
-  if (!(error instanceof ProvenanceError) || !error.payment || idempotencyKey === undefined) return error;
+  if (!(error instanceof ProvenanceError)) return error;
+  if (!error.payment && error.stampPayment && stampId !== undefined) {
+    // The upload paid nothing, but its pool stamp was paid for: reuse it
+    const tx = error.stampPayment.transaction ? ` (transaction ${error.stampPayment.transaction})` : '';
+    error.message += `${/[.!?]$/.test(error.message) ? '' : '.'} The pool stamp was paid for${tx}: to use it instead of paying for another, call ${operation} again with stampId "${stampId}"`;
+    return error;
+  }
+  if (!error.payment || idempotencyKey === undefined) return error;
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;

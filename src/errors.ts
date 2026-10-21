@@ -51,6 +51,18 @@ export class ProvenanceError extends Error {
    */
   public payment?: PaymentAttempt;
 
+  /**
+   * `upload()` only: the stamp it acquired from the pool before this error.
+   * Set whether or not the failed request paid; pass it back as `stampId`.
+   */
+  public stampId?: string;
+
+  /**
+   * `upload()` only: the receipt for the pool stamp it paid for before this
+   * error. That payment succeeded; `payment` (if set) is the failed request's own.
+   */
+  public stampPayment?: import('./types.js').PaymentReceipt;
+
   constructor(
     message: string,
     public readonly code?: string
