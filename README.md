@@ -107,9 +107,14 @@ A browser can read the receipt headers only if the gateway exposes them through 
 them, `payment` has the signed amount but no `transaction`, `payer` or `replayed`. No `payment`
 is reported when the gateway says it answered on the free tier (`X-Payment-Mode: free-tier`) or
 its receipt reports `success: false`. Errors after a payment carry the same fields on
-`error.payment`. The transaction is set whenever the gateway sent one (header or body).
-Network, payer and amount are set only when the gateway sent a receipt header: without one the
-SDK cannot tell whether the payment settled.
+`error.payment`. The transaction is set whenever the gateway sent one (header, or the body's
+`transaction`, at the top level or in `detail`). Network, payer and amount are set only when the
+gateway sent a receipt header: without one the SDK cannot tell whether the payment settled.
+
+When `upload()` took its stamp from the pool and then failed, the error also carries `stampId`
+(the stamp it acquired) and, if that stamp was paid for, `stampPayment` (its receipt). This holds
+even when the failed request paid nothing itself, such as a `PaymentRefusedError` for the upload:
+`error.payment` is then unset, and the message says to pass `stampId` to reuse the paid stamp.
 
 **Retrying without paying twice.** Paid writes carry an `Idempotency-Key`: one random key per
 `upload()` or `acquireStamp()` call, or yours (`idempotencyKey` option, 1-255 printable ASCII
@@ -700,7 +705,8 @@ message comes from Node itself.
   `message` of the error envelope when `detail` has none.
 - Paid results carry the payment receipt (#111): `payment` on `UploadResult`,
   `DocumentUploadResult` and `AcquiredStamp`, and `stampPayment` on upload results when
-  `upload()` paid for its pool stamp. `error.payment` gains `network`, `payer`, `amount`,
+  `upload()` paid for its pool stamp. Errors from `upload()` after a pool acquisition carry
+  `stampId` and, when the stamp was paid for, `stampPayment`. `error.payment` gains `network`, `payer`, `amount`,
   `amountDecimal` and `asset` when the gateway sent a receipt header, and `replayed` on an
   idempotent replay. All fields are new and optional. Unpaid results carry no `payment`.
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
