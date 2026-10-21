@@ -286,8 +286,9 @@ export class ProvenanceClient {
   ): Promise<UploadResult | DocumentUploadResult> {
     // One key for the whole operation: the pool acquisition and the upload are
     // different paths, so the gateway keeps them apart (#102)
-    const idempotencyKey = this.operationKey(options.idempotencyKey);
-    assertOwnerProofStamp(options);
+    assertOwnerProofOptions(options);
+    // An owner-proof upload is unpaid: no key (#124)
+    const idempotencyKey = options.ownerSigner ? undefined : this.operationKey(options.idempotencyKey);
     // Get stamp - either from options or acquire from pool
     let stampId: string;
     try {
@@ -780,9 +781,11 @@ export class ProvenanceClient {
           const rateRemaining = response.headers.get('X-RateLimit-Remaining');
 
           throw new PaymentRateLimitError(
-            x402 && !options.unpaid
-              ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
-              : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
+            options.attemptHeaders
+              ? 'Free tier rate limit exceeded. Owner-proof uploads use the free tier and its rate limit: wait for Retry-After, or (in x402 mode) upload without ownerSigner to pay instead.'
+              : x402 && !options.unpaid
+                ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
+                : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
             retryAfter ? parseInt(retryAfter, 10) : undefined,
             rateLimit ? parseInt(rateLimit, 10) : undefined,
             rateRemaining ? parseInt(rateRemaining, 10) : undefined
@@ -1094,15 +1097,28 @@ function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
   };
 }
 
+/** A signature as signMessage returns it: 0x-prefixed hex */
+const SIGNATURE_HEX = /^0x[0-9a-fA-F]+$/;
+
 /** Stamp id the gateway accepts: 64 hex characters, no 0x */
 const STAMP_ID = /^[0-9a-fA-F]{64}$/;
 
-/** An owner proof needs the stamp it proves ownership of; checked before anything is sent */
-function assertOwnerProofStamp(options: UploadOptions): void {
+/**
+ * An owner proof needs the stamp it proves ownership of, and takes no
+ * Idempotency-Key: the upload is unpaid, so the gateway would not use it.
+ * Checked before anything is signed or sent.
+ */
+function assertOwnerProofOptions(options: UploadOptions): void {
   if (options.ownerSigner === undefined) return;
   if (options.stampId === undefined || !STAMP_ID.test(options.stampId)) {
     throw new ProvenanceError(
       `ownerSigner requires stampId: 64 hex characters without 0x, got ${JSON.stringify(options.stampId)}`,
+      'INVALID_INPUT'
+    );
+  }
+  if (options.idempotencyKey !== undefined) {
+    throw new ProvenanceError(
+      'ownerSigner cannot be combined with idempotencyKey: an owner-proof upload is not paid, so the gateway does not use the key',
       'INVALID_INPUT'
     );
   }
@@ -1119,12 +1135,19 @@ function ownerProofHeaders(signer: OwnerSigner, stampId: string): () => Promise<
   return async () => {
     const timestamp = Math.max(Math.floor(Date.now() / 1000), last + 1);
     last = timestamp;
-    let signature: string;
+    let signature: unknown;
     try {
       signature = await signer.signMessage({ message: ownerProofMessage(stampId, timestamp) });
     } catch (error) {
       throw new ProvenanceError(
         `Owner proof could not be signed: ${error instanceof Error ? error.message : String(error)}`,
+        'OWNER_PROOF_FAILED'
+      );
+    }
+    // The value is not quoted: it may be a usable proof in some other encoding
+    if (typeof signature !== 'string' || !SIGNATURE_HEX.test(signature)) {
+      throw new ProvenanceError(
+        'Owner proof could not be signed: signMessage did not return a 0x-prefixed hex string',
         'OWNER_PROOF_FAILED'
       );
     }

@@ -3,7 +3,7 @@ import { createWalletClient, http, publicActions, recoverMessageAddress } from '
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
-import { GatewayConnectionError, NotaryError, ProvenanceError } from '../../src/errors.js';
+import { GatewayConnectionError, NotaryError, PaymentRateLimitError, ProvenanceError } from '../../src/errors.js';
 import { ownerProofMessage } from '../../src/utils.js';
 import type { OwnerSigner, ProvenanceClientConfig } from '../../src/types.js';
 
@@ -23,8 +23,8 @@ const GATEWAY = 'http://gateway.test';
 const STAMP = 'AbCdEf'.padEnd(64, 'a');
 const REFERENCE = 'b'.repeat(64);
 
-const mockFetch = vi.fn<[string, RequestInit | undefined], Promise<Response>>();
-vi.stubGlobal('fetch', (url: string, init?: RequestInit) => mockFetch(url, init));
+const mockFetch = vi.fn<[string | URL | Request, RequestInit | undefined], Promise<Response>>();
+vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => mockFetch(input, init));
 afterAll(() => {
   vi.unstubAllGlobals();
 });
@@ -76,7 +76,7 @@ describe('owner-proof uploads', () => {
     expect(Number.isInteger(timestamp)).toBe(true);
     expect(Math.abs(timestamp - before)).toBeLessThanOrEqual(300);
     expect(await recoveredSigner(0)).toBe(OWNER.address);
-    expect(new URL(mockFetch.mock.calls[0]![0]).searchParams.get('stamp_id')).toBe(STAMP);
+    expect(new URL(String(mockFetch.mock.calls[0]![0])).searchParams.get('stamp_id')).toBe(STAMP);
   });
 
   it('works for raw uploads too', async () => {
@@ -303,5 +303,162 @@ describe('owner-proof signing timeout', () => {
     expect(error).toMatchObject({ code: 'TIMEOUT' });
     expect((error as Error).message).toContain('owner-proof signature');
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('owner-proof options and isolation', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('gives owner-proof advice for a free-tier 429 in x402 mode', async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: { error: 'Rate limit exceeded' } }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '42' },
+      })
+    );
+
+    const error = await client({ wallet }).upload('hello', { stampId: STAMP, ownerSigner: wallet }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PaymentRateLimitError);
+    expect(error).toMatchObject({ retryAfterSeconds: 42 });
+    const message = (error as Error).message;
+    expect(message).toContain('Owner-proof uploads use the free tier');
+    expect(message).toContain('without ownerSigner');
+    expect(message).not.toContain('Consider using x402 payment mode');
+  });
+
+  it('refuses ownerSigner with idempotencyKey before signing or sending', async () => {
+    const sign = vi.fn((args: { message: string }) => OWNER.signMessage(args));
+
+    const error = await client({ wallet })
+      .upload('hello', { stampId: STAMP, ownerSigner: { signMessage: sign }, idempotencyKey: 'my-key' })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect(error).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((error as Error).message).toContain('idempotencyKey');
+    expect(sign).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a value without 0x', 'deadbeef'],
+    ['a non-hex value', '0xnothex'],
+    ['an empty string', ''],
+    ['a non-string', 42],
+    ['undefined', undefined],
+  ])('throws OWNER_PROOF_FAILED and sends nothing when the signer returns %s', async (_label, value) => {
+    const signer = { signMessage: () => Promise.resolve(value) } as unknown as OwnerSigner;
+
+    const error = await client().upload('hello', { stampId: STAMP, ownerSigner: signer }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect(error).toMatchObject({ code: 'OWNER_PROOF_FAILED' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps owner-proof headers off later pricing and pool requests, which keep their payment behaviour', async () => {
+    const seen: { method: string; path: string; headers: Headers }[] = [];
+    mockFetch.mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      seen.push({ method: request.method, path, headers: request.headers });
+      if (path === '/api/v1/pricing') return Promise.resolve(json(200, { x402_enabled: false, quotes: {} }));
+      if (path === '/api/v1/pool/acquire') {
+        if (!request.headers.has('X-PAYMENT')) {
+          return Promise.resolve(
+            json(402, {
+              x402Version: 1,
+              error: 'Payment required',
+              accepts: [
+                {
+                  scheme: 'exact',
+                  network: 'base-sepolia',
+                  maxAmountRequired: '10000',
+                  asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+                  payTo: '0x1111111111111111111111111111111111111111',
+                  maxTimeoutSeconds: 60,
+                  resource: `${GATEWAY}/api/v1/pool/acquire`,
+                  description: 'acquire',
+                  mimeType: 'application/json',
+                  extra: { name: 'USDC', version: '2' },
+                },
+              ],
+            })
+          );
+        }
+        return Promise.resolve(json(200, { batch_id: 'c'.repeat(64), depth: 17, size_name: 'small', fallback_used: false }));
+      }
+      return Promise.resolve(json(200, { reference: REFERENCE }));
+    });
+    const c = client({ wallet });
+
+    await c.upload('hello', { stampId: STAMP, ownerSigner: wallet });
+    await c.pricing();
+    const stamp = await c.acquireStamp('small');
+
+    expect(stamp.batchId).toBe('c'.repeat(64));
+    const [upload, pricing, ...acquire] = seen;
+    expect(upload!.headers.has('X-Owner-Signature')).toBe(true);
+    for (const request of [pricing!, ...acquire]) {
+      expect(request.headers.has('X-Owner-Timestamp')).toBe(false);
+      expect(request.headers.has('X-Owner-Signature')).toBe(false);
+    }
+    // pricing: an unpaid read on the free tier
+    expect(pricing!.method).toBe('GET');
+    expect(pricing!.headers.get('X-Payment-Mode')).toBe('free');
+    // acquisition: paid as before, with an Idempotency-Key and no free-tier header
+    expect(acquire.map((r) => r.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/pool/acquire']);
+    expect(acquire[0]!.headers.has('X-PAYMENT')).toBe(false);
+    expect(acquire[1]!.headers.has('X-PAYMENT')).toBe(true);
+    expect(acquire[1]!.headers.get('Idempotency-Key')).toBeTruthy();
+    expect(acquire[1]!.headers.has('X-Payment-Mode')).toBe(false);
+  });
+
+  it.each([
+    ['none', 'none' as const],
+    ['x402', 'x402' as const],
+  ])("sends no owner-proof headers without ownerSigner in '%s' mode", async (_label, mode) => {
+    const seen: Headers[] = [];
+    mockFetch.mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      seen.push(request.headers);
+      if (mode === 'x402' && !request.headers.has('X-PAYMENT')) {
+        return Promise.resolve(
+          json(402, {
+            x402Version: 1,
+            error: 'Payment required',
+            accepts: [
+              {
+                scheme: 'exact',
+                network: 'base-sepolia',
+                maxAmountRequired: '10000',
+                asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+                payTo: '0x1111111111111111111111111111111111111111',
+                maxTimeoutSeconds: 60,
+                resource: `${GATEWAY}/api/v1/data/`,
+                description: 'upload',
+                mimeType: 'application/json',
+                extra: { name: 'USDC', version: '2' },
+              },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(json(200, { reference: REFERENCE }));
+    });
+
+    const result = await client(mode === 'x402' ? { wallet } : 'none').upload('hello', { stampId: STAMP });
+
+    expect(result.reference).toBe(REFERENCE);
+    expect(seen.length).toBe(mode === 'x402' ? 2 : 1);
+    for (const headers of seen) {
+      expect(headers.has('X-Owner-Timestamp')).toBe(false);
+      expect(headers.has('X-Owner-Signature')).toBe(false);
+    }
+    if (mode === 'x402') expect(seen[1]!.has('X-PAYMENT')).toBe(true);
+    else expect(seen[0]!.has('X-Payment-Mode')).toBe(false);
   });
 });
