@@ -627,6 +627,10 @@ message comes from Node itself.
   (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
   instead of being sent to the gateway. `isValidSwarmReference()` now accepts 128-character
   encrypted references and the `0x` prefix.
+- A `Retry-After` header given as an HTTP date is honoured (#123). Before, it was read as `NaN`:
+  the 429 retry (`payment: 'none'` and x402 mode) did not wait, and
+  `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
+  date now falls back to the normal backoff.
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch

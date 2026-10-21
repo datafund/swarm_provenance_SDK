@@ -333,6 +333,24 @@ describe('retry codes: same key, new authorization', () => {
     }
   });
 
+  it('honours a Retry-After given as an HTTP date (#123)', async () => {
+    const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], now });
+    try {
+      const retryAt = new Date(now + 10_000).toUTCString();
+      paidAnswers = [{ ...IN_PROGRESS, headers: { 'Retry-After': retryAt } }, { status: 200 }];
+      const upload = client({ paidTimeout: 10 * 60_000 }).upload('hello', { stampId: STAMP });
+      await vi.waitFor(() => expect(paid()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(paid()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_100);
+      await expect(upload).resolves.toMatchObject({ reference: REFERENCE });
+      expect(paid()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a 409 without an idempotency code after payment is not retried', async () => {
     paidAnswers = [{ status: 409, body: envelope({ code: 'HTTP_409', message: 'Pool exhausted' }) }];
     const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);

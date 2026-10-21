@@ -92,6 +92,22 @@ export function normalizeReference(ref: string): string {
   return ref.trim().toLowerCase();
 }
 
+/**
+ * Seconds to wait from a Retry-After header (RFC 9110): delta-seconds, or an
+ * HTTP date (seconds from `now`, rounded up; 0 if past). Undefined if the
+ * header is missing or neither form.
+ */
+export function retryAfterSeconds(value: string | null | undefined, now: number = Date.now()): number | undefined {
+  const text = value?.trim();
+  if (!text) return undefined;
+  if (/^\d+$/.test(text)) return Number(text);
+  // A date has letters (a day or month name); this keeps '-5' or '1.5' from parsing as one
+  if (!/[a-z]/i.test(text)) return undefined;
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, Math.ceil((at - now) / 1000));
+}
+
 /** 0x followed by 40 hex characters (any case; no checksum check) */
 export function isAddress(value: unknown): boolean {
   return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);

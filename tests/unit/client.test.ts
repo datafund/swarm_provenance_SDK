@@ -966,6 +966,24 @@ describe('ProvenanceClient', () => {
       await expect(client.health()).resolves.toBe(false);
     });
 
+    it('reads a Retry-After HTTP date into retryAfterSeconds (#123)', async () => {
+      const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+      vi.useFakeTimers({ toFake: ['Date'], now });
+      try {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: new Headers({ 'Retry-After': new Date(now + 60_000).toUTCString() }),
+        });
+        const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(PaymentRateLimitError);
+        expect((error as PaymentRateLimitError).retryAfterSeconds).toBe(60);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should include retry metadata in PaymentRateLimitError', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -1128,6 +1146,30 @@ describe('ProvenanceClient', () => {
 
       expect(result).toBe(true);
       expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits until a Retry-After given as an HTTP date (#123)', async () => {
+      const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], now });
+      try {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: new Headers({ 'Retry-After': new Date(now + 3_000).toUTCString() }),
+        });
+        mockFetch.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const health = client.health();
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1_100);
+        await expect(health).resolves.toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should return error response after exhausting retries', async () => {

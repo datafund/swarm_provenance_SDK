@@ -7,6 +7,7 @@ import {
   isValidHex,
   isValidSwarmReference,
   normalizeReference,
+  retryAfterSeconds,
 } from '../../src/utils.js';
 
 describe('toBytes', () => {
@@ -215,5 +216,32 @@ describe('normalizeReference', () => {
   it('should handle mixed case with whitespace', () => {
     const ref = '  AbCdEf123456789AbCdEf123456789AbCdEf123456789AbCdEf123456789AbCd  ';
     expect(normalizeReference(ref)).toBe('abcdef123456789abcdef123456789abcdef123456789abcdef123456789abcd');
+  });
+});
+
+describe('retryAfterSeconds (#123)', () => {
+  const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+
+  it('reads delta-seconds', () => {
+    expect(retryAfterSeconds('120', now)).toBe(120);
+    expect(retryAfterSeconds('0', now)).toBe(0);
+    expect(retryAfterSeconds(' 5 ', now)).toBe(5);
+  });
+
+  it('reads an HTTP date as seconds from now, rounded up', () => {
+    expect(retryAfterSeconds(new Date(now + 30_000).toUTCString(), now)).toBe(30);
+    expect(retryAfterSeconds(new Date(now + 30_000).toUTCString(), now + 500)).toBe(30);
+  });
+
+  it('gives 0 for an HTTP date in the past', () => {
+    expect(retryAfterSeconds(new Date(now - 60_000).toUTCString(), now)).toBe(0);
+  });
+
+  it('gives undefined for a missing or unreadable value', () => {
+    expect(retryAfterSeconds(null, now)).toBeUndefined();
+    expect(retryAfterSeconds('', now)).toBeUndefined();
+    expect(retryAfterSeconds('soon', now)).toBeUndefined();
+    expect(retryAfterSeconds('-5', now)).toBeUndefined();
+    expect(retryAfterSeconds('1.5', now)).toBeUndefined();
   });
 });
