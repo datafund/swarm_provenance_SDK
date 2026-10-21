@@ -204,7 +204,8 @@ export class ProvenanceClient {
         body: JSON.stringify({ size }),
       },
       // Paid pool acquisition is opt-in (#109): the pool can answer 402 once the
-      // shared daily allowance is spent, priced at 2x the quote at the default markup
+      // shared daily allowance is spent, at twice the gateway's purchase price for
+      // that stamp (default pool markup 100%)
       { idempotencyKey, payable: payForPool }
     );
 
