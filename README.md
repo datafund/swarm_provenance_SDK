@@ -693,10 +693,11 @@ message comes from Node itself.
 - `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
   now has a `browser` export condition, listed first, that resolves to a build without
   `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node
-  `import`/`require` resolution is unchanged. **Runtimes that resolve the `browser` condition
-  also get this build**, for example Cloudflare Workers (wrangler) and esbuild with
-  `platform: 'browser'`. Server code there that used `fromPrivateKey` must create a viem wallet
-  client with `privateKeyToAccount` and pass it to `fromViemWalletClient` instead.
+  `import`/`require` resolution is unchanged. **Any runtime or bundler that resolves the
+  `browser` export condition gets the build without `fromPrivateKey`**, also for server code.
+  Examples are Cloudflare Workers and esbuild with `platform: 'browser'`. Code built that way
+  must create a viem wallet client with `privateKeyToAccount` and pass it to
+  `fromViemWalletClient` instead.
   TypeScript does not apply the `browser` condition unless `customConditions: ["browser"]` is
   set in `tsconfig.json`. Without it, your editor still shows `fromPrivateKey` in browser code,
   and only the bundler reports the error.
