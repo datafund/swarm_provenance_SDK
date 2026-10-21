@@ -1096,16 +1096,36 @@ export class ChainClient {
     return cleaned;
   }
 
-  private isTransientError(error: unknown): boolean {
-    let msg: string;
-    if (error instanceof Error) {
-      msg = error.message;
-    } else if (typeof error === 'object' && error !== null && 'message' in error) {
-      msg = String((error as Record<string, unknown>)['message']);
-    } else {
-      msg = String(error);
+  private errorText(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'object' && error !== null && 'message' in error) {
+      return String((error as Record<string, unknown>)['message']);
     }
-    return /nonce too (low|high)|replacement underpriced/i.test(msg);
+    return String(error);
+  }
+
+  /**
+   * Errors worth sending again: the node refused the nonce. Not "replacement
+   * underpriced" (#123): a transaction with that nonce is already pending,
+   * possibly this client's own earlier write, so a resend could write twice.
+   */
+  private isTransientError(error: unknown): boolean {
+    return /nonce too (low|high)/i.test(this.errorText(error));
+  }
+
+  /**
+   * Why a send error does not mean "nothing was sent" (#123), or undefined.
+   * Both cases mean a transaction is in the node's mempool and may confirm.
+   */
+  private pendingSendNote(error: unknown): string | undefined {
+    const text = this.errorText(error);
+    if (/replacement (transaction )?underpriced/i.test(text)) {
+      return 'a transaction with this nonce is already pending. It may still confirm: check the signer\'s pending transactions; do not resend';
+    }
+    if (/already known/i.test(text)) {
+      return 'the node already has this transaction (already known). It may still confirm: check the signer\'s pending transactions; do not resend';
+    }
+    return undefined;
   }
 
   private delay(ms: number): Promise<void> {
@@ -1215,8 +1235,9 @@ export class ChainClient {
           continue;
         }
         const originalError = error instanceof Error ? error : undefined;
+        const pending = this.pendingSendNote(error);
         throw new ChainTransactionError(
-          `Transaction failed: ${this.cleanTransactionError(error)}`,
+          pending ? `Transaction not confirmed: ${pending}` : `Transaction failed: ${this.cleanTransactionError(error)}`,
           undefined,
           originalError,
         );

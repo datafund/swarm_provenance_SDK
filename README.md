@@ -441,7 +441,7 @@ const chain = new ChainClient({
   rpcUrl?: string,            // override RPC endpoint; a URL outside the preset's list disables its fallbacks
   rpcFallbacks?: string[],    // tried in order on any error but a revert; defaults to the preset's, [] disables
   signer?: ChainSigner,       // required for write operations
-  retry?: RetryConfig,        // auto-retry on nonce errors (default: 2 retries, 1s backoff)
+  retry?: RetryConfig,        // auto-retry on "nonce too low/high" (default: 2 retries, 1s backoff)
 });
 ```
 
@@ -635,6 +635,11 @@ message comes from Node itself.
   the 429 retry (`payment: 'none'` and x402 mode) did not wait, and
   `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
   date now falls back to the normal backoff.
+- Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
+  transaction with that nonce is already pending, and a resend could write twice. That error and
+  "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
+  still confirm ... do not resend" instead of "Transaction failed". Check the wallet's pending
+  transactions before sending again.
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch

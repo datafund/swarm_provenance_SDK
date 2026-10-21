@@ -1511,7 +1511,7 @@ describe('ChainClient', () => {
       expect(sendTransaction).toHaveBeenCalledTimes(2);
     });
 
-    it('should retry on replacement-underpriced and succeed', async () => {
+    it('does not retry on replacement-underpriced: a tx with that nonce is already pending (#123)', async () => {
       mockReadContract.mockResolvedValueOnce({
         dataHash: ZERO_HASH,
         owner: '0x' + '00'.repeat(20),
@@ -1526,12 +1526,38 @@ describe('ChainClient', () => {
         .mockRejectedValueOnce(new Error('replacement underpriced'))
         .mockResolvedValueOnce(MOCK_TX_HASH);
 
-      mockWaitForTransactionReceipt.mockResolvedValueOnce({
-        status: 'success',
-        logs: eventLogs('DataRegistered'),
-        blockNumber: BigInt(302),
-        gasUsed: BigInt(50000),
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
       });
+
+      const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainTransactionError);
+      expect((error as Error).message).toContain('already pending');
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWaitForTransactionReceipt).not.toHaveBeenCalled();
+    });
+
+    it('does not retry on already-known and says the tx may still confirm (#123)', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValueOnce(new Error('already known'))
+        .mockResolvedValueOnce(MOCK_TX_HASH);
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
@@ -1544,9 +1570,11 @@ describe('ChainClient', () => {
         retry: { maxRetries: 2, baseDelayMs: 1 },
       });
 
-      const result = await client.anchor(SAMPLE_HASH, 'dataset');
-      expect(result.txHash).toBe(MOCK_TX_HASH);
-      expect(sendTransaction).toHaveBeenCalledTimes(2);
+      const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainTransactionError);
+      expect((error as Error).message).toContain('may still confirm');
+      expect((error as Error).message).toContain('do not resend');
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
     });
 
     it('should not retry on non-transient errors', async () => {
