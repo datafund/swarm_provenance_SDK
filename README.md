@@ -276,7 +276,7 @@ const result = await client.upload(content, {
   poolSize?: 'small' | 'medium' | 'large', // Pool size preset
   contentType?: string,                    // Content type
   raw?: boolean,                           // Upload a JSON document without base64 wrapping
-  idempotencyKey?: string,                 // x402 mode: see "Retrying without paying twice"
+  idempotencyKey?: string,                 // x402 mode: see "Retrying without paying twice"; not with ownerSigner
   ownerSigner?: OwnerSigner,               // Upload to your own stamp without paying (see below)
 });
 
@@ -323,11 +323,19 @@ How it works:
 - The gateway accepts each proof once. The SDK signs a new proof for every request
   attempt, including automatic retries. A browser wallet therefore asks you to sign once
   per attempt.
+- Each attempt, signing included, is bounded by `paidTimeout` (default 120 s), because a
+  person may be approving a wallet prompt. If the signer does not answer in time, `upload()`
+  throws `GatewayConnectionError` (`TIMEOUT`) and sends nothing.
+- If the free-tier rate limit is reached, `upload()` throws `PaymentRateLimitError`. Wait for
+  `retryAfterSeconds`, or in x402 mode upload without `ownerSigner` to pay instead.
 - A proof lets whoever holds it make one upload to your stamp. The SDK never puts it in an
   error message. Do not log it.
 - `ownerSigner` requires `stampId`. Without one, or with one that is not 64 hex characters,
-  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything. If the
-  signer fails (for example, the user rejects the request), it throws `OWNER_PROOF_FAILED`.
+  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything.
+- `ownerSigner` cannot be combined with `idempotencyKey`. The upload is not paid, so the
+  gateway does not use the key, and `upload()` throws `INVALID_INPUT` before signing anything.
+- If the signer fails (for example, the user rejects the request) or returns anything other
+  than a 0x-prefixed hex string, `upload()` throws `OWNER_PROOF_FAILED` and sends nothing.
 
 | Gateway answer | Error | Meaning |
 |----------------|-------|---------|
