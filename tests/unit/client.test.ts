@@ -1377,5 +1377,46 @@ describe('ProvenanceClient', () => {
       expect('expiresAt' in (await client.upload('hello', { stampId: STAMP }))).toBe(false);
     });
 
+    describe('upload size (#112)', () => {
+      /** The gateway's default MAX_UPLOAD_SIZE_MB (10) in bytes */
+      const LIMIT = 10 * 1024 * 1024;
+
+      it('content over the limit after base64 is refused before any request, also before the pool', async () => {
+        const error = await new ProvenanceClient().upload(new Uint8Array(7_900_000)).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ProvenanceError);
+        expect((error as ProvenanceError).code).toBe('FILE_TOO_LARGE');
+        expect((error as Error).message).toContain(String(LIMIT));
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('content just under the limit is sent', async () => {
+        mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+        await new ProvenanceClient().upload(new Uint8Array(7_860_000), { stampId: STAMP });
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      it('a raw document over the limit is refused', async () => {
+        const error = await new ProvenanceClient()
+          .upload({ text: 'x'.repeat(LIMIT) }, { stampId: STAMP, raw: true })
+          .catch((e: unknown) => e);
+        expect((error as ProvenanceError).code).toBe('FILE_TOO_LARGE');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('maxUploadBytes sets the limit', async () => {
+        const error = await new ProvenanceClient({ maxUploadBytes: 1000 })
+          .upload('x'.repeat(1000), { stampId: STAMP })
+          .catch((e: unknown) => e);
+        expect((error as ProvenanceError).code).toBe('FILE_TOO_LARGE');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it("the edge proxy's bare 413 is a clear FILE_TOO_LARGE error", async () => {
+        mockFetch.mockResolvedValueOnce(new Response('', { status: 413, statusText: 'Request Entity Too Large' }));
+        const error = await new ProvenanceClient().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+        expect((error as ProvenanceError).code).toBe('FILE_TOO_LARGE');
+        expect((error as Error).message).toMatch(/too large/i);
+      });
+    });
   });
 });

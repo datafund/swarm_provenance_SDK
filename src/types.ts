@@ -122,6 +122,13 @@ export interface ProvenanceClientConfig {
   payment?: PaymentMode;
   /** Retry config for transient gateway failures (default: 2 retries, 1s delay) */
   retry?: GatewayRetryConfig;
+  /**
+   * Largest upload the SDK sends, in bytes of the uploaded metadata JSON
+   * (default: 10485760, the gateway's default MAX_UPLOAD_SIZE_MB of 10). Base64
+   * makes that about 7.5 MiB of content; raw documents about 10 MiB of JSON.
+   * Larger uploads throw FILE_TOO_LARGE before a stamp is acquired.
+   */
+  maxUploadBytes?: number;
 }
 
 /**

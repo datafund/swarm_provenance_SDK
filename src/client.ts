@@ -71,6 +71,7 @@ export class ProvenanceClient {
   private readonly paidTimeout: number;
   private readonly paymentMode: PaymentMode;
   private readonly retryConfig: Required<GatewayRetryConfig>;
+  private readonly maxUploadBytes: number;
   /** Notary address reported by /notary/info (see gatewayNotaryAddress) */
   private cachedNotaryAddress: string | undefined;
   /** In-flight /notary/info lookup, shared by concurrent downloads */
@@ -90,6 +91,10 @@ export class ProvenanceClient {
     this.paymentMode = config.payment ?? 'free';
     // Resolve (and reject a bad) payment policy now, not on the first paid request
     if (typeof this.paymentMode === 'object') this.paymentPolicy = resolvePaymentPolicy(this.paymentMode);
+    this.maxUploadBytes = config.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES;
+    if (typeof this.maxUploadBytes !== 'number' || !(this.maxUploadBytes > 0)) {
+      throw new ProvenanceError(`maxUploadBytes must be a positive number, got ${String(config.maxUploadBytes)}`, 'INVALID_INPUT');
+    }
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 2,
       baseDelayMs: config.retry?.baseDelayMs ?? 1000,
@@ -264,6 +269,7 @@ export class ProvenanceClient {
     // One key for the whole operation: the pool acquisition and the upload are
     // different paths, so the gateway keeps them apart (#102)
     const idempotencyKey = this.operationKey(options.idempotencyKey);
+    const metadata = await this.prepareMetadata(content, options);
     // Get stamp - either from options or acquire from pool
     let stampId: string;
     let stampPayment: PaymentReceipt | undefined;
@@ -277,7 +283,7 @@ export class ProvenanceClient {
     try {
       const withKey: UploadOptions = { ...options };
       if (idempotencyKey !== undefined) withKey.idempotencyKey = idempotencyKey;
-      const result = await this.uploadWithStamp(content, stampId, withKey);
+      const result = await this.uploadPrepared(metadata, stampId, withKey);
       // Two requests, two payments: the upload's is `payment`, the stamp's this
       if (stampPayment) result.stampPayment = stampPayment;
       return result;
@@ -293,42 +299,6 @@ export class ProvenanceClient {
       }
       throw withRetryHint(error, 'upload()', idempotencyKey, stampId);
     }
-  }
-
-  private async uploadWithStamp(
-    content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
-    stampId: string,
-    options: UploadOptions
-  ): Promise<UploadResult | DocumentUploadResult> {
-    if (options.raw) {
-      return this.uploadRawDocument(content as string | Record<string, unknown>, stampId, options);
-    }
-
-    // Convert content to bytes
-    let bytes: Uint8Array;
-    if (content instanceof Blob) {
-      const buffer = await content.arrayBuffer();
-      bytes = new Uint8Array(buffer);
-    } else {
-      bytes = toBytes(content as Uint8Array | ArrayBuffer | string);
-    }
-
-    // Build metadata
-    const metadataOptions: { stampId: string; standard?: string } = { stampId };
-    if (options.standard !== undefined) {
-      metadataOptions.standard = options.standard;
-    }
-    const metadata = buildMetadata(bytes, metadataOptions);
-
-    const { data, payment } = await this.postMetadata(JSON.stringify(metadata), stampId, options);
-
-    const result: UploadResult = {
-      reference: data.reference,
-      metadata,
-    };
-    if (typeof data.expires_at === 'string') result.expiresAt = data.expires_at;
-    if (payment) result.payment = payment;
-    return result;
   }
 
   /**
@@ -509,46 +479,64 @@ export class ProvenanceClient {
     return fromPool(await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey));
   }
 
-  private async uploadRawDocument(
-    content: string | Record<string, unknown>,
-    stampId: string,
-    options: UploadOptions,
-  ): Promise<DocumentUploadResult> {
-    let documentData: Record<string, unknown>;
-
-    if (typeof content === 'string') {
-      try {
-        documentData = JSON.parse(content) as Record<string, unknown>;
-      } catch {
-        throw new ProvenanceError(
-          'Raw mode requires valid JSON string or plain object',
-          'INVALID_INPUT',
-        );
-      }
-    } else if (typeof content === 'object' && content !== null && !ArrayBuffer.isView(content) && !(content instanceof ArrayBuffer) && !(content instanceof Blob)) {
-      documentData = content;
-    } else {
-      throw new ProvenanceError(
-        'Raw mode requires valid JSON string or plain object',
-        'INVALID_INPUT',
-      );
-    }
-
-    const metadataOptions: { stampId: string; standard?: string } = { stampId };
+  /**
+   * Build the upload's metadata before a stamp is acquired, and refuse it if
+   * it is larger than the gateway accepts (#112): a stamp (maybe paid for) is
+   * not acquired for an upload that cannot succeed. `stamp_id` is the caller's
+   * stamp or a placeholder of a batch ID's length, so the size is exact;
+   * uploadPrepared() sets the real one.
+   */
+  private async prepareMetadata(
+    content: Uint8Array | ArrayBuffer | string | File | Blob | Record<string, unknown>,
+    options: UploadOptions
+  ): Promise<ProvenanceMetadata | DocumentMetadata> {
+    const metadataOptions: { stampId: string; standard?: string } = { stampId: options.stampId ?? STAMP_PLACEHOLDER };
     if (options.standard !== undefined) {
       metadataOptions.standard = options.standard;
     }
-    const metadata = buildDocumentMetadata(documentData, metadataOptions);
 
+    let metadata: ProvenanceMetadata | DocumentMetadata;
+    if (options.raw) {
+      metadata = buildDocumentMetadata(rawDocument(content), metadataOptions);
+    } else {
+      const bytes =
+        content instanceof Blob
+          ? new Uint8Array(await content.arrayBuffer())
+          : toBytes(content as Uint8Array | ArrayBuffer | string);
+      metadata = buildMetadata(bytes, metadataOptions);
+    }
+
+    const size = new TextEncoder().encode(JSON.stringify(metadata)).length;
+    if (size > this.maxUploadBytes) {
+      throw new ProvenanceError(
+        options.raw
+          ? `Upload too large: the document is ${size} bytes as uploaded (JSON metadata), over the limit of ${this.maxUploadBytes} bytes (maxUploadBytes)`
+          : `Upload too large: ${size} bytes once base64-encoded into the metadata, over the limit of ${this.maxUploadBytes} bytes (maxUploadBytes). ` +
+              `Content up to about ${(((this.maxUploadBytes - 512) * 3) / 4 / 1048576).toFixed(1)} MiB fits`,
+        'FILE_TOO_LARGE'
+      );
+    }
+    return metadata;
+  }
+
+  /** Upload metadata from prepareMetadata() with the stamp acquired for it. */
+  private async uploadPrepared(
+    metadata: ProvenanceMetadata | DocumentMetadata,
+    stampId: string,
+    options: UploadOptions
+  ): Promise<UploadResult | DocumentUploadResult> {
+    // Same position in the JSON as the placeholder: a retry with this stamp
+    // sends the same body (the gateway hashes it for the Idempotency-Key)
+    metadata.stamp_id = stampId;
     const { data, payment } = await this.postMetadata(JSON.stringify(metadata), stampId, options);
 
-    const result: DocumentUploadResult = {
+    const result: { reference: string; metadata: ProvenanceMetadata | DocumentMetadata; expiresAt?: string; payment?: PaymentReceipt } = {
       reference: data.reference,
       metadata,
     };
     if (typeof data.expires_at === 'string') result.expiresAt = data.expires_at;
     if (payment) result.payment = payment;
-    return result;
+    return result as UploadResult | DocumentUploadResult;
   }
 
   private async postMetadata(
@@ -943,6 +931,33 @@ export class ProvenanceClient {
     }
     return error;
   }
+}
+
+/** Stand-in stamp_id while the stamp is not known yet: as long as a batch ID (64 hex characters) */
+const STAMP_PLACEHOLDER = '0'.repeat(64);
+
+/** The gateway's default MAX_UPLOAD_SIZE_MB (10), in bytes: the limit on the uploaded metadata JSON */
+const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/** A raw-mode document: a JSON object string, or a plain object */
+function rawDocument(content: unknown): Record<string, unknown> {
+  if (typeof content === 'string') {
+    try {
+      return JSON.parse(content) as Record<string, unknown>;
+    } catch {
+      throw new ProvenanceError('Raw mode requires valid JSON string or plain object', 'INVALID_INPUT');
+    }
+  }
+  if (
+    typeof content === 'object' &&
+    content !== null &&
+    !ArrayBuffer.isView(content) &&
+    !(content instanceof ArrayBuffer) &&
+    !(content instanceof Blob)
+  ) {
+    return content as Record<string, unknown>;
+  }
+  throw new ProvenanceError('Raw mode requires valid JSON string or plain object', 'INVALID_INPUT');
 }
 
 /** Idempotency-Key the gateway accepts: 1-255 printable ASCII characters */
