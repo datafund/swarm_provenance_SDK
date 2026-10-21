@@ -60,12 +60,12 @@ export interface ProvenanceChainResult {
   /** Same records, in the same order, as getProvenanceChain returns */
   records: ChainProvenanceRecord[];
   /**
-   * True if no node was cut off by maxDepth, so the records are the whole
-   * connected DAG. False if some nodes reached maxDepth: their parents were
-   * not fetched and their edges not followed.
+   * True if maxDepth cut nothing off, so the records are the whole connected
+   * DAG. False if a node at maxDepth has a parent or child that was not
+   * visited, or its parents could not be looked up.
    */
   complete: boolean;
-  /** Hashes of the nodes at maxDepth whose edges were not followed (empty when complete) */
+  /** Hashes of the nodes at maxDepth with an unvisited neighbour or a failed parent lookup (empty when complete) */
   truncated: string[];
 }
 

@@ -1060,6 +1060,53 @@ describe('ChainClient', () => {
         expect(result.records[1]!.parents).toBeUndefined();
       });
 
+      it('is complete when the lineage is exactly maxDepth deep: a frontier leaf cuts nothing off', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [], parents: [hashA] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB]);
+        expect(result.complete).toBe(true);
+        expect(result.truncated).toEqual([]);
+      });
+
+      it('is incomplete when a frontier node has an unvisited parent (cut on the ancestor side)', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [hashC], parents: [hashA] },
+          [hashC]: { children: [], parents: [hashB] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(hashC, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashC, hashB]);
+        expect(result.complete).toBe(false);
+        expect(result.truncated).toEqual([hashB]);
+      });
+
+      it('fails closed: a frontier node whose parents lookup fails counts as truncated', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [], parents: new Error('rpc down') },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB]);
+        expect(result.complete).toBe(false);
+        expect(result.truncated).toEqual([hashB]);
+      });
+
+      it('getProvenanceChain does not look up the frontier (no extra RPC calls)', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [], parents: [hashA] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        await client.getProvenanceChain(SAMPLE_HASH, 1);
+        expect(calledFunctions().filter((f) => f === 'getTransformationParents')).toHaveLength(1);
+      });
+
       it('an unregistered start hash gives no records and a complete result', async () => {
         mockDag({});
         const client = new ChainClient({ chain: 'base-sepolia' });

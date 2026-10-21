@@ -443,15 +443,28 @@ export class ChainClient {
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
-    return (await this.getProvenanceChainResult(dataHash, maxDepth)).records;
+    return (await this.traverseProvenance(dataHash, maxDepth, false)).records;
   }
 
   /**
-   * getProvenanceChain, plus whether the result is the whole DAG (#123):
-   * `complete` is false when some nodes reached `maxDepth` and were not
-   * expanded; `truncated` lists them. Errors are as for getProvenanceChain.
+   * getProvenanceChain, plus whether the result is the whole DAG (#123).
+   *
+   * `truncated` lists the nodes at `maxDepth` that have a neighbour the
+   * traversal did not visit: a child from their record, or a parent, which is
+   * looked up for each node at `maxDepth` (one extra call per such node). A
+   * node at `maxDepth` with no unvisited neighbour cuts nothing off, so a
+   * lineage exactly `maxDepth` deep is `complete`. If that parent lookup fails,
+   * the node counts as truncated (fails closed). `complete` is true when
+   * `truncated` is empty. Records are the same as from getProvenanceChain (a
+   * node at `maxDepth` keeps `parents` undefined). Other errors are as for
+   * getProvenanceChain.
    */
   async getProvenanceChainResult(dataHash: string, maxDepth = 10): Promise<ProvenanceChainResult> {
+    return this.traverseProvenance(dataHash, maxDepth, true);
+  }
+
+  /** The BFS behind getProvenanceChain(Result); `checkFrontier` looks up the parents of nodes at maxDepth */
+  private async traverseProvenance(dataHash: string, maxDepth: number, checkFrontier: boolean): Promise<ProvenanceChainResult> {
     // Coerce like the clamp always did ('5' -> 5, null -> 0 -> clamped to 1), but reject NaN: it
     // survives Math.min/max and makes `depth >= NaN` always false, i.e. no limit.
     const requestedDepth = Number(maxDepth);
@@ -478,7 +491,7 @@ export class ChainClient {
       const expand = depth < effectiveMaxDepth;
       const [recordResult, parentsResult] = await Promise.allSettled([
         this.getDataRecord(hash),
-        expand ? this.getTransformationParents(hash) : Promise.resolve(undefined),
+        expand || checkFrontier ? this.getTransformationParents(hash) : Promise.resolve(undefined),
       ]);
 
       if (recordResult.status === 'rejected') {
@@ -492,8 +505,19 @@ export class ChainClient {
       records.push(record);
 
       if (!expand) {
-        // at maxDepth: parents not fetched (stays undefined), edges not followed
-        truncated.push(record.dataHash);
+        // At maxDepth: edges not followed, and parents stays undefined. Every
+        // node within maxDepth is already queued by now, so an unqueued
+        // neighbour is one the result is missing. A failed lookup counts as one.
+        if (checkFrontier) {
+          const unvisited = (hashes: readonly string[]) => hashes.some((h) => !queued.has(h.toLowerCase()));
+          if (
+            unvisited(record.transformationLinks.map((link) => link.newDataHash)) ||
+            parentsResult.status === 'rejected' ||
+            unvisited(parentsResult.value ?? [])
+          ) {
+            truncated.push(record.dataHash);
+          }
+        }
         continue;
       }
       if (parentsResult.status === 'rejected') {

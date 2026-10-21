@@ -496,8 +496,9 @@ await chain.getProvenanceChain(dataHash, 10);
 
 // The same, plus whether maxDepth cut the traversal off
 await chain.getProvenanceChainResult(dataHash, 10);
-// => { records, complete, truncated }: complete is false if some nodes reached maxDepth
-//    (their parents were not fetched); truncated lists their hashes.
+// => { records, complete, truncated }: complete is false if a node at maxDepth has a parent or
+//    child that was not visited (or its parents could not be looked up); truncated lists those
+//    nodes. A lineage exactly maxDepth deep is complete. Costs one extra call per node at maxDepth.
 
 // Detect v2 contract support
 await chain.supportsTransformationLinks();  // => boolean
@@ -700,7 +701,9 @@ message comes from Node itself.
   set in `tsconfig.json`. Without it, your editor still shows `fromPrivateKey` in browser code,
   and only the bundler reports the error.
 - `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
-  tell a lineage cut off by `maxDepth` from a whole one. `getProvenanceChain()` is unchanged.
+  tell a lineage cut off by `maxDepth` from a whole one. A node at `maxDepth` counts as truncated
+  only if it has a parent or child that was not visited, or its parent lookup fails.
+  `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
   (false for a wrong contract address; true if any fallback RPC serves the call).
 - The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);

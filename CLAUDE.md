@@ -374,7 +374,7 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 | `getTransformationParents(hash)` | Read | No | Get parent hashes (reverse traversal) |
 | `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
 | `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG; records carry `parents` (undefined at maxDepth) and `transformationLinks` (children). BFS order, not topological |
-| `getProvenanceChainResult(hash, maxDepth?)` | Read | No | Same traversal, returns `{ records, complete, truncated }`: `complete` false when nodes reached maxDepth (#123) |
+| `getProvenanceChainResult(hash, maxDepth?)` | Read | No | Same traversal, returns `{ records, complete, truncated }` (#123). Also looks up parents of nodes at maxDepth: a node is truncated only if it has an unvisited parent or child, or that lookup fails (fail closed). `getProvenanceChain` skips that lookup |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC can serve contract reads (probes a real `eth_call`) |
 | `waitForTransaction(txHash, { event?, count?, timeout? })` | Read | No | Wait for a sent tx and check it emitted the expected event |
