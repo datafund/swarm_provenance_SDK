@@ -6,10 +6,12 @@ import { VIEM_REQUIRE_GUARDED } from './scripts/viem-guard.js';
 const CJS_CHAIN = 'dist/chain/index.cjs';
 const VIEM_REQUIRE = "var viem = require('viem');";
 
-export default defineConfig({
-  entry: ['src/index.ts', 'src/chain/index.ts'],
+export default defineConfig([{
+  // chain/browser: the /chain entry without fromPrivateKey, for the "browser"
+  // export condition (#123). Its types are built by the second config below.
+  entry: ['src/index.ts', 'src/chain/index.ts', 'src/chain/browser.ts'],
   format: ['esm', 'cjs'],
-  dts: true,
+  dts: { entry: ['src/index.ts', 'src/chain/index.ts'] },
   clean: true,
   sourcemap: true,
   splitting: false,
@@ -31,4 +33,15 @@ export default defineConfig({
     // Function replacer: no `$&`-style pattern expansion in the inserted text
     await writeFile(CJS_CHAIN, code.replace(VIEM_REQUIRE, () => VIEM_REQUIRE_GUARDED));
   },
-});
+}, {
+  // Types of the browser entry, built on their own: in one declaration build
+  // with chain/index the shared declarations would land in browser.d.ts, which
+  // then re-exports fromPrivateKey under a generated alias
+  entry: { 'chain/browser': 'src/chain/browser.ts' },
+  format: ['esm', 'cjs'],
+  dts: { only: true },
+  clean: false,
+  target: 'es2022',
+  outDir: 'dist',
+  external: ['viem', '@x402/fetch', '@x402/evm', '@x402/evm/exact/client'],
+}]);

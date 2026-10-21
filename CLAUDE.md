@@ -132,7 +132,8 @@ src/
 ├── utils.ts      # SHA256, base64, helpers
 ├── canonical-json.ts # Python-compatible canonical JSON (lossless parser)
 └── chain/        # Blockchain anchoring (sub-path: ./chain)
-    ├── index.ts      # Public exports for @datafund/swarm-provenance/chain
+    ├── index.ts      # Public exports for @datafund/swarm-provenance/chain (Node)
+    ├── browser.ts    # Same exports minus fromPrivateKey ("browser" condition)
     ├── client.ts     # ChainClient class
     ├── contract.ts   # ABI encode/decode via viem
     ├── types.ts      # Chain types (ChainProvenanceRecord, AnchorResult, etc.)
@@ -185,6 +186,7 @@ Chain entry (`@datafund/swarm-provenance/chain`):
 - ESM: `dist/chain/index.js`
 - CJS: `dist/chain/index.cjs`
 - Types: `dist/chain/index.d.ts`
+- Browser (`browser` export condition, listed first; #123): `dist/chain/browser.{js,cjs,d.ts,d.cts}` from `src/chain/browser.ts`, the same exports minus `fromPrivateKey`. `src/chain/index.ts` and `browser.ts` keep explicit export lists; `tests/unit/build/browser-entry.test.ts` checks they differ only by `fromPrivateKey`. The browser types come from a second tsup config (`dts: { only: true }`): one declaration build over both entries would put the shared declarations in `browser.d.ts` and re-export `fromPrivateKey` from it under a generated alias.
 
 Built with tsup for dual ESM/CJS output. viem is externalized.
 

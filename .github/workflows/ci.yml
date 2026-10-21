@@ -49,6 +49,10 @@ jobs:
           test -f dist/chain/index.js
           test -f dist/chain/index.cjs
           test -f dist/chain/index.d.ts
+          test -f dist/chain/browser.js
+          test -f dist/chain/browser.cjs
+          test -f dist/chain/browser.d.ts
+          ! grep -q fromPrivateKey dist/chain/browser.js
 
       - name: Payment policy across the tested @x402 range
         run: |

@@ -18,6 +18,16 @@
       }
     },
     "./chain": {
+      "browser": {
+        "import": {
+          "types": "./dist/chain/browser.d.ts",
+          "default": "./dist/chain/browser.js"
+        },
+        "require": {
+          "types": "./dist/chain/browser.d.cts",
+          "default": "./dist/chain/browser.cjs"
+        }
+      },
       "import": {
         "types": "./dist/chain/index.d.ts",
         "default": "./dist/chain/index.js"

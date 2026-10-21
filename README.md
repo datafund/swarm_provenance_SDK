@@ -581,6 +581,11 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 const signer = fromViemWalletClient(walletClient);
 ```
 
+`fromPrivateKey` is not exported to browser builds: the `/chain` entry has a `browser` export
+condition that points to a build without it, so a bundler that targets the browser fails with
+"No matching export" instead of shipping code that expects a raw key. Node `import` and
+`require` are unchanged.
+
 ### Chain Error Handling
 
 ```typescript
@@ -682,6 +687,13 @@ message comes from Node itself.
   `offset` or `limit` (was a mislabelled `ChainConnectionError`). `new ChainClient()` throws
   `ChainConfigurationError` for a malformed `contractAddress` or a `gasLimit` that is not a
   positive integer. Reads such as `verifyOnChain()` still accept the zero hash.
+- `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
+  now has a `browser` export condition, listed first, that resolves to a build without
+  `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node
+  `import`/`require` resolution is unchanged. **Runtimes that resolve the `browser` condition
+  also get this build**, for example Cloudflare Workers (wrangler) and esbuild with
+  `platform: 'browser'`. Server code there that used `fromPrivateKey` must create a viem wallet
+  client with `privateKeyToAccount` and pass it to `fromViemWalletClient` instead.
 - `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
   tell a lineage cut off by `maxDepth` from a whole one. `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`

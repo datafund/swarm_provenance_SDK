@@ -1,3 +1,5 @@
+// Node entry of @datafund/swarm-provenance/chain. Keep in step with browser.ts,
+// which exports the same minus fromPrivateKey (tests/unit/build/browser-entry.test.ts)
 // Main client
 export { ChainClient } from './client.js';
 
