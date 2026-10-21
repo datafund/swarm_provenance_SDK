@@ -640,6 +640,11 @@ message comes from Node itself.
   "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
   still confirm ... do not resend" instead of "Transaction failed". Check the wallet's pending
   transactions before sending again.
+- `fromPrivateKey` signers return the transaction hash when the node answers "already known"
+  (#123): the node already holds that signed transaction, so the write proceeds to wait for its
+  receipt instead of failing. The signer now prepares, signs and sends the raw transaction itself,
+  the same steps viem's `sendTransaction` takes for a local account (same nonce, gas and fee
+  handling, still signed for the preset's chain ID).
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch

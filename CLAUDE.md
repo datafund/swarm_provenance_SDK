@@ -74,6 +74,7 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 - `sendAndWait(data, { event, count })`: success requires `count` logs of `event` emitted by `contractAddress`, decoded with the embedded ABI (verified against live Base Sepolia logs). Event per write: anchor/anchorFor/batchAnchor `DataRegistered`, recordAccess `DataAccessed`, recordTransformation `DataTransformed`, mergeTransform `DataMerged`, setDataStatus `DataStatusChanged`, transferOwnership `DataOwnershipTransferred`, setDelegate `DelegateAuthorized`.
 - Pre-checks only proceed on `DataNotRegisteredError`; any other read error is thrown.
 - All chain error text goes through `rpcErrorMessage()` (drops viem URL/body sections, redacts URLs).
+- Send retries (`sendWithRetry`) only on "nonce too low/high". "replacement underpriced" and "already known" are not retried and say the tx may still confirm (#123). `fromPrivateKey` runs viem's local-account send steps itself (`prepareTransactionRequest` → `account.signTransaction` → `sendRawTransaction`, errors wrapped with `getTransactionError`) so that on "already known" it returns `keccak256(signed tx)`; viem would map that answer to `NonceTooLowError`. `tests/unit/chain/signer-private-key.test.ts` drives it against a stubbed JSON-RPC endpoint with a generated key.
 
 ## Notary Signature Verification
 
