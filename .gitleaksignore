@@ -1,9 +1,15 @@
 # Findings in old history from credentials that were rotated and retired in 2026-10
 # (see issue #121). History was deliberately not rewritten. One fingerprint per line:
-# commit:file:rule:line
+# commit:file:rule:line. A line is listed under each rule that can match it,
+# since gitleaks reports only one of them.
 5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:generic-api-key:36
 5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:generic-api-key:48
 5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:generic-api-key:49
 5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:generic-api-key:63
 5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:generic-api-key:75
 5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:generic-api-key:76
+5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:hex-private-key-assignment:48
+5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:hex-private-key-assignment:49
+5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:hex-private-key-assignment:63
+5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:hex-private-key-assignment:75
+5ca8eb3bea82e8c33b1411a8efa3946e63132139:.claude/settings.local.json:hex-private-key-assignment:76
