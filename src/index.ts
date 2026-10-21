@@ -24,6 +24,9 @@ export type {
   NotaryInfo,
   PoolStatus,
   AcquiredStamp,
+  PricingOptions,
+  Pricing,
+  PriceQuote,
 } from './types.js';
 
 // Errors

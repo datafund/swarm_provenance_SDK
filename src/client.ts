@@ -19,6 +19,11 @@ import type {
   GatewayPoolStatusResponse,
   GatewayAcquireStampResponse,
   GatewayErrorResponse,
+  GatewayPriceQuote,
+  GatewayPricingResponse,
+  Pricing,
+  PricingOptions,
+  PriceQuote,
   ProvenanceMetadata,
   NotarySignature,
 } from './types.js';
@@ -175,6 +180,41 @@ export class ProvenanceClient {
       totalStamps: data.total_stamps,
       lowReserveWarning: data.low_reserve_warning,
     };
+  }
+
+  /**
+   * Price quotes for the gateway's paid operations, without paying
+   * (`GET /api/v1/pricing`). Only the options you set are sent; the gateway
+   * applies its defaults. `payTo` can seed `payment.payTo`.
+   */
+  async pricing(options: PricingOptions = {}): Promise<Pricing> {
+    const params = new URLSearchParams();
+    if (options.size !== undefined) params.set('size', options.size);
+    if (options.depth !== undefined) params.set('depth', String(options.depth));
+    if (options.durationHours !== undefined) params.set('duration_hours', String(options.durationHours));
+    if (options.uploadBytes !== undefined) params.set('upload_bytes', String(options.uploadBytes));
+    if (options.mb !== undefined) params.set('mb', String(options.mb));
+    const query = params.toString();
+    const response = await this.fetch(`/api/v1/pricing${query ? `?${query}` : ''}`);
+
+    if (!response.ok) {
+      throw await this.handleError(response);
+    }
+
+    const data = await this.readJson<GatewayPricingResponse>(response);
+    const pricing: Pricing = { x402Enabled: data.x402_enabled === true, quotes: {} };
+    if (data.currency !== undefined) pricing.currency = data.currency;
+    if (data.network !== undefined) pricing.network = data.network;
+    if (data.asset !== undefined) pricing.asset = data.asset;
+    if (data.pay_to !== undefined) pricing.payTo = data.pay_to;
+    if (data.min_price_usd !== undefined) pricing.minPriceUsd = data.min_price_usd;
+    if (data.free_tier !== undefined) pricing.freeTier = { enabled: data.free_tier.enabled, header: data.free_tier.header };
+    const quotes = data.quotes ?? {};
+    if (quotes.stamp_purchase) pricing.quotes.stampPurchase = toPriceQuote(quotes.stamp_purchase);
+    if (quotes.pool_acquire) pricing.quotes.poolAcquire = toPriceQuote(quotes.pool_acquire);
+    if (quotes.data_upload) pricing.quotes.dataUpload = toPriceQuote(quotes.data_upload);
+    if (quotes.bandwidth_credit) pricing.quotes.bandwidthCredit = toPriceQuote(quotes.bandwidth_credit);
+    return pricing;
   }
 
   /**
@@ -1008,4 +1048,15 @@ function paymentAttempt(response: Response, idempotencyKey?: string): PaymentAtt
 function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceError): E {
   if (source.payment) target.payment = source.payment;
   return target;
+}
+
+/** A gateway price quote in the SDK's field names */
+function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
+  return {
+    method: quote.method,
+    path: quote.path,
+    priceUsd: quote.price_usd,
+    maxAmountRequired: quote.max_amount_required,
+    description: quote.description,
+  };
 }

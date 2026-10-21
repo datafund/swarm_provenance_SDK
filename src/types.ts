@@ -367,6 +367,73 @@ export interface AcquiredStamp {
 }
 
 /**
+ * Query for `ProvenanceClient.pricing()`. Every field is optional; the gateway
+ * applies its own defaults and validation (422 for out-of-range values).
+ */
+export interface PricingOptions {
+  /** Stamp size preset, as in the purchase and pool-acquire bodies */
+  size?: 'small' | 'medium' | 'large';
+  /** Stamp depth (16-32), as in the request bodies */
+  depth?: number;
+  /** Stamp duration in hours (at least 24), as in the purchase body */
+  durationHours?: number;
+  /**
+   * Size of the upload request body in bytes: the file plus a few hundred bytes
+   * of multipart overhead (gateway default: 4096)
+   */
+  uploadBytes?: number;
+  /** Bandwidth credit top-up in MB (at least 1) */
+  mb?: number;
+}
+
+/** The price of one paid operation, as the gateway's 402 would ask for it */
+export interface PriceQuote {
+  /** HTTP method of the priced request (e.g. 'POST') */
+  method: string;
+  /** Path of the priced request (e.g. '/api/v1/data/') */
+  path: string;
+  /** Price in US dollars */
+  priceUsd: number;
+  /** Amount the 402 would ask for, in the asset's smallest unit (integer string; USDC has 6 decimals) */
+  maxAmountRequired: string;
+  /** Description of the operation */
+  description: string;
+}
+
+/**
+ * Price list from `GET /api/v1/pricing`. Quotes follow the current chain price,
+ * so treat them as current, not guaranteed. When x402 is off on the gateway,
+ * only `x402Enabled: false` and an empty `quotes` are returned.
+ */
+export interface Pricing {
+  /** Whether the gateway charges with x402 at all */
+  x402Enabled: boolean;
+  /** Currency of the quotes (e.g. 'USDC') */
+  currency?: string;
+  /** Network the gateway is paid on, as its 402 names it */
+  network?: string;
+  /** Token contract the gateway is paid in */
+  asset?: string;
+  /** Address the gateway is paid to; can seed `payment.payTo` */
+  payTo?: string;
+  /** Smallest charge per request, in US dollars */
+  minPriceUsd?: number;
+  /** Free tier availability and the header that requests it */
+  freeTier?: { enabled: boolean; header: string };
+  /** Quotes per operation; only operations enabled on the gateway are listed */
+  quotes: {
+    /** POST /api/v1/stamps/ */
+    stampPurchase?: PriceQuote;
+    /** POST /api/v1/pool/acquire (only when the stamp pool is enabled) */
+    poolAcquire?: PriceQuote;
+    /** POST /api/v1/data/ */
+    dataUpload?: PriceQuote;
+    /** POST /api/v1/chunks/credit (only when chunk uploads are enabled) */
+    bandwidthCredit?: PriceQuote;
+  };
+}
+
+/**
  * Gateway API response types (internal use)
  */
 export interface GatewayHealthResponse {
@@ -406,6 +473,30 @@ export interface GatewayAcquireStampResponse {
   depth: number;
   size_name: string;
   fallback_used: boolean;
+}
+
+export interface GatewayPriceQuote {
+  method: string;
+  path: string;
+  price_usd: number;
+  max_amount_required: string;
+  description: string;
+}
+
+export interface GatewayPricingResponse {
+  x402_enabled: boolean;
+  currency?: string;
+  network?: string;
+  asset?: string;
+  pay_to?: string;
+  min_price_usd?: number;
+  free_tier?: { enabled: boolean; header: string };
+  quotes?: {
+    stamp_purchase?: GatewayPriceQuote;
+    pool_acquire?: GatewayPriceQuote;
+    data_upload?: GatewayPriceQuote;
+    bandwidth_credit?: GatewayPriceQuote;
+  };
 }
 
 export interface GatewayErrorResponse {
