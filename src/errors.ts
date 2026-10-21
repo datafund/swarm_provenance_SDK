@@ -65,7 +65,7 @@ export class ProvenanceError extends Error {
 
   /**
    * Gateway error responses only: the response body, parsed if it is JSON,
-   * else its text (at most 4 KiB). Codes and fields the SDK does not map are here.
+   * else its text (at most 4096 characters). Codes and fields the SDK does not map are here.
    */
   public body?: unknown;
 
