@@ -1352,5 +1352,30 @@ describe('ProvenanceClient', () => {
       expect((error as StampError).body).toEqual(body);
     });
 
+    it.each([
+      ['critical', false],
+      ['degraded', true],
+      ['ok', true],
+    ])('health() with status %s is %s', async (status, healthy) => {
+      mockFetch.mockResolvedValueOnce(json({ status, message: 'Welcome' }, 200));
+      await expect(new ProvenanceClient().health()).resolves.toBe(healthy);
+    });
+
+    it('upload results and acquired stamps carry expiresAt; null leaves it out', async () => {
+      const expires = '2026-11-21T10:00:00Z';
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64), expires_at: expires }, 200));
+      const client = new ProvenanceClient();
+      expect((await client.upload('hello', { stampId: STAMP })).expiresAt).toBe(expires);
+
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64), expires_at: expires }, 200));
+      expect((await client.upload({ a: 1 }, { stampId: STAMP, raw: true })).expiresAt).toBe(expires);
+
+      mockFetch.mockResolvedValueOnce(json({ batch_id: STAMP, depth: 17, size_name: 'small', fallback_used: false, expires_at: expires }, 200));
+      expect((await client.acquireStamp()).expiresAt).toBe(expires);
+
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64), expires_at: null }, 200));
+      expect('expiresAt' in (await client.upload('hello', { stampId: STAMP }))).toBe(false);
+    });
+
   });
 });

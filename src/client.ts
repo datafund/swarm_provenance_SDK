@@ -119,12 +119,21 @@ export class ProvenanceClient {
   }
 
   /**
-   * Check if the gateway is healthy and reachable
+   * Check if the gateway is healthy and reachable. False when it reports
+   * `status: 'critical'`: the gateway answers 200 even then, so that it stays
+   * reachable. A `degraded` gateway is still healthy.
    */
   async health(): Promise<boolean> {
     try {
       const response = await this.fetch('/health');
-      return response.ok;
+      if (!response.ok) return false;
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        return true; // no readable status: reachable is all it says
+      }
+      return !(body && typeof body === 'object' && (body as { status?: unknown }).status === 'critical');
     } catch {
       return false;
     }
@@ -226,6 +235,7 @@ export class ProvenanceClient {
       sizeName: data.size_name,
       fallbackUsed: data.fallback_used,
     };
+    if (typeof data.expires_at === 'string') stamp.expiresAt = data.expires_at;
     const payment = this.receiptOf(response);
     if (payment) stamp.payment = payment;
     return stamp;
@@ -316,6 +326,7 @@ export class ProvenanceClient {
       reference: data.reference,
       metadata,
     };
+    if (typeof data.expires_at === 'string') result.expiresAt = data.expires_at;
     if (payment) result.payment = payment;
     return result;
   }
@@ -535,6 +546,7 @@ export class ProvenanceClient {
       reference: data.reference,
       metadata,
     };
+    if (typeof data.expires_at === 'string') result.expiresAt = data.expires_at;
     if (payment) result.payment = payment;
     return result;
   }

@@ -303,6 +303,8 @@ export interface UploadResult {
   payment?: PaymentReceipt;
   /** The pool stamp's payment, when `upload()` acquired the stamp and paid for it */
   stampPayment?: PaymentReceipt;
+  /** When the stamp runs out (ISO 8601, UTC; the gateway's estimate), if known */
+  expiresAt?: string;
 }
 
 /**
@@ -317,6 +319,8 @@ export interface DocumentUploadResult {
   payment?: PaymentReceipt;
   /** The pool stamp's payment, when `upload()` acquired the stamp and paid for it */
   stampPayment?: PaymentReceipt;
+  /** When the stamp runs out (ISO 8601, UTC; the gateway's estimate), if known */
+  expiresAt?: string;
 }
 
 /**
@@ -407,6 +411,8 @@ export interface AcquiredStamp {
   fallbackUsed: boolean;
   /** The acquisition's payment, when it was paid (x402 mode) */
   payment?: PaymentReceipt;
+  /** When the stamp runs out (ISO 8601, UTC; the gateway's estimate), if known */
+  expiresAt?: string;
 }
 
 /**
@@ -418,6 +424,7 @@ export interface GatewayHealthResponse {
 
 export interface GatewayUploadResponse {
   reference: string;
+  expires_at?: string | null;
 }
 
 export interface GatewayDownloadResponse {
@@ -449,6 +456,7 @@ export interface GatewayAcquireStampResponse {
   depth: number;
   size_name: string;
   fallback_used: boolean;
+  expires_at?: string | null;
 }
 
 export interface GatewayErrorResponse {
