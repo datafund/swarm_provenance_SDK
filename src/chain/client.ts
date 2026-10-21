@@ -775,7 +775,8 @@ export class ChainClient {
       ...receipt,
       dataHash: hash,
       dataType,
-      owner: actualOwner as Address,
+      // The address that was sent (normalized; see normalizeAddress)
+      owner: ownerAddress,
     };
     if (normalizedStorageRef) {
       result.storageRef = normalizedStorageRef;
@@ -976,7 +977,7 @@ export class ChainClient {
     return {
       ...receipt,
       dataHash: hash,
-      newOwner: newOwner as Address,
+      newOwner: newOwnerAddress,
     };
   }
 
@@ -1000,7 +1001,7 @@ export class ChainClient {
 
     return {
       ...receipt,
-      delegate: delegate as Address,
+      delegate: delegateAddress,
       authorized,
     };
   }

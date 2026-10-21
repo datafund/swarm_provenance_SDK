@@ -567,7 +567,8 @@ and the signer's own address as new owner, delegate, or `anchorFor()` owner (use
 register for yourself). The signer checks run after the chain check, still before sending.
 Addresses, in reads and writes, may be all lowercase, all uppercase or EIP-55 checksummed; a
 mixed-case address with a wrong checksum is refused (`ChainValidationError`, or
-`ChainConfigurationError` for `contractAddress`).
+`ChainConfigurationError` for `contractAddress`). All-uppercase is sent in lowercase, and results
+echo the address as sent.
 
 ### Signer Factories
 
@@ -700,7 +701,10 @@ message comes from Node itself.
   positive integer. Reads such as `verifyOnChain()` still accept the zero hash. A mixed-case
   address with a wrong EIP-55 checksum now throws `ChainValidationError` before any network
   call (it used to reach viem and throw a raw `InvalidAddressError`); an all-uppercase address,
-  which viem rejected, is now accepted and passed to viem in lowercase.
+  which viem rejected, is now accepted and passed to viem in lowercase. Result fields that echo an
+  input address (`anchorFor().owner`, `transferOwnership().newOwner`, `setDelegate().delegate`)
+  hold the address that was sent: an all-uppercase input comes back in lowercase, other
+  spellings unchanged.
 - `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
   now has a `browser` export condition, listed first, that resolves to a build without
   `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node

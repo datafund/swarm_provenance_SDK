@@ -937,7 +937,7 @@ describe('ChainClient', () => {
       });
       const upper = '0xABCDEF1234567890ABCDEF1234567890ABCDEF12';
       // The calldata is encoded by the real viem, which rejects all-uppercase hex
-      await expect(client.transferOwnership(H1, upper)).resolves.toMatchObject({ newOwner: upper });
+      await expect(client.transferOwnership(H1, upper)).resolves.toMatchObject({ newOwner: upper.toLowerCase() });
       expect(sendTransaction).toHaveBeenCalledTimes(1);
 
       mockReadContract.mockResolvedValueOnce([]);
@@ -987,6 +987,25 @@ describe('ChainClient', () => {
         ]),
       ).resolves.toMatchObject({ count: 3 });
       expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('results echo the address that was sent (normalized), not the raw input', async () => {
+      const upper = '0xABCDEF1234567890ABCDEF1234567890ABCDEF12';
+      const lower = upper.toLowerCase();
+      mockWaitForTransactionReceipt
+        .mockResolvedValueOnce({ status: 'success', logs: eventLogs('DelegateAuthorized'), blockNumber: BigInt(1), gasUsed: BigInt(1) })
+        .mockResolvedValueOnce({ status: 'success', logs: eventLogs('DataRegistered'), blockNumber: BigInt(1), gasUsed: BigInt(1) });
+      await expect(client.setDelegate(upper, true)).resolves.toMatchObject({ delegate: lower });
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+      await expect(client.anchorFor(H1, 'dataset', upper)).resolves.toMatchObject({ owner: lower });
     });
 
     it('getUserDataRecordsPaginated accepts only non-negative safe integers', async () => {
