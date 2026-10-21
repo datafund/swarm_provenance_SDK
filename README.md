@@ -323,11 +323,20 @@ How it works:
 - The gateway accepts each proof once. The SDK signs a new proof for every request
   attempt, including automatic retries. A browser wallet therefore asks you to sign once
   per attempt.
-- Each attempt, signing included, is bounded by `paidTimeout` (default 120 s), because a
-  person may be approving a wallet prompt. If the signer does not answer in time, `upload()`
-  throws `GatewayConnectionError` (`TIMEOUT`) and sends nothing.
-- If the free-tier rate limit is reached, `upload()` throws `PaymentRateLimitError`. Wait for
-  `retryAfterSeconds`, or in x402 mode upload without `ownerSigner` to pay instead.
+- Each attempt is bounded by one timer, `paidTimeout` (default 120 s), because a person may
+  be approving a wallet prompt. The same timer covers the wallet prompt and the upload, so
+  time spent approving comes out of the time left for the upload. If the signer does not
+  answer in time, `upload()` throws `GatewayConnectionError` (`TIMEOUT`) and sends nothing.
+- Signing is deterministic, so two proofs for the same stamp, signer and second are
+  identical, and the gateway refuses the second. A client therefore gives every proof
+  for a stamp and signer a later timestamp than the one before, including concurrent
+  uploads. A burst can run this timestamp ahead of the clock. Once it is more than 30
+  seconds ahead, the upload waits for the clock. Separate clients or processes do not
+  share this state: if they sign for the same stamp in the same second, the second upload
+  gets `OWNER_PROOF_INVALID`. Use one client per stamp owner.
+- If the free-tier rate limit is reached, `upload()` throws `PaymentRateLimitError` in every
+  payment mode, without retrying. Wait for `retryAfterSeconds`, or in x402 mode upload
+  without `ownerSigner` to pay instead.
 - A proof lets whoever holds it make one upload to your stamp. The SDK never puts it in an
   error message. Do not log it.
 - `ownerSigner` requires `stampId`. Without one, or with one that is not 64 hex characters,
