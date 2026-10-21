@@ -49,8 +49,11 @@ const DEFAULT_GATEWAY_URL = 'https://provenance-gateway.datafund.io';
 const DEFAULT_TIMEOUT = 30000;
 /** Default timeout for an attempt that may pay: settlement is on-chain (#102) */
 const DEFAULT_PAID_TIMEOUT = 120000;
-/** Retries with the same Idempotency-Key while the gateway says to (IN_PROGRESS / UNAVAILABLE) */
-const MAX_IDEMPOTENT_RETRIES = 3;
+/**
+ * Retries with the same Idempotency-Key while the gateway says to (IN_PROGRESS /
+ * UNAVAILABLE). Each signs a new authorization: at most 3 signatures per request.
+ */
+const MAX_IDEMPOTENT_RETRIES = 2;
 /** Longest Retry-After honoured for IDEMPOTENCY_KEY_IN_PROGRESS, in seconds */
 const MAX_IN_PROGRESS_WAIT_S = 30;
 
@@ -183,6 +186,15 @@ export class ProvenanceClient {
     size: 'small' | 'medium' | 'large' = 'small',
     options: { idempotencyKey?: string } = {}
   ): Promise<AcquiredStamp> {
+    const idempotencyKey = this.operationKey(options.idempotencyKey);
+    try {
+      return await this.acquireWithKey(size, idempotencyKey);
+    } catch (error) {
+      throw withRetryHint(error, 'acquireStamp()', idempotencyKey);
+    }
+  }
+
+  private async acquireWithKey(size: 'small' | 'medium' | 'large', idempotencyKey: string | undefined): Promise<AcquiredStamp> {
     const response = await this.fetch(
       '/api/v1/pool/acquire',
       {
@@ -190,7 +202,7 @@ export class ProvenanceClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ size }),
       },
-      { idempotencyKey: this.operationKey(options.idempotencyKey) }
+      { idempotencyKey }
     );
 
     if (!response.ok) {
@@ -235,16 +247,23 @@ export class ProvenanceClient {
     // different paths, so the gateway keeps them apart (#102)
     const idempotencyKey = this.operationKey(options.idempotencyKey);
     // Get stamp - either from options or acquire from pool
-    const stampId = await this.resolveStampId(options, idempotencyKey);
+    let stampId: string;
+    try {
+      stampId = await this.resolveStampId(options, idempotencyKey);
+    } catch (error) {
+      // Nothing uploaded yet: the same key acquires the same (paid) stamp again
+      throw withRetryHint(error, 'upload()', idempotencyKey);
+    }
 
     try {
       const withKey: UploadOptions = { ...options };
       if (idempotencyKey !== undefined) withKey.idempotencyKey = idempotencyKey;
       return await this.uploadWithStamp(content, stampId, withKey);
     } catch (error) {
-      // A retry with the same key must reuse the stamp: name it next to the key
+      // The gateway hashes the query, stamp_id included: a retry with the same key
+      // must reuse the stamp, or it is a different request (IDEMPOTENCY_KEY_REUSED)
       if (error instanceof ProvenanceError && error.payment) error.payment.stampId = stampId;
-      throw error;
+      throw withRetryHint(error, 'upload()', idempotencyKey, stampId);
     }
   }
 
@@ -447,7 +466,7 @@ export class ProvenanceClient {
       // Pool status check failed — proceed with acquire anyway
     }
 
-    const stamp = await this.acquireStamp(options.poolSize ?? 'small', idempotencyKey === undefined ? {} : { idempotencyKey });
+    const stamp = await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey);
     return stamp.batchId;
   }
 
@@ -751,7 +770,7 @@ export class ProvenanceClient {
       if (state.paid) {
         e.payment = { paymentSent: true };
         if (idempotencyKey !== undefined) e.payment.idempotencyKey = idempotencyKey;
-        e.message += ` (a payment was sent with this request and may have been charged${retryHint(idempotencyKey)})`;
+        e.message += ' (a payment was sent with this request and may have been charged)';
       }
       return e;
     };
@@ -790,7 +809,7 @@ export class ProvenanceClient {
       );
       if (this.paidResponses.has(response)) {
         failure.payment = paymentAttempt(response, this.paidResponses.get(response));
-        failure.message += ` (a payment was sent with this request and may have been charged${retryHint(failure.payment.idempotencyKey)})`;
+        failure.message += ' (a payment was sent with this request and may have been charged)';
       }
       throw failure;
     }
@@ -847,9 +866,12 @@ export class ProvenanceClient {
     if (payment) {
       // The request carried a signed payment: say so, with whatever the gateway reported
       error.payment = payment;
-      error.message += ` (a payment was sent with this request and may have been charged${
-        payment.transaction ? `; transaction ${payment.transaction}` : ''
-      }${retryHint(payment.idempotencyKey)})`;
+      error.message +=
+        code !== undefined && NOT_CHARGED.has(code)
+          ? ' (the gateway did not charge the payment sent with this request)'
+          : ` (a payment was sent with this request and may have been charged${
+              payment.transaction ? `; transaction ${payment.transaction}` : ''
+            })`;
     }
     return error;
   }
@@ -906,9 +928,26 @@ function outcomeMessage(outcome: PaymentOutcomeError['outcome'], payment: Paymen
   }
 }
 
-/** How to retry an operation that failed after paying, without paying twice */
-function retryHint(idempotencyKey: string | undefined): string {
-  return idempotencyKey === undefined ? '' : `; retry with idempotencyKey "${idempotencyKey}" to avoid paying twice`;
+/** Idempotency answers for which the gateway verified the new payment but did not settle it */
+const NOT_CHARGED = new Set([
+  'IDEMPOTENCY_KEY_IN_PROGRESS',
+  'IDEMPOTENCY_UNAVAILABLE',
+  'IDEMPOTENCY_KEY_REUSED',
+  'IDEMPOTENCY_KEY_INVALID',
+]);
+
+/**
+ * Say how to retry an operation that failed after paying without paying twice,
+ * where the same key does give the first result. Not for the answers that need
+ * a person (PaymentOutcomeError) or a key the gateway refused.
+ */
+function withRetryHint(error: unknown, operation: string, idempotencyKey: string | undefined, stampId?: string): unknown {
+  if (!(error instanceof ProvenanceError) || !error.payment || idempotencyKey === undefined) return error;
+  if (error instanceof PaymentOutcomeError) return error;
+  if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
+  const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;
+  error.message += `. To retry without paying twice, call ${operation} again with ${args}`;
+  return error;
 }
 
 /**
@@ -942,7 +981,9 @@ function assertNotaryAddress(options: DownloadOptions): void {
 function paymentAttempt(response: Response, idempotencyKey?: string): PaymentAttempt {
   const attempt: PaymentAttempt = { paymentSent: true };
   if (idempotencyKey !== undefined) attempt.idempotencyKey = idempotencyKey;
-  let transaction = response.headers.get('X-Payment-Transaction') ?? undefined;
+  // The gateway sends "unknown" when it has no transaction to name
+  const header = response.headers.get('X-Payment-Transaction');
+  let transaction = header && header !== 'unknown' ? header : undefined;
   const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
   if (!transaction && encoded) {
     try {

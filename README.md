@@ -86,17 +86,20 @@ is still approving the payment is not reported as paid: nothing was sent.
 
 **Retrying without paying twice.** Paid writes carry an `Idempotency-Key`: one random key per
 `upload()` or `acquireStamp()` call, or yours (`idempotencyKey` option, 1-255 printable ASCII
-characters). A retry with the same key is never charged a second time; the gateway returns the
-first result. To retry an upload that failed after paying (a timeout, a 502), pass the key and
-the stamp from the error:
+characters). A retry with the same key, from the same wallet, within 24 hours, for the same
+request is not charged a second time: the gateway returns the first result. For an upload "the
+same request" includes the stamp, so a retry must pass the stamp the first attempt used. To
+retry an upload that failed after paying (a timeout, a 502), pass both from the error; its
+message also names them:
 
 ```typescript
-import { ProvenanceError } from '@datafund/swarm-provenance';
+import { ProvenanceError, PaymentOutcomeError } from '@datafund/swarm-provenance';
 
 try {
   await client.upload(data);
 } catch (error) {
-  if (error instanceof ProvenanceError && error.payment?.idempotencyKey) {
+  // PaymentOutcomeError needs a person, not a retry (see below)
+  if (error instanceof ProvenanceError && !(error instanceof PaymentOutcomeError) && error.payment?.idempotencyKey) {
     const { idempotencyKey, stampId } = error.payment;
     await client.upload(data, { idempotencyKey, ...(stampId ? { stampId } : {}) });
   }
@@ -104,8 +107,10 @@ try {
 ```
 
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
-`Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), at most 3 times, signing a new
-authorization each time. Three answers need a person and throw `PaymentOutcomeError` instead:
+`Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
+(so `onBeforePayment` runs again), at most 3 signatures per request. The gateway does not charge
+those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
+upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
 
 | `code` | `outcome` | What to do |
 |--------|-----------|------------|

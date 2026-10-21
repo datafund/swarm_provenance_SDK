@@ -229,7 +229,9 @@ describe('retrying a timed-out paid upload (#102 acceptance)', () => {
     expect((first as GatewayConnectionError).code).toBe('TIMEOUT');
     const payment = (first as GatewayConnectionError).payment!;
     expect(payment).toEqual({ paymentSent: true, idempotencyKey: ANY_KEY, stampId: POOL_STAMP });
-    expect((first as Error).message).toContain(`retry with idempotencyKey "${payment.idempotencyKey}"`);
+    expect((first as Error).message).toContain(
+      `call upload() again with idempotencyKey "${payment.idempotencyKey}" and stampId "${POOL_STAMP}"`
+    );
     // Nothing was retried automatically: one paid upload attempt
     expect(paid().filter((s) => s.path === '/api/v1/data/')).toHaveLength(1);
 
@@ -269,14 +271,17 @@ describe('retry codes: same key, new authorization', () => {
     expect(paid()).toHaveLength(2);
   });
 
-  it('gives up after 3 retries and reports the code with the key', async () => {
+  it('signs at most 3 times, then reports the code as not charged, with how to retry', async () => {
     paidAnswers = [IN_PROGRESS];
     const error = await client().upload('hello', { stampId: STAMP, idempotencyKey: 'k1' }).catch((e: unknown) => e);
 
-    expect(paid()).toHaveLength(4);
+    expect(paid()).toHaveLength(3);
     expect(error).toBeInstanceOf(GatewayConnectionError);
     expect((error as GatewayConnectionError).code).toBe('IDEMPOTENCY_KEY_IN_PROGRESS');
-    expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true, idempotencyKey: 'k1' });
+    expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true, idempotencyKey: 'k1', stampId: STAMP });
+    expect((error as Error).message).toContain('the gateway did not charge');
+    expect((error as Error).message).not.toContain('may have been charged');
+    expect((error as Error).message).toContain(`call upload() again with idempotencyKey "k1" and stampId "${STAMP}"`);
   });
 
   it('honours a long Retry-After only up to 30 s', async () => {
@@ -310,6 +315,27 @@ describe('retry codes: same key, new authorization', () => {
     expect(paid()).toHaveLength(1);
     expect((error as GatewayConnectionError).code).toBe('IDEMPOTENCY_KEY_REUSED');
     expect((error as Error).message).toContain('This key was used for a different request.');
+    // Not charged, and retrying with the same key cannot help: no retry advice
+    expect((error as Error).message).toContain('the gateway did not charge');
+    expect((error as Error).message).not.toMatch(/may have been charged|again with idempotencyKey/);
+  });
+
+  it('a key-only retry advice for acquireStamp, whose body does not depend on a stamp', async () => {
+    poolPaid = true;
+    paidAnswers = [{ status: 502, body: envelope({ code: 'HTTP_502', message: 'Bee unreachable' }) }];
+    const error = await client().acquireStamp('small', { idempotencyKey: 'a1' }).catch((e: unknown) => e);
+    expect((error as Error).message).toContain('may have been charged');
+    expect((error as Error).message).toContain('call acquireStamp() again with idempotencyKey "a1"');
+    expect((error as Error).message).not.toContain('stampId');
+  });
+
+  it('a failed paid pool acquisition inside upload() advises the key alone', async () => {
+    poolPaid = true;
+    paidAnswers = [{ status: 502, body: envelope({ code: 'HTTP_502', message: 'Bee unreachable' }) }];
+    const error = await client().upload('hello', { idempotencyKey: 'u1' }).catch((e: unknown) => e);
+    expect((error as StampError).payment?.stampId).toBeUndefined();
+    expect((error as Error).message).toContain('call upload() again with idempotencyKey "u1"');
+    expect((error as Error).message).not.toContain('stampId');
   });
 });
 
@@ -352,6 +378,27 @@ describe('stop codes: never retried, identifiers surfaced', () => {
     expect((error as PaymentOutcomeError).outcome).toBe('settled_not_delivered');
     expect((error as PaymentOutcomeError).payment?.transaction).toBe('0xfeed');
     expect((error as Error).message).toMatch(/was paid \(transaction 0xfeed\).*Contact the gateway operator/);
+  });
+
+  it('the gateway\'s "unknown" transaction placeholder is not reported as a transaction', async () => {
+    paidAnswers = [
+      {
+        status: 409,
+        headers: { 'X-Payment-Transaction': 'unknown' },
+        body: envelope({ code: 'IDEMPOTENCY_KEY_SETTLED_PENDING', message: 'Paid.', transaction: 'unknown' }),
+      },
+    ];
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect((error as PaymentOutcomeError).payment?.transaction).toBeUndefined();
+    expect((error as Error).message).not.toContain('transaction unknown');
+  });
+
+  it('stop codes carry no retry advice', async () => {
+    paidAnswers = [
+      { status: 409, body: envelope({ code: 'IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN', message: 'Unknown.', nonce: '0x1' }) },
+    ];
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect((error as Error).message).not.toContain('again with idempotencyKey');
   });
 
   it('SETTLED_PENDING takes the transaction from the body when the header is missing', async () => {
