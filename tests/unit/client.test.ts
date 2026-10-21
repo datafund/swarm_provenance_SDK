@@ -537,6 +537,56 @@ describe('ProvenanceClient', () => {
     });
   });
 
+  describe('reference validation (#123)', () => {
+    const helloBody = () => ({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: 'aGVsbG8=',
+          content_hash: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+          stamp_id: 'stamp123',
+        }),
+    });
+
+    it.each([
+      ['a path', '../pool/status'],
+      ['a query', `${'a'.repeat(64)}?sign=notary`],
+      ['63 hex characters', 'a'.repeat(63)],
+      ['65 hex characters', 'a'.repeat(65)],
+      ['127 hex characters', 'a'.repeat(127)],
+      ['non-hex characters', 'g'.repeat(64)],
+      ['an empty string', ''],
+      ['surrounding whitespace', ` ${'a'.repeat(64)} `],
+    ])('download() rejects %s with INVALID_INPUT and sends no request', async (_name, reference) => {
+      const client = new ProvenanceClient();
+      const error = await client.download(reference).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('downloadDocument() rejects a malformed reference with INVALID_INPUT and sends no request', async () => {
+      const client = new ProvenanceClient();
+      const error = await client.downloadDocument('x/../../health').catch((e: unknown) => e);
+      expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('strips a 0x prefix before building the request path', async () => {
+      mockFetch.mockResolvedValueOnce(helloBody());
+      const client = new ProvenanceClient({ gatewayUrl: 'https://gw.test' });
+      await client.download(`0x${'ab'.repeat(32)}`);
+      expect(mockFetch.mock.calls[0]![0]).toBe(`https://gw.test/api/v1/data/${'ab'.repeat(32)}`);
+    });
+
+    it('accepts a 128-hex encrypted reference', async () => {
+      mockFetch.mockResolvedValueOnce(helloBody());
+      const client = new ProvenanceClient({ gatewayUrl: 'https://gw.test' });
+      await client.download('cd'.repeat(64));
+      expect(mockFetch.mock.calls[0]![0]).toBe(`https://gw.test/api/v1/data/${'cd'.repeat(64)}`);
+    });
+  });
+
   describe('upload raw mode (#89)', () => {
     it('should upload raw JSON object without base64 wrapping', async () => {
       // Mock upload (stampId provided, so no pool/acquire calls)

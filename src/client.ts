@@ -35,7 +35,7 @@ import {
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes, isAddress } from './utils.js';
+import { toBytes, isAddress, referencePathSegment } from './utils.js';
 import {
   base64Decode,
   untilAborted,
@@ -306,8 +306,9 @@ export class ProvenanceClient {
    * contains structured JSON instead of base64-encoded content.
    */
   async downloadDocument(reference: string, options: DownloadOptions = {}): Promise<DocumentDownloadResult> {
+    const ref = checkedReference(reference);
     assertNotaryAddress(options);
-    const response = await this.fetch(`/api/v1/data/${reference}`);
+    const response = await this.fetch(`/api/v1/data/${ref}`);
 
     if (!response.ok) {
       throw await this.handleError(response);
@@ -555,8 +556,9 @@ export class ProvenanceClient {
    * Download and optionally verify provenance data from Swarm
    */
   async download(reference: string, options: DownloadOptions = {}): Promise<DownloadResult> {
+    const ref = checkedReference(reference);
     assertNotaryAddress(options);
-    const response = await this.fetch(`/api/v1/data/${reference}`);
+    const response = await this.fetch(`/api/v1/data/${ref}`);
 
     if (!response.ok) {
       throw await this.handleError(response);
@@ -970,6 +972,21 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
 
 /** Minimum interval between re-checks of a cached notary address (see verifySignatures) */
 const NOTARY_RECHECK_MS = 60_000;
+
+/**
+ * The reference for the request path (#123): 64 or 128 hex characters, optional
+ * 0x (removed). Anything else (a path, a query, whitespace) throws before a request.
+ */
+function checkedReference(reference: string): string {
+  const ref = referencePathSegment(reference);
+  if (ref === undefined) {
+    throw new ProvenanceError(
+      `Invalid Swarm reference: expected 64 or 128 hex characters (optional 0x prefix), got ${JSON.stringify(reference)}`,
+      'INVALID_INPUT'
+    );
+  }
+  return ref;
+}
 
 /** A pinned notaryAddress must be an address: a typo must not read as "unverified". */
 function assertNotaryAddress(options: DownloadOptions): void {

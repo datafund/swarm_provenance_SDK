@@ -302,6 +302,10 @@ const result = await client.download(reference, {
 // }
 ```
 
+`reference` must be 64 hex characters, or 128 for an encrypted reference, with an optional
+`0x` prefix (removed before the request). Any other value throws `ProvenanceError`
+(`INVALID_INPUT`) before a request is sent. `downloadDocument()` applies the same check.
+
 #### What `verified` means
 
 `verified: true` means at least one signature on the document is an EIP-191 signature
@@ -618,6 +622,11 @@ message comes from Node itself.
 
 ### Behavior changes since v0.6.1
 
+- `download()` and `downloadDocument()` validate `reference` before the request (#123). It must
+  be 64 or 128 hex characters with an optional `0x` prefix, which is removed. Other values
+  (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
+  instead of being sent to the gateway. `isValidSwarmReference()` now accepts 128-character
+  encrypted references and the `0x` prefix.
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch

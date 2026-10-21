@@ -178,6 +178,27 @@ describe('isValidSwarmReference', () => {
     const ref = 'g'.repeat(64);
     expect(isValidSwarmReference(ref)).toBe(false);
   });
+
+  it('should accept a 128-char encrypted reference (#123)', () => {
+    expect(isValidSwarmReference('a'.repeat(128))).toBe(true);
+  });
+
+  it('should accept an optional 0x prefix (#123)', () => {
+    expect(isValidSwarmReference('0x' + 'a'.repeat(64))).toBe(true);
+    expect(isValidSwarmReference('0X' + 'a'.repeat(128))).toBe(true);
+  });
+
+  it('should reject lengths between 64 and 128 and above 128 (#123)', () => {
+    expect(isValidSwarmReference('a'.repeat(96))).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(127))).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(129))).toBe(false);
+  });
+
+  it('should reject a bare 0x and path or query characters (#123)', () => {
+    expect(isValidSwarmReference('0x')).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(63) + '/')).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(64) + '?')).toBe(false);
+  });
 });
 
 describe('normalizeReference', () => {

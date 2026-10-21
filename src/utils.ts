@@ -64,11 +64,25 @@ export function isValidHex(str: string): boolean {
   return /^[0-9a-fA-F]+$/.test(str);
 }
 
+/** 64 hex characters, or 128 for an encrypted reference; optional 0x prefix */
+const SWARM_REFERENCE = /^(?:0x)?(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{128})$/i;
+
 /**
- * Check if a string looks like a valid Swarm reference (64 hex chars)
+ * Check if a string looks like a valid Swarm reference: 64 hex characters, or
+ * 128 for an encrypted reference, with an optional 0x prefix. This is what the
+ * gateway and the CLI accept.
  */
 export function isValidSwarmReference(ref: string): boolean {
-  return ref.length === 64 && isValidHex(ref);
+  return typeof ref === 'string' && SWARM_REFERENCE.test(ref);
+}
+
+/**
+ * The reference as it goes into the request path: validated, 0x prefix removed.
+ * Returns undefined if it is not a valid Swarm reference.
+ */
+export function referencePathSegment(ref: string): string | undefined {
+  if (!isValidSwarmReference(ref)) return undefined;
+  return /^0x/i.test(ref) ? ref.slice(2) : ref;
 }
 
 /**

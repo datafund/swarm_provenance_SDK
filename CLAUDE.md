@@ -54,14 +54,14 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 6. Use `client.upload(jsonObj, { raw: true })` or `client.upload(jsonStr, { raw: true })`
 
 ### Download (default)
-1. GET reference from gateway
+1. Validate the reference (`checkedReference`: 64 or 128 hex, optional `0x` removed; else `INVALID_INPUT`, no request), then GET it from the gateway
 2. Parse response as ProvenanceMetadata (+ optional signatures)
 3. Verify content_hash matches decoded data (base64)
 4. If signed, verify signatures against notary address
 5. Return decoded file content as `Uint8Array`
 
 ### Download (document)
-1. GET reference from gateway
+1. Validate the reference (as above), then GET it from the gateway
 2. Parse response — `data` field is raw JSON object (not base64)
 3. Verify content_hash matches the canonical JSON of `data` (lossless, from the response text), or `JSON.stringify(data)` for SDK 0.6.x uploads
 4. If signed, verify signatures
