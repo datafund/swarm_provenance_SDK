@@ -167,3 +167,26 @@ export class SignerRequiredError extends ChainError {
     Object.setPrototypeOf(this, SignerRequiredError.prototype);
   }
 }
+
+/**
+ * The node's answer to a raw transaction it already holds. geth (and op-geth)
+ * send "already known" (core/txpool/errors.go ErrAlreadyKnown); Nethermind
+ * sends "AlreadyKnown"; viem also recognises "transaction already imported"
+ * and older geth's "known transaction: <hash>". Anchored so "unknown
+ * transaction ..." or "NotAlreadyKnown" does not match: that is a failed send,
+ * and its hash would never get a receipt (#123).
+ */
+export const ALREADY_KNOWN = /\balready known\b|\bAlreadyKnown\b|^known transaction\b|\balready imported\b/i;
+
+/**
+ * Whether a send error is the node saying it already holds the transaction:
+ * its own text (`details`), any line of the message, or of a cause. Used by
+ * fromPrivateKey (returns the hash) and ChainClient (reports it as pending).
+ */
+export function isAlreadyKnown(error: unknown): boolean {
+  for (let e = error as { message?: unknown; details?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
+    if (typeof e.details === 'string' && ALREADY_KNOWN.test(e.details.trim())) return true;
+    if (typeof e.message === 'string' && e.message.split('\n').some((line) => ALREADY_KNOWN.test(line.trim()))) return true;
+  }
+  return false;
+}

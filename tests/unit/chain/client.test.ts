@@ -1879,6 +1879,33 @@ describe('ChainClient', () => {
       expect(sendTransaction).toHaveBeenCalledTimes(1);
     });
 
+    it.each(['AlreadyKnown', 'Transaction already imported', 'known transaction: 0x1234'])(
+      'reports the node answer "%s" from a wallet signer as not confirmed (#123)',
+      async (message) => {
+        mockReadContract.mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        });
+        const sendTransaction = vi.fn().mockRejectedValue(new Error(message));
+        const client = new ChainClient({
+          chain: 'base-sepolia',
+          signer: { ...createMockSigner(), sendTransaction },
+          retry: { maxRetries: 2, baseDelayMs: 1 },
+        });
+
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        expect((error as Error).message).toContain('may still confirm');
+        expect((error as Error).message).toContain('do not resend');
+        expect(sendTransaction).toHaveBeenCalledTimes(1);
+      },
+    );
+
     it('should not retry on non-transient errors', async () => {
       mockReadContract.mockResolvedValueOnce({
         dataHash: ZERO_HASH,

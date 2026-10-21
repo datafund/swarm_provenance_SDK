@@ -1,5 +1,5 @@
 import type { Address, Hex, ChainSigner } from './types.js';
-import { ChainConfigurationError } from './errors.js';
+import { ChainConfigurationError, isAlreadyKnown } from './errors.js';
 
 /**
  * EIP-1193 provider interface (window.ethereum / MetaMask)
@@ -153,25 +153,6 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
       }
     },
   };
-}
-
-/**
- * The node's answer to a raw transaction it already holds. geth (and op-geth)
- * send "already known" (core/txpool/errors.go ErrAlreadyKnown); Nethermind
- * sends "AlreadyKnown"; viem also recognises "transaction already imported"
- * and older geth's "known transaction: <hash>". Anchored so "unknown
- * transaction ..." or "NotAlreadyKnown" does not match: that is a failed send,
- * and its hash would never get a receipt (#123).
- */
-const ALREADY_KNOWN = /\balready known\b|\bAlreadyKnown\b|^known transaction\b|\balready imported\b/i;
-
-function isAlreadyKnown(error: unknown): boolean {
-  for (let e = error as { message?: unknown; details?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
-    // details is the node's own text; message may wrap it after a prefix
-    if (typeof e.details === 'string' && ALREADY_KNOWN.test(e.details.trim())) return true;
-    if (typeof e.message === 'string' && e.message.split('\n').some((line) => ALREADY_KNOWN.test(line.trim()))) return true;
-  }
-  return false;
 }
 
 /**

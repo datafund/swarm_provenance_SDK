@@ -21,6 +21,7 @@ import {
   ReceiptTimeoutError,
   rpcErrorMessage,
   sanitizeErrorText,
+  isAlreadyKnown,
 } from './errors.js';
 import {
   normalizeHash,
@@ -1221,7 +1222,7 @@ export class ChainClient {
     if (/replacement (transaction )?underpriced/i.test(text)) {
       return 'a transaction with this nonce is already pending. It may still confirm: check the signer\'s pending transactions; do not resend';
     }
-    if (/already known/i.test(text)) {
+    if (isAlreadyKnown(error)) {
       return 'the node already has this transaction (already known). It may still confirm: check the signer\'s pending transactions; do not resend';
     }
     return undefined;
