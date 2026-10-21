@@ -736,9 +736,12 @@ export class ChainClient {
   }
 
   /**
-   * Anchor a data hash on-chain on behalf of another owner (operator only).
-   * Optionally link a storage reference for bidirectional lookup.
-   * Requires a signer with operator role.
+   * Anchor a data hash on-chain on behalf of another owner (the contract's
+   * registerDataFor). Optionally link a storage reference for bidirectional lookup.
+   * Requires a signer that `actualOwner` has authorized as a delegate
+   * (`setDelegate(signerAddress, true)` sent by the owner); otherwise the
+   * contract reverts 'Not authorized delegate'. The signer cannot be
+   * `actualOwner` itself: use anchor() for that.
    */
   async anchorFor(dataHash: string, dataType: string, actualOwner: string, storageRef?: string): Promise<AnchorResult> {
     this.requireSigner();

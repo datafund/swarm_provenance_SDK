@@ -515,7 +515,8 @@ await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 const result = await chain.anchor(dataHash, 'dataset');
 // => { txHash, blockNumber, gasUsed, explorerUrl, dataHash, dataType, owner }
 
-// Anchor on behalf of another owner (operator only)
+// Anchor on behalf of another owner: the owner must first have authorized the signer as a
+// delegate (the owner calls setDelegate(signerAddress, true))
 await chain.anchorFor(dataHash, 'dataset', ownerAddress);
 
 // Record access

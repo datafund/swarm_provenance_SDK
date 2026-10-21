@@ -380,7 +380,7 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 | `waitForTransaction(txHash, { event?, count?, timeout? })` | Read | No | Wait for a sent tx and check it emitted the expected event |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
 | `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
-| `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |
+| `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref); the signer must be an authorized delegate of `owner` and cannot be `owner` |
 | `getDataHashByStorageRef(ref)` | Read | No | Reverse lookup: storage ref → data hash |
 | `recordAccess(hash)` | Write | Yes | Record access event |
 | `recordTransformation(orig, new, desc)` | Write | Yes | Record 1-to-1 data transformation |
