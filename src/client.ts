@@ -83,6 +83,8 @@ export class ProvenanceClient {
   /** Responses to attempts that sent a payment, with their Idempotency-Key (see fetch, handleError) */
   private readonly paidResponses = new WeakMap<Response, string | undefined>();
   private x402TransportPromise: Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> | undefined;
+  /** Last owner-proof timestamp used, per stamp and signer (see reserveOwnerProofTimestamp) */
+  private readonly ownerProofTimestamps = new Map<string, number>();
 
   constructor(config: ProvenanceClientConfig = {}) {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
@@ -117,6 +119,40 @@ export class ProvenanceClient {
       );
     }
     return this.x402TransportPromise;
+  }
+
+  /**
+   * A unix timestamp (seconds) no earlier than now and later than any this
+   * client used before for `key` (stamp and signer). Reserved synchronously, so
+   * concurrent uploads never share one: the gateway refuses a second use of the
+   * same signed message (#124). A burst runs the counter ahead of the clock;
+   * the gateway refuses timestamps more than 300 s ahead, so once it is more
+   * than OWNER_PROOF_MAX_LEAD_S ahead this waits for the clock, bounded by the
+   * attempt's signal.
+   */
+  private async reserveOwnerProofTimestamp(key: string, signal: AbortSignal): Promise<number> {
+    const now = Math.floor(Date.now() / 1000);
+    for (const [k, last] of this.ownerProofTimestamps) {
+      if (last < now) this.ownerProofTimestamps.delete(k); // now is later anyway
+    }
+    const timestamp = Math.max(now, (this.ownerProofTimestamps.get(key) ?? 0) + 1);
+    this.ownerProofTimestamps.set(key, timestamp);
+    const waitMs = (timestamp - OWNER_PROOF_MAX_LEAD_S) * 1000 - Date.now();
+    if (waitMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, waitMs);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+    return timestamp;
   }
 
   /**
@@ -585,7 +621,12 @@ export class ProvenanceClient {
         ? { method: 'POST', body: formData, headers: { 'X-Payment-Mode': 'free' } }
         : { method: 'POST', body: formData },
       ownerSigner
-        ? { unpaid: true, attemptHeaders: ownerProofHeaders(ownerSigner, stampId) }
+        ? {
+            unpaid: true,
+            attemptHeaders: ownerProofHeaders(ownerSigner, stampId, (key, signal) =>
+              this.reserveOwnerProofTimestamp(key, signal)
+            ),
+          }
         : { idempotencyKey: options.idempotencyKey }
     );
 
@@ -717,7 +758,7 @@ export class ProvenanceClient {
       /** Never pay, even in x402 mode: the request uses the free tier */
       unpaid?: boolean;
       /** Headers made anew for each attempt (owner proofs are single use) */
-      attemptHeaders?: () => Promise<Record<string, string>>;
+      attemptHeaders?: (signal: AbortSignal) => Promise<Record<string, string>>;
     } = {}
   ): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
@@ -727,7 +768,8 @@ export class ProvenanceClient {
     const isRead = method === 'GET' || method === 'HEAD';
     const paying = x402 !== undefined && !options.unpaid && (!isRead || x402.payForReads === true);
     // Unpaid requests in x402 mode use the free tier, as in 'free' mode
-    const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
+    // Owner-proof requests (unpaid) send X-Payment-Mode: free in every mode, 'none' included
+    const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying) || options.unpaid === true;
     const transport = paying ? await this.getX402Transport() : undefined;
     const idempotencyKey = paying && !isRead ? options.idempotencyKey : undefined;
     // An owner proof may wait for a person to approve a wallet prompt, as a payment does
@@ -741,7 +783,7 @@ export class ProvenanceClient {
       if (options.attemptHeaders) {
         // Bounded by the timeout, like payment signing
         try {
-          extraHeaders = await untilAborted(options.attemptHeaders(), controller.signal);
+          extraHeaders = await untilAborted(options.attemptHeaders(controller.signal), controller.signal);
         } catch (error) {
           clearTimeout(timeoutId);
           if (controller.signal.aborted) {
@@ -1097,6 +1139,13 @@ function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
   };
 }
 
+/**
+ * How far an owner-proof timestamp may run ahead of the clock before the
+ * client waits. The gateway refuses more than 300 s; 30 s leaves room for
+ * clock skew.
+ */
+const OWNER_PROOF_MAX_LEAD_S = 30;
+
 /** A signature as signMessage returns it: 0x-prefixed hex */
 const SIGNATURE_HEX = /^0x[0-9a-fA-F]+$/;
 
@@ -1124,17 +1173,28 @@ function assertOwnerProofOptions(options: UploadOptions): void {
   }
 }
 
+/** The signer's address, when it exposes one (viem LocalAccount or WalletClient) */
+function signerAddress(signer: OwnerSigner): string | undefined {
+  const s = signer as { address?: unknown; account?: { address?: unknown } };
+  const address = typeof s.address === 'string' ? s.address : s.account?.address;
+  return typeof address === 'string' ? address.toLowerCase() : undefined;
+}
+
 /**
  * Makes the owner-proof headers for one attempt (#124). The gateway accepts a
- * proof once, keyed on the signed message, so each attempt signs a strictly
- * later timestamp. The signature is a bearer credential for one upload: it is
+ * proof once, keyed on the signed message and signer, and signing is
+ * deterministic, so each attempt signs a timestamp the client has not used
+ * for this stamp and signer (see reserveOwnerProofTimestamp). The signature is a bearer credential for one upload: it is
  * never put in an error message.
  */
-function ownerProofHeaders(signer: OwnerSigner, stampId: string): () => Promise<Record<string, string>> {
-  let last = 0;
-  return async () => {
-    const timestamp = Math.max(Math.floor(Date.now() / 1000), last + 1);
-    last = timestamp;
+function ownerProofHeaders(
+  signer: OwnerSigner,
+  stampId: string,
+  reserve: (key: string, signal: AbortSignal) => Promise<number>
+): (signal: AbortSignal) => Promise<Record<string, string>> {
+  const key = `${stampId.toLowerCase()}|${signerAddress(signer) ?? ''}`;
+  return async (signal) => {
+    const timestamp = await reserve(key, signal);
     let signature: unknown;
     try {
       signature = await signer.signMessage({ message: ownerProofMessage(stampId, timestamp) });

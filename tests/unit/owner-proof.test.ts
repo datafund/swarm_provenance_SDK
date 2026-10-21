@@ -462,3 +462,104 @@ describe('owner-proof options and isolation', () => {
     else expect(seen[0]!.has('X-Payment-Mode')).toBe(false);
   });
 });
+
+describe('owner-proof timestamps across uploads', () => {
+  const OTHER_STAMP = 'd'.repeat(64);
+  const NOW_MS = Date.UTC(2026, 9, 21, 12, 0, 0, 100);
+  const NOW = Math.floor(NOW_MS / 1000);
+  /** X-Owner-Timestamp of each request, with the clock (seconds) when it was sent */
+  let sent: { stamp: string; timestamp: number; signature: string; clock: number }[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    sent = [];
+    mockFetch.mockReset();
+    mockFetch.mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      sent.push({
+        stamp: new URL(request.url).searchParams.get('stamp_id')!,
+        timestamp: Number(request.headers.get('X-Owner-Timestamp')),
+        signature: request.headers.get('X-Owner-Signature')!,
+        clock: Math.floor(Date.now() / 1000),
+      });
+      return Promise.resolve(json(200, { reference: REFERENCE }));
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('gives sequential uploads to one stamp within one second distinct proofs', async () => {
+    const c = client();
+
+    await c.upload('one', { stampId: STAMP, ownerSigner: OWNER });
+    await c.upload('two', { stampId: STAMP, ownerSigner: OWNER });
+
+    expect(sent.map((s) => s.timestamp)).toEqual([NOW, NOW + 1]);
+    expect(sent[0]!.signature).not.toBe(sent[1]!.signature);
+  });
+
+  it('gives concurrent uploads to one stamp distinct proofs', async () => {
+    const c = client();
+
+    await Promise.all([1, 2, 3, 4].map((n) => c.upload(`n${n}`, { stampId: STAMP, ownerSigner: OWNER })));
+
+    const timestamps = sent.map((s) => s.timestamp).sort((a, b) => a - b);
+    expect(timestamps).toEqual([NOW, NOW + 1, NOW + 2, NOW + 3]);
+    expect(new Set(sent.map((s) => s.signature)).size).toBe(4);
+  });
+
+  it('keeps stamps independent', async () => {
+    const c = client();
+
+    await c.upload('one', { stampId: STAMP, ownerSigner: OWNER });
+    await c.upload('two', { stampId: OTHER_STAMP, ownerSigner: OWNER });
+
+    expect(sent.map((s) => [s.stamp, s.timestamp])).toEqual([
+      [STAMP, NOW],
+      [OTHER_STAMP, NOW],
+    ]);
+  });
+
+  it('does not send a burst of proofs more than 30 s ahead of the clock', async () => {
+    const c = client();
+
+    const burst = Promise.all(
+      Array.from({ length: 40 }, (_, n) => c.upload(`n${n}`, { stampId: STAMP, ownerSigner: OWNER }))
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    await burst;
+
+    expect(sent).toHaveLength(40);
+    expect(new Set(sent.map((s) => s.timestamp)).size).toBe(40);
+    for (const s of sent) expect(s.timestamp - s.clock).toBeLessThanOrEqual(30);
+  });
+});
+
+describe("owner-proof 429 in 'none' mode", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('throws PaymentRateLimitError with owner-proof advice and does not retry or sign again', async () => {
+    mockFetch.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ detail: { error: 'Rate limit exceeded' } }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+        })
+      )
+    );
+    const sign = vi.fn((args: { message: string }) => OWNER.signMessage(args));
+
+    const error = await client('none')
+      .upload('hello', { stampId: STAMP, ownerSigner: { signMessage: sign } })
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PaymentRateLimitError);
+    expect((error as Error).message).toContain('Owner-proof uploads use the free tier');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(sign).toHaveBeenCalledTimes(1);
+  });
+});
