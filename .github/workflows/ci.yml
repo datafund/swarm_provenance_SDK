@@ -53,6 +53,9 @@ jobs:
           test -f dist/chain/browser.cjs
           test -f dist/chain/browser.d.ts
           ! grep -q fromPrivateKey dist/chain/browser.js
+          # The viem guard (#99) is applied to both CJS chain entries (#123)
+          grep -qF "npm install viem" dist/chain/index.cjs
+          grep -qF "npm install viem" dist/chain/browser.cjs
 
       - name: Payment policy across the tested @x402 range
         run: |
@@ -72,7 +75,9 @@ jobs:
           node -e "if (typeof require('./dist/chain/index.cjs').ChainClient !== 'function') process.exit(1)"
           # viem absent (dist copied outside node_modules' reach): actionable message
           mkdir -p "$RUNNER_TEMP/noviem" && cp -r dist "$RUNNER_TEMP/noviem/"
-          node -e "try { require(process.argv[1]); console.error('expected a throw'); process.exit(1) } catch (e) { if (!e.message.includes('npm install viem')) { console.error(e.message); process.exit(1) } }" "$RUNNER_TEMP/noviem/dist/chain/index.cjs"
+          for entry in index browser; do
+            node -e "try { require(process.argv[1]); console.error('expected a throw'); process.exit(1) } catch (e) { if (!e.message.includes('npm install viem')) { console.error(e.message); process.exit(1) } }" "$RUNNER_TEMP/noviem/dist/chain/$entry.cjs"
+          done
           # bundled with viem inlined: loads with no node_modules at runtime
           echo "require('$GITHUB_WORKSPACE/dist/chain/index.cjs').ChainClient.name" > "$RUNNER_TEMP/entry.cjs"
           mkdir -p "$RUNNER_TEMP/bundle"
