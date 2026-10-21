@@ -297,7 +297,7 @@ const client = new ProvenanceClient({
   timeout?: number,             // default: 30000ms
   paidTimeout?: number,         // attempts that may pay (x402): default 120000ms, or timeout if longer
   payment?: PaymentMode,        // default: 'free' (see x402 Payment Mode)
-  retry?: GatewayRetryConfig,   // auto-retry on 502/503 and rate-limit 429s (default: 2 retries, 1s backoff)
+  retry?: GatewayRetryConfig,   // auto-retry unpaid 502/503, and rate-limit 429s outside the free tier (default: 2 retries, 1s backoff)
   maxUploadBytes?: number,      // largest upload sent, in bytes of metadata JSON (default: 10485760)
 });
 ```
@@ -308,9 +308,6 @@ so the largest content that fits is 7864191 bytes (7.5 MiB); a raw document (`ra
 can be about 10 MiB of JSON. A larger upload throws `ProvenanceError` with code
 `FILE_TOO_LARGE` before any request, so no stamp is acquired for it. Set `maxUploadBytes`
 for a gateway with another limit.
-
-```typescript
-```
 
 ### Upload
 
@@ -426,13 +423,20 @@ try {
 ```
 
 Errors from a gateway response carry the gateway's `code` (for example
-`DAILY_STAMP_ALLOWANCE_EXHAUSTED`) and its message. `error.body` is the response body:
-parsed JSON, or the text (at most 4 KiB) when it is not JSON. A 402 message names the
-price asked, for example `0.01 USDC on base-sepolia`. Only rate-limit 429s
-(`RATE_LIMIT_EXCEEDED`, the free tier) throw `PaymentRateLimitError` and are retried; a
-429 that refuses a quota, such as the pool's daily allowance, is reported with its code
-at once. A signature declined in the wallet throws `PaymentRefusedError`
-(`PAYMENT_REFUSED`).
+`DAILY_STAMP_ALLOWANCE_EXHAUSTED`) and its message, cut to 4 KiB. `error.body` is the
+response body: the parsed JSON when it is at most 16 KiB, otherwise its first 4 KiB as
+text (ending in `…`), and for a body that is not JSON its text, also at most 4 KiB. A 402
+message names the price asked, for example `0.01 USDC on base-sepolia`. A signature
+declined in the wallet throws `PaymentRefusedError` (`PAYMENT_REFUSED`).
+
+How a 429 is handled depends on its code and on the request:
+
+| 429 | `'free'` mode, and unpaid reads in x402 mode | `'none'` mode, and x402 writes |
+|---|---|---|
+| A rate limit: `RATE_LIMIT_EXCEEDED`, `HTTP_429` (the free tier), or no code | `PaymentRateLimitError` after one request, not retried | Retried up to `retry.maxRetries` times, waiting `Retry-After` when sent; then the gateway error with its code (`StampError` from `acquireStamp()` and `upload()`'s pool acquisition, else `GatewayConnectionError`) |
+| Any other code, such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED` (a quota) | The gateway error with its code, at once | The gateway error with its code, at once |
+
+A request that sent a payment is never retried for a 429.
 
 ## Advanced Usage
 
@@ -732,7 +736,8 @@ message comes from Node itself.
   idempotent replay. All fields are new and optional. Unpaid results carry no `payment`.
 - Error handling (#112): gateway errors show the envelope's top-level `message` first, and
   `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
-  4 KiB). A 402 message names the price. A 429 whose code is not a rate limit
+  4 KiB; a JSON body over 16 KiB is kept as its first 4 KiB of text), and gateway messages
+  are cut to 4 KiB. A 402 message names the price. A 429 whose code is not a rate limit
   (`DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`,
   `DAILY_SPEND_BUDGET_EXHAUSTED`, `FREE_QUOTA_EXCEEDED`) is no longer retried, and in `'free'`
   mode is reported with its code instead of as `PaymentRateLimitError`. `health()` returns
