@@ -26,6 +26,7 @@ import type {
   PriceQuote,
   ProvenanceMetadata,
   NotarySignature,
+  OwnerSigner,
 } from './types.js';
 import {
   ProvenanceError,
@@ -40,7 +41,7 @@ import {
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes, isAddress } from './utils.js';
+import { toBytes, isAddress, ownerProofMessage } from './utils.js';
 import {
   base64Decode,
   untilAborted,
@@ -286,6 +287,7 @@ export class ProvenanceClient {
     // One key for the whole operation: the pool acquisition and the upload are
     // different paths, so the gateway keeps them apart (#102)
     const idempotencyKey = this.operationKey(options.idempotencyKey);
+    assertOwnerProofStamp(options);
     // Get stamp - either from options or acquire from pool
     let stampId: string;
     try {
@@ -574,10 +576,16 @@ export class ProvenanceClient {
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' });
     formData.append('file', metadataBlob, 'provenance.json');
 
+    // Owner proof (#124): free tier, never paid, a new proof per attempt
+    const ownerSigner = options.ownerSigner;
     const response = await this.fetch(
       `/api/v1/data/?${params.toString()}`,
-      { method: 'POST', body: formData },
-      { idempotencyKey: options.idempotencyKey }
+      ownerSigner
+        ? { method: 'POST', body: formData, headers: { 'X-Payment-Mode': 'free' } }
+        : { method: 'POST', body: formData },
+      ownerSigner
+        ? { unpaid: true, attemptHeaders: ownerProofHeaders(ownerSigner, stampId) }
+        : { idempotencyKey: options.idempotencyKey }
     );
 
     if (!response.ok) {
@@ -700,13 +708,23 @@ export class ProvenanceClient {
    * IDEMPOTENCY_UNAVAILABLE: with the same key and a new authorization, which
    * the gateway verifies but never settles.
    */
-  private async fetch(path: string, init?: RequestInit, options: { idempotencyKey?: string | undefined } = {}): Promise<Response> {
+  private async fetch(
+    path: string,
+    init?: RequestInit,
+    options: {
+      idempotencyKey?: string | undefined;
+      /** Never pay, even in x402 mode: the request uses the free tier */
+      unpaid?: boolean;
+      /** Headers made anew for each attempt (owner proofs are single use) */
+      attemptHeaders?: () => Promise<Record<string, string>>;
+    } = {}
+  ): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
 
     const x402 = typeof this.paymentMode === 'object' ? this.paymentMode : undefined;
     const method = (init?.method ?? 'GET').toUpperCase();
     const isRead = method === 'GET' || method === 'HEAD';
-    const paying = x402 !== undefined && (!isRead || x402.payForReads === true);
+    const paying = x402 !== undefined && !options.unpaid && (!isRead || x402.payForReads === true);
     // Unpaid requests in x402 mode use the free tier, as in 'free' mode
     const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
     const transport = paying ? await this.getX402Transport() : undefined;
@@ -715,6 +733,7 @@ export class ProvenanceClient {
 
     let idempotentRetries = 0;
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      const extraHeaders = options.attemptHeaders ? await options.attemptHeaders() : undefined;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -723,6 +742,7 @@ export class ProvenanceClient {
         headers.set('X-Payment-Mode', 'free');
       }
       if (idempotencyKey !== undefined) headers.set('Idempotency-Key', idempotencyKey);
+      if (extraHeaders) for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
       // Each attempt gets its own paying fetch, which records whether it paid
       const state: PaymentAttemptState = { paid: false };
       const fetchFn: typeof fetch = transport ? transport.fetchFor(state) : fetch;
@@ -747,7 +767,7 @@ export class ProvenanceClient {
           const rateRemaining = response.headers.get('X-RateLimit-Remaining');
 
           throw new PaymentRateLimitError(
-            x402
+            x402 && !options.unpaid
               ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
               : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
             retryAfter ? parseInt(retryAfter, 10) : undefined,
@@ -1058,5 +1078,43 @@ function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
     priceUsd: quote.price_usd,
     maxAmountRequired: quote.max_amount_required,
     description: quote.description,
+  };
+}
+
+/** Stamp id the gateway accepts: 64 hex characters, no 0x */
+const STAMP_ID = /^[0-9a-fA-F]{64}$/;
+
+/** An owner proof needs the stamp it proves ownership of; checked before anything is sent */
+function assertOwnerProofStamp(options: UploadOptions): void {
+  if (options.ownerSigner === undefined) return;
+  if (options.stampId === undefined || !STAMP_ID.test(options.stampId)) {
+    throw new ProvenanceError(
+      `ownerSigner requires stampId: 64 hex characters without 0x, got ${JSON.stringify(options.stampId)}`,
+      'INVALID_INPUT'
+    );
+  }
+}
+
+/**
+ * Makes the owner-proof headers for one attempt (#124). The gateway accepts a
+ * proof once, keyed on the signed message, so each attempt signs a strictly
+ * later timestamp. The signature is a bearer credential for one upload: it is
+ * never put in an error message.
+ */
+function ownerProofHeaders(signer: OwnerSigner, stampId: string): () => Promise<Record<string, string>> {
+  let last = 0;
+  return async () => {
+    const timestamp = Math.max(Math.floor(Date.now() / 1000), last + 1);
+    last = timestamp;
+    let signature: string;
+    try {
+      signature = await signer.signMessage({ message: ownerProofMessage(stampId, timestamp) });
+    } catch (error) {
+      throw new ProvenanceError(
+        `Owner proof could not be signed: ${error instanceof Error ? error.message : String(error)}`,
+        'OWNER_PROOF_FAILED'
+      );
+    }
+    return { 'X-Owner-Timestamp': String(timestamp), 'X-Owner-Signature': signature };
   };
 }

@@ -125,6 +125,15 @@ export interface ProvenanceClientConfig {
 }
 
 /**
+ * Signs an owner proof (EIP-191 `personal_sign`) for an upload to a stamp you
+ * own. A viem `LocalAccount` (`privateKeyToAccount`) or a viem `WalletClient`
+ * with an account fits as is, so the x402 `payment.wallet` can be passed directly.
+ */
+export interface OwnerSigner {
+  signMessage(args: { message: string }): Promise<`0x${string}`>;
+}
+
+/**
  * Options for uploading provenance data
  */
 export interface UploadOptions {
@@ -154,6 +163,15 @@ export interface UploadOptions {
    * Content must be a JSON string or a plain object.
    */
   raw?: boolean;
+  /**
+   * Prove that you own `stampId` with a signature instead of a payment
+   * (gateways with x402 on). Requires `stampId` (64 hex characters, no `0x`).
+   * The upload then uses the free tier (`X-Payment-Mode: free`, rate-limited)
+   * and never pays, in any payment mode. Each request attempt signs a new
+   * proof, so a browser wallet asks once per attempt. The gateway accepts a
+   * proof for 300 seconds either side of its own clock, and only once.
+   */
+  ownerSigner?: OwnerSigner;
 }
 
 /**

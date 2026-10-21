@@ -27,6 +27,7 @@ export type {
   PricingOptions,
   Pricing,
   PriceQuote,
+  OwnerSigner,
 } from './types.js';
 
 // Errors
@@ -72,4 +73,5 @@ export {
   bytesToBase64,
   base64ToBytes,
   isValidSwarmReference,
+  ownerProofMessage,
 } from './utils.js';
