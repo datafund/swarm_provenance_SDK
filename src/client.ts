@@ -511,14 +511,13 @@ export class ProvenanceClient {
     /** A raw document's JSON: serialised once, then hashed, sent and returned as parsed from it */
     let dataJson: string | undefined;
     if (options.raw) {
-      dataJson = JSON.stringify(rawDocument(content)) as string | undefined;
-      const snapshot = dataJson === undefined ? undefined : (JSON.parse(dataJson) as unknown);
-      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
-        throw new ProvenanceError('Raw mode requires valid JSON string or plain object', 'INVALID_INPUT');
-      }
+      // Accepts what earlier versions accepted: any JSON text, or a non-null object (arrays too)
+      const document = rawDocument(content);
+      dataJson = JSON.stringify(document) as string | undefined;
       // The caller's object may change while the stamp is acquired: the
       // snapshot is what is hashed, sent and returned
-      metadata = buildDocumentMetadata(snapshot as Record<string, unknown>, metadataOptions);
+      const snapshot = dataJson === undefined ? document : (JSON.parse(dataJson) as Record<string, unknown>);
+      metadata = buildDocumentMetadata(snapshot, metadataOptions);
     } else {
       const bytes =
         content instanceof Blob
@@ -534,8 +533,9 @@ export class ProvenanceClient {
     // As JSON.stringify of those fields, reusing a raw document's JSON instead of serialising it again
     const part = (names: string[]) =>
       `{${names
-        .filter((k) => record[k] !== undefined)
-        .map((k) => `${JSON.stringify(k)}:${k === 'data' && dataJson !== undefined ? dataJson : JSON.stringify(record[k])}`)
+        .map((k) => [k, k === 'data' && dataJson !== undefined ? dataJson : (JSON.stringify(record[k]) as string | undefined)] as const)
+        .filter(([, value]) => value !== undefined) // as JSON.stringify omits them
+        .map(([k, value]) => `${JSON.stringify(k)}:${value}`)
         .join(',')}}`;
     const head = part(keys.slice(0, at)); // '{...}', or '{}' with no fields before
     const tail = part(keys.slice(at + 1));
@@ -949,8 +949,12 @@ export class ProvenanceClient {
       }
       bodyTransaction = reported(fields['transaction']) ?? reported(data['transaction']);
       const price = response.status === 402 ? priceOf(data) : undefined;
-      // The gateway's message and the price together stay within the cap
-      if (price) message = capText(`${message} (price: ${price})`);
+      if (price) {
+        // The gateway's message is cut to leave room for the price, so the price
+        // always shows and the two together stay within the cap
+        const suffix = ` (price: ${price})`;
+        message = suffix.length < MAX_ERROR_TEXT ? `${capText(message, MAX_ERROR_TEXT - suffix.length)}${suffix}` : capText(`${message}${suffix}`);
+      }
     } else if (response.status === 413) {
       // Not the gateway's JSON 413 (FILE_TOO_LARGE): the proxy in front of it refused the body
       code = 'FILE_TOO_LARGE';
@@ -1027,7 +1031,10 @@ const STAMP_PLACEHOLDER = '0'.repeat(64);
 /** The gateway's default MAX_UPLOAD_SIZE_MB (10), in bytes: the limit on the uploaded metadata JSON */
 const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
-/** A raw-mode document: a JSON object string, or a plain object */
+/**
+ * A raw-mode document: parsed JSON text (any JSON value), or a non-null object
+ * that is not binary data (arrays included), as SDK 0.6.x accepted.
+ */
 function rawDocument(content: unknown): Record<string, unknown> {
   if (typeof content === 'string') {
     try {
@@ -1265,9 +1272,9 @@ const MAX_ERROR_JSON = 16384;
  * `text` cut to MAX_ERROR_TEXT characters (UTF-16 code units), with an
  * ellipsis when cut. A cut never splits a surrogate pair.
  */
-function capText(text: string): string {
-  if (text.length <= MAX_ERROR_TEXT) return text;
-  let end = MAX_ERROR_TEXT;
+function capText(text: string, max = MAX_ERROR_TEXT): string {
+  if (text.length <= max) return text;
+  let end = max;
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end--; // a high surrogate whose pair would be cut off
   return `${text.slice(0, end)}…`;

@@ -1338,6 +1338,8 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce(json({ ...x402Body, code: 'HTTP_402', message: 'p'.repeat(5000) }, 402));
       const long = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
       expect((long as Error).message.length).toBeLessThanOrEqual(4097);
+      // The price always appears: the gateway's message is cut to make room for it
+      expect((long as Error).message).toMatch(/…\s\(price: 0\.01 USDC on base-sepolia\)$/);
     });
 
     it('a 402 with the payment request only under the deprecated detail still shows the price', async () => {
@@ -1492,6 +1494,30 @@ describe('ProvenanceClient', () => {
         expect(result.metadata.data).toEqual({ a: 1 });
         expect(result.metadata.content_hash).toBe(sent.content_hash);
         expect(verifyDocumentHash(result.metadata)).toBe(true);
+      });
+
+      // Bodies and hashes the base (ff3c522) produced for these raw inputs, with stampId STAMP
+      it.each([
+        ['an array string', '[1,2]', '[1,2]', '49a64717d5d4cb19952e6eac2946415cf6879adacf9908e7d872332d32c6e684'],
+        ['an array value', [1, 2], '[1,2]', '49a64717d5d4cb19952e6eac2946415cf6879adacf9908e7d872332d32c6e684'],
+        ["the string 'null'", 'null', 'null', '74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b'],
+        ["the string '5'", '5', '5', 'ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d'],
+        ['a JSON string literal', '"x"', '"x"', 'ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b'],
+      ])('raw mode accepts %s as the base did, with the same body and hash', async (_label, content, dataJson, hash) => {
+        mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+        const result = await new ProvenanceClient().upload(content as never, { raw: true, stampId: STAMP });
+        const sent = await sentFile(0);
+        expect(sent).toBe(`{"data":${dataJson},"content_hash":"${hash}","stamp_id":"${STAMP}"}`);
+        expect(JSON.stringify(result.metadata)).toBe(sent);
+      });
+
+      it.each([
+        ['a null value', null],
+        ['a number value', 5],
+      ])('raw mode refuses %s as the base did', async (_label, content) => {
+        const error = await new ProvenanceClient().upload(content as never, { raw: true, stampId: STAMP }).catch((e: unknown) => e);
+        expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+        expect(mockFetch).not.toHaveBeenCalled();
       });
 
       it('the body is the metadata JSON, and only the stamp_id field gets the stamp', async () => {
