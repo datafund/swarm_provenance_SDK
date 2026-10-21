@@ -44,6 +44,8 @@ import {
   untilAborted,
   createX402Transport,
   resolvePaymentPolicy,
+  toPaymentRequest,
+  USDC_BY_NETWORK,
   type PaymentAttemptState,
   type PaymentPolicy,
 } from './payment.js';
@@ -865,7 +867,9 @@ export class ProvenanceClient {
   }
 
   /**
-   * Handle error responses from the gateway
+   * Handle error responses from the gateway. The error keeps the body (`body`),
+   * shows the gateway's message (top-level `message` of its error envelope
+   * first) and, on a 402, the price asked (#112).
    */
   private async handleError(response: Response): Promise<GatewayConnectionError | PaymentOutcomeError> {
     let message = `Gateway error: ${response.status} ${response.statusText}`;
@@ -874,30 +878,23 @@ export class ProvenanceClient {
     let fields: Record<string, unknown> = {};
     /** Transaction named in the body: in `detail`, or top level (the gateway's paid-request crash answer) */
     let bodyTransaction: unknown;
+    const body = await readErrorBody(response);
 
-    try {
-      const data = (await response.json()) as GatewayErrorResponse;
-      if (typeof data.detail === 'string') {
-        message = data.detail;
-      } else if (Array.isArray(data.detail)) {
-        // FastAPI validation errors: [{msg, loc, type}, ...]
-        message = data.detail.map((e) => e.msg).join('; ');
-      } else if (data.detail && typeof data.detail === 'object' && 'message' in data.detail) {
-        // Structured error: {message, suggestion?}
-        const structured = data.detail as { message: string; suggestion?: string };
-        message = structured.message;
-        suggestion = structured.suggestion;
-      } else if (typeof data.message === 'string' && data.message) {
-        // The gateway's error envelope: top-level {code, message}
-        message = data.message;
-      }
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      const data = body as GatewayErrorResponse & Record<string, unknown>;
+      message = gatewayMessage(data) ?? message;
       code = errorCode(data);
       if (data.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)) {
         fields = data.detail as Record<string, unknown>;
+        if (typeof fields['suggestion'] === 'string') suggestion = fields['suggestion'];
       }
-      bodyTransaction = reported(fields['transaction']) ?? reported((data as { transaction?: unknown }).transaction);
-    } catch {
-      // Ignore JSON parse errors
+      bodyTransaction = reported(fields['transaction']) ?? reported(data['transaction']);
+      const price = response.status === 402 ? priceOf(data) : undefined;
+      if (price) message += ` (price: ${price})`;
+    } else if (response.status === 413) {
+      // Not the gateway's JSON 413 (FILE_TOO_LARGE): the proxy in front of it refused the body
+      code = 'FILE_TOO_LARGE';
+      message = `Upload too large: the gateway's proxy refused the request body (${response.status} ${response.statusText}). Send less data.`;
     }
 
     const paid = this.paidResponses.has(response);
@@ -909,10 +906,12 @@ export class ProvenanceClient {
     if (payment && outcome) {
       const error = new PaymentOutcomeError(`${outcomeMessage(outcome, payment)} Gateway: ${message}`, code!, outcome);
       error.payment = payment;
+      if (body !== undefined) error.body = body;
       return error;
     }
 
     const error = new GatewayConnectionError(message, response.status, code, suggestion);
+    if (body !== undefined) error.body = body;
     if (payment) {
       // The request carried a signed payment: say so, with whatever the gateway reported
       error.payment = payment;
@@ -1112,8 +1111,79 @@ function paymentAttempt(response: Response, paid: PaidAttempt, decimals: number 
   return attempt;
 }
 
-/** Carry the payment flag over when a gateway error is re-thrown as another error type. */
+/** Carry the payment flag and the body over when a gateway error is re-thrown as another error type. */
 function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceError): E {
   if (source.payment) target.payment = source.payment;
+  if (source.body !== undefined) target.body = source.body;
   return target;
+}
+
+/** Longest error body text kept on `error.body`: a proxy's error page is not kept whole */
+const MAX_ERROR_BODY_TEXT = 4096;
+
+/** An error response's body: parsed JSON, else its text (capped), else undefined. */
+async function readErrorBody(response: Response): Promise<unknown> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return undefined;
+  }
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text.length > MAX_ERROR_BODY_TEXT ? `${text.slice(0, MAX_ERROR_BODY_TEXT)}…` : text;
+  }
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+/**
+ * The text to show for a gateway error. FastAPI validation errors list their
+ * fields; otherwise the error envelope's top-level `message`, else `detail`'s
+ * `message` or `error`, else a `detail` string. A further `detail` text (as in
+ * `{detail: {error, detail}}`) is added when the message does not contain it.
+ */
+function gatewayMessage(data: GatewayErrorResponse & Record<string, unknown>): string | undefined {
+  const detail = data.detail as unknown;
+  if (Array.isArray(detail)) {
+    const fields = detail.map((e: { msg?: unknown } | null) => nonEmpty(e?.msg)).filter((m): m is string => m !== undefined);
+    if (fields.length > 0) return fields.join('; ');
+  }
+  const nested = detail && typeof detail === 'object' && !Array.isArray(detail) ? (detail as Record<string, unknown>) : undefined;
+  const base = nonEmpty(data.message) ?? nonEmpty(nested?.['message']) ?? nonEmpty(nested?.['error']) ?? nonEmpty(data['error']);
+  const extra = nonEmpty(nested?.['detail']) ?? nonEmpty(detail);
+  if (base === undefined) return extra;
+  if (extra === undefined || base.includes(extra)) return base;
+  return `${base}${/[.!?]$/.test(base) ? ' ' : ': '}${extra}`;
+}
+
+/** An x402 payment request: top level (the gateway now), else under the deprecated `detail` */
+function paymentRequestOf(data: Record<string, unknown>): { x402Version: number; accepts: unknown[] } | undefined {
+  const isRequest = (v: unknown): v is { x402Version: number; accepts: unknown[] } =>
+    Boolean(v) && typeof v === 'object' && typeof (v as { x402Version?: unknown }).x402Version === 'number' &&
+    Array.isArray((v as { accepts?: unknown }).accepts);
+  if (isRequest(data)) return data;
+  return isRequest(data['detail']) ? data['detail'] : undefined;
+}
+
+/** The price a 402 asks, e.g. "0.01 USDC on base-sepolia"; options joined with "or". Never the raw JSON. */
+function priceOf(data: Record<string, unknown>): string | undefined {
+  const request = paymentRequestOf(data);
+  if (!request) return undefined;
+  const prices = request.accepts
+    .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
+    .map((o) => toPaymentRequest(request.x402Version, o))
+    .filter((r) => /^\d+$/.test(r.amount))
+    .map((r) => {
+      const network = r.network || '?';
+      const usdc = Object.hasOwn(USDC_BY_NETWORK, r.network) ? USDC_BY_NETWORK[r.network] : undefined;
+      return usdc && usdc.toLowerCase() === r.asset.toLowerCase()
+        ? `${formatAtomic(BigInt(r.amount), 6)} USDC on ${network}`
+        : `${r.amount} smallest units of ${r.asset || '?'} on ${network}`;
+    });
+  return prices.length > 0 ? prices.join(' or ') : undefined;
 }

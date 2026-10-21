@@ -456,5 +456,8 @@ export interface GatewayErrorResponse {
   /** Top-level message of the gateway's error envelope */
   message?: string;
   /** FastAPI detail — string, object with message, or validation error array */
-  detail: string | { message: string; suggestion?: string } | Array<{ msg: string; loc?: unknown[] }>;
+  detail?:
+    | string
+    | { message?: string; error?: string; detail?: unknown; suggestion?: string; code?: string }
+    | Array<{ msg: string; loc?: unknown[] }>;
 }

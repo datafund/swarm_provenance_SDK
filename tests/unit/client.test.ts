@@ -1227,4 +1227,82 @@ describe('ProvenanceClient', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // Only upload, no pool check
     });
   });
+
+  describe('error handling (#112)', () => {
+    const STAMP = 'a'.repeat(64);
+    const json = (body: unknown, status: number, statusText = '') =>
+      new Response(JSON.stringify(body), { status, statusText, headers: { 'content-type': 'application/json' } });
+    /** The gateway's error envelope (swarm_connect app/main.py error_envelope) */
+    const envelope = (detail: Record<string, unknown>) => ({ detail, code: detail['code'], message: detail['message'] });
+
+    it('{detail: {error, detail}} shows both texts, with or without the envelope', async () => {
+      const detail = { error: 'Payment verification failed', detail: 'Could not verify payment with facilitator. Please try again.' };
+      for (const body of [{ detail }, { detail, code: 'HTTP_400', message: 'Payment verification failed' }]) {
+        mockFetch.mockResolvedValueOnce(json(body, 400, 'Bad Request'));
+        const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+        expect((error as Error).message).toBe('Payment verification failed: Could not verify payment with facilitator. Please try again.');
+      }
+    });
+
+    it('a top-level message is shown, not "Gateway error: 503"', async () => {
+      mockFetch.mockResolvedValueOnce(json({ code: 'PRICING_UNAVAILABLE', message: 'Could not read the chain price.' }, 503));
+      const error = await new ProvenanceClient({ retry: { maxRetries: 0 } }).notaryInfo().catch((e: unknown) => e);
+      expect((error as Error).message).toBe('Could not read the chain price.');
+      expect((error as GatewayConnectionError).code).toBe('PRICING_UNAVAILABLE');
+    });
+
+    const x402Body = {
+      x402Version: 1,
+      error: 'Payment required. Use X-PAYMENT header for paid access or X-Payment-Mode: free for free tier.',
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'base-sepolia',
+          maxAmountRequired: '10000',
+          asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+          payTo: '0x1111111111111111111111111111111111111111',
+          maxTimeoutSeconds: 60,
+          resource: 'http://gateway.test/api/v1/data/',
+          extra: { name: 'USDC', version: '2' },
+        },
+      ],
+    };
+
+    it("a 402 in 'none' mode shows the price and keeps the body, without the accepts JSON", async () => {
+      const body = { ...x402Body, code: 'HTTP_402', message: x402Body.error, detail: x402Body };
+      mockFetch.mockResolvedValueOnce(json(body, 402, 'Payment Required'));
+      const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
+      expect((error as Error).message).not.toMatch(/[{}]|maxAmountRequired|"accepts"/);
+      expect((error as ProvenanceError).body).toEqual(body);
+    });
+
+    it('a 402 with the payment request only under the deprecated detail still shows the price', async () => {
+      mockFetch.mockResolvedValueOnce(json({ detail: x402Body }, 402, 'Payment Required'));
+      const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain(x402Body.error);
+      expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
+    });
+
+    it('a non-JSON error body is kept as text, capped at 4 KiB', async () => {
+      const page = `<html><body>${'Bad gateway. '.repeat(1000)}</body></html>`;
+      mockFetch.mockResolvedValueOnce(new Response(page, { status: 502, statusText: 'Bad Gateway' }));
+      const error = await new ProvenanceClient({ retry: { maxRetries: 0 } }).notaryInfo().catch((e: unknown) => e);
+      const body = (error as ProvenanceError).body;
+      expect(typeof body).toBe('string');
+      expect((body as string).length).toBeLessThanOrEqual(4096 + 32);
+      expect(page.startsWith((body as string).slice(0, 100))).toBe(true);
+      expect((error as Error).message).toBe('Gateway error: 502 Bad Gateway');
+    });
+
+    it('the body survives the StampError conversion', async () => {
+      const body = envelope({ code: 'POOL_EXHAUSTED', message: 'No stamps.' });
+      mockFetch.mockResolvedValueOnce(json(body, 409));
+      const error = await new ProvenanceClient().acquireStamp().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(StampError);
+      expect((error as StampError).body).toEqual(body);
+    });
+
+  });
 });

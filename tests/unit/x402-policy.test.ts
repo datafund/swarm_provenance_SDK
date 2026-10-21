@@ -55,8 +55,10 @@ let accepts: Array<Record<string, unknown>>;
 /** x402 protocol of the stub's 402: v1 in the body (the gateway today), v2 in the PAYMENT-REQUIRED header */
 let protocol: 1 | 2;
 let afterPayment: { status: number; headers?: Record<string, string>; body?: unknown; hang?: boolean };
-/** Statuses to answer unpaid requests with before the 402 (e.g. a transient 503) */
-let beforePayment: number[];
+/** Answers to unpaid requests before the 402 (e.g. a transient 503): a status, or a status and body */
+let beforePayment: Array<number | { status: number; body: unknown }>;
+/** When set, the v1 402 has the payment request at the top level and this deprecated copy under `detail` */
+let detailAccepts: Array<Record<string, unknown>> | undefined;
 
 const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const request = new Request(input, init);
@@ -69,11 +71,23 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
   if (request.headers.has('x-provenance-sdk-attempt')) throw new Error('internal attempt header leaked to the gateway');
 
   if (!paid && beforePayment.length > 0) {
-    return Promise.resolve(new Response('{"detail":"busy"}', { status: beforePayment.shift()! }));
+    const next = beforePayment.shift()!;
+    const { status, body } = typeof next === 'number' ? { status: next, body: { detail: 'busy' } } : next;
+    return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
   }
   if (!paid && protocol === 2) {
     const header = Buffer.from(JSON.stringify({ x402Version: 2, error: 'Payment required', resource: { url: request.url }, accepts })).toString('base64');
     return Promise.resolve(new Response('{}', { status: 402, headers: { 'PAYMENT-REQUIRED': header } }));
+  }
+  if (!paid && detailAccepts) {
+    // The gateway's current 402: x402 body at the top level, deprecated copy under `detail`
+    const error = 'Payment required';
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({ x402Version: 1, error, accepts, code: 'HTTP_402', message: error, detail: { x402Version: 1, error, accepts: detailAccepts } }),
+        { status: 402, headers: { 'content-type': 'application/json' } },
+      ),
+    );
   }
   if (!paid) {
     // The gateway wraps the x402 payload in FastAPI's `detail`
@@ -110,6 +124,7 @@ beforeEach(() => {
   accepts = [requirement()];
   afterPayment = { status: 200 };
   beforePayment = [];
+  detailAccepts = undefined;
   protocol = 1;
 });
 afterAll(() => {
@@ -560,5 +575,28 @@ describe('final review (#140)', () => {
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PaymentRefusedError);
     expect((error as Error).message).toMatch(/no known USDC/);
+  });
+});
+
+describe('error handling (#112)', () => {
+  it('a paid attempt answered 402 keeps its message and body', async () => {
+    const error402 = 'Payment verification failed: invalid_exact_evm_payload_signature';
+    const body = { x402Version: 1, error: error402, accepts, code: 'HTTP_402', message: error402 };
+    afterPayment = { status: 402, body };
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as Error).message).toContain(error402);
+    expect((error as Error).message).not.toMatch(/maxAmountRequired|"accepts"/);
+    expect((error as GatewayConnectionError).payment?.paymentSent).toBe(true);
+    expect((error as GatewayConnectionError).body).toEqual(body);
+    expect(payments()).toBe(1);
+  });
+
+  it('a policy refusal names each option without dumping the accepts JSON', async () => {
+    accepts = [requirement({ maxAmountRequired: '1000001' })];
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).not.toMatch(/[{}]|maxAmountRequired|"accepts"|resource/);
+    expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('1000001');
   });
 });
