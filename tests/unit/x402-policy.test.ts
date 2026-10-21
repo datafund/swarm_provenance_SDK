@@ -51,6 +51,8 @@ interface Seen {
   paid: boolean;
   /** X-Payment-Mode header, if sent */
   mode?: string;
+  /** Idempotency-Key header, if sent */
+  key?: string;
 }
 
 let seen: Seen[];
@@ -68,7 +70,8 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
   const paid = request.headers.has('X-PAYMENT') || request.headers.has('PAYMENT-SIGNATURE');
   const path = new URL(request.url).pathname;
   const mode = request.headers.get('X-Payment-Mode') ?? undefined;
-  seen.push({ method: request.method, path, paid, ...(mode ? { mode } : {}) });
+  const key = request.headers.get('Idempotency-Key') ?? undefined;
+  seen.push({ method: request.method, path, paid, ...(mode ? { mode } : {}), ...(key ? { key } : {}) });
   if (request.headers.has('x-provenance-sdk-attempt')) throw new Error('internal attempt header leaked to the gateway');
 
   if (!paid && beforePayment.length > 0) {
@@ -324,6 +327,42 @@ describe('paid pool acquisition is opt-in (#109)', () => {
     expect((error as StampError).payment).toBeUndefined();
     expect(payments()).toBe(0);
     expect(seen.filter((s) => s.path === '/api/v1/data/')).toHaveLength(0);
+    // The unpaid acquisition carries no Idempotency-Key
+    const acquisitions = seen.filter((s) => s.path === '/api/v1/pool/acquire');
+    expect(acquisitions.length).toBeGreaterThan(0);
+    expect(acquisitions.every((s) => s.key === undefined)).toBe(true);
+  });
+
+  it('without payForPool, a 429 allowance refusal stays a StampError with the gateway code', async () => {
+    // The gateway answers 429 instead of 402 where a payment would not bypass the
+    // allowance (testnets by default) or the price cannot be computed
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (new URL(url).pathname === '/api/v1/pool/acquire') {
+        seen.push({ method: 'POST', path: '/api/v1/pool/acquire', paid: false });
+        const detail = { code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED', message: 'Daily stamp allowance used up.' };
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail }), { status: 429, headers: { 'content-type': 'application/json' } })
+        );
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await new ProvenanceClient({
+        gatewayUrl: 'http://gateway.test',
+        payment: { wallet },
+        retry: { maxRetries: 0 },
+      })
+        .acquireStamp()
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(StampError);
+      expect((error as StampError).code).toBe('DAILY_STAMP_ALLOWANCE_EXHAUSTED');
+      expect((error as Error).message).not.toMatch(/payForReads/);
+      expect(payments()).toBe(0);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
   });
 
   it('without payForPool, acquireStamp() does not pay a pool 402 or ask onBeforePayment', async () => {

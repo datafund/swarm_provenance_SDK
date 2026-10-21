@@ -84,10 +84,17 @@ approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the 
 **Pool stamps are not paid unless you set `payForPool`.** `acquireStamp()` and `upload()` without
 `stampId` take a stamp from the gateway's pool, which is free within a daily allowance. Callers
 without an `Origin` header, such as Node.js servers, share one allowance. When it is spent, the
-gateway answers with a 402 priced at what the pool paid for the stamp plus the gateway's markup
-(100% by default), so `medium` and `large` cost more. By default the SDK does not pay it: the call fails with a `StampError` that
-keeps the gateway's code (for example `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) and says how to continue.
-With `payForPool: true`, the SDK pays it, within the payment policy above.
+gateway answers in one of two ways, both with the code `DAILY_STAMP_ALLOWANCE_EXHAUSTED` (or
+`DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`):
+
+| Gateway answer | When | SDK result without `payForPool` | SDK result with `payForPool: true` |
+|----------------|------|---------------------------------|------------------------------------|
+| 402 with a price | A payment bypasses the allowance on that gateway (mainnet, or a testnet the operator enabled it for) | `StampError` with the gateway's code; nothing is paid | Pays, within the payment policy above, and returns the stamp |
+| 429 | A payment would not bypass the allowance (testnets by default), or the gateway could not price the stamp | `StampError` with the gateway's code | `StampError` with the gateway's code |
+
+The 402 price is the gateway's current quote for a pool stamp of the requested size, times one
+plus the gateway's markup. With the default markup of 100%, that is twice the quote. The
+`StampError` message says how to continue: pass a `stampId` you own, or set `payForPool`.
 A request that sent a payment is never retried automatically (unpaid attempts still retry
 on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
 (`{ paymentSent: true, transaction?, idempotencyKey?, stampId? }`). A timeout while the wallet

@@ -195,6 +195,7 @@ export class ProvenanceClient {
   }
 
   private async acquireWithKey(size: 'small' | 'medium' | 'large', idempotencyKey: string | undefined): Promise<AcquiredStamp> {
+    const payForPool = typeof this.paymentMode === 'object' && this.paymentMode.payForPool === true;
     const response = await this.fetch(
       '/api/v1/pool/acquire',
       {
@@ -202,9 +203,9 @@ export class ProvenanceClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ size }),
       },
-      // Paid pool acquisition is opt-in (#109): the pool answers 402 once the
-      // shared daily allowance is spent, at several times a stamp's cost
-      { idempotencyKey, payable: typeof this.paymentMode === 'object' && this.paymentMode.payForPool === true }
+      // Paid pool acquisition is opt-in (#109): the pool can answer 402 once the
+      // shared daily allowance is spent, priced at 2x the quote at the default markup
+      { idempotencyKey, payable: payForPool }
     );
 
     if (!response.ok) {
@@ -212,9 +213,11 @@ export class ProvenanceClient {
       if (error instanceof PaymentOutcomeError) throw error;
       if (response.status === 402 && !error.payment) {
         throw new StampError(
-          `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it. ` +
-            'To let the SDK pay for pool stamps within the payment policy, use x402 mode with payment.payForPool: true, ' +
-            'or pass a stampId you own.',
+          `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it.` +
+            (payForPool
+              ? ''
+              : ' To let the SDK pay for pool stamps within the payment policy, use x402 mode with ' +
+                'payment.payForPool: true, or pass a stampId you own.'),
           error.code ?? 'PAYMENT_REQUIRED'
         );
       }
@@ -682,8 +685,10 @@ export class ProvenanceClient {
     const method = (init?.method ?? 'GET').toUpperCase();
     const isRead = method === 'GET' || method === 'HEAD';
     const paying = x402 !== undefined && (isRead ? x402.payForReads === true : options.payable !== false);
-    // Unpaid requests in x402 mode use the free tier, as in 'free' mode
-    const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying);
+    // Unpaid reads in x402 mode use the free tier, as in 'free' mode. An unpaid
+    // pool acquisition does not: the gateway ignores X-Payment-Mode there, and its
+    // 429 is an allowance refusal for the caller to see, not a read rate limit (#109)
+    const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying && isRead);
     const transport = paying ? await this.getX402Transport() : undefined;
     const idempotencyKey = paying && !isRead ? options.idempotencyKey : undefined;
     const timeout = transport ? this.paidTimeout : this.timeout;
