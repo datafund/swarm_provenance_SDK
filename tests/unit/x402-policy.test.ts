@@ -3,6 +3,7 @@ import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
+import { UserRejectedRequestError } from 'viem';
 import {
   GatewayConnectionError,
   PaymentConfigurationError,
@@ -580,6 +581,12 @@ describe('final review (#140)', () => {
 });
 
 describe('error handling (#112)', () => {
+  it('prefers the top-level x402 body over the deprecated detail copy', async () => {
+    detailAccepts = [requirement({ maxAmountRequired: '99000000' })];
+    await client().upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
   it('a pool allowance 429 is not retried in x402 mode and keeps its code', async () => {
     const code = 'DAILY_STAMP_ALLOWANCE_EXHAUSTED';
     const message = 'The daily free allowance of 10 small stamps for this application has been used up.';
@@ -603,6 +610,21 @@ describe('error handling (#112)', () => {
     expect((error as GatewayConnectionError).payment?.paymentSent).toBe(true);
     expect((error as GatewayConnectionError).body).toEqual(body);
     expect(payments()).toBe(1);
+  });
+
+  it('a signature the user rejects in the wallet is PAYMENT_REFUSED, not a failure', async () => {
+    const rejecting = {
+      ...wallet,
+      signTypedData: () => Promise.reject(new UserRejectedRequestError(new Error('User rejected the request.'))),
+    };
+    const error = await new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: rejecting } })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(/rejected in the wallet/);
+    expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('10000');
+    expect(payments()).toBe(0);
   });
 
   it('a policy refusal names each option without dumping the accepts JSON', async () => {

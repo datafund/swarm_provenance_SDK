@@ -460,9 +460,10 @@ export async function createX402Transport(
 
 /**
  * Narrow a 402 to the single option the SDK will pay, or throw
- * PaymentRefusedError. Also normalises the gateway's 402: it wraps the x402
- * payload in FastAPI's "detail" field, while @x402/fetch expects it at the top
- * level (v1) or in the PAYMENT-REQUIRED header (v2).
+ * PaymentRefusedError. Also normalises the gateway's 402: @x402/fetch expects
+ * the x402 payload at the top level (v1) or in the PAYMENT-REQUIRED header
+ * (v2). The gateway now sends it at the top level, which is preferred (#112);
+ * older gateways wrap it in FastAPI's "detail" field, now a deprecated copy.
  */
 async function policePaymentRequired(response: Response, policy: PaymentPolicy, signal: AbortSignal): Promise<Response> {
   const headers = new Headers(response.headers);
@@ -490,8 +491,14 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy, 
       body = undefined;
     }
     const detail = body?.['detail'];
-    paymentRequired =
-      detail && typeof detail === 'object' && 'x402Version' in detail ? (detail as Record<string, unknown>) : body;
+    if (body && 'x402Version' in body) {
+      // Without the deprecated copy, so only the approved option reaches the library
+      paymentRequired = { ...body };
+      delete paymentRequired['detail'];
+    } else {
+      paymentRequired =
+        detail && typeof detail === 'object' && 'x402Version' in detail ? (detail as Record<string, unknown>) : body;
+    }
   }
 
   const accepts = paymentRequired?.['accepts'];

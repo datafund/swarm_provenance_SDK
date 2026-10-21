@@ -32,6 +32,7 @@ import {
   PaymentRateLimitError,
   PaymentError,
   PaymentOutcomeError,
+  PaymentRefusedError,
   type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
@@ -829,6 +830,16 @@ export class ProvenanceClient {
       // The paid request went out; the library failed afterwards
       return flag(new PaymentError(`Payment sent, but the response could not be processed: ${message}`, 'PAYMENT_UNCONFIRMED'));
     }
+    if (isWalletRejection(state.creationFailure) || ((state.creationFailure !== undefined || state.handedToLibrary) && isWalletRejection(error))) {
+      // The person declined to sign in the wallet: a refusal, not a failure (#112)
+      const request = state.approved;
+      return new PaymentRefusedError(
+        `Payment refused: the signature was rejected in the wallet${
+          request ? ` (${request.amount} on ${request.network} to ${request.payTo})` : ''
+        }`,
+        request ? [{ request, reasons: ['rejected in the wallet'] }] : []
+      );
+    }
     if (state.creationFailure !== undefined || state.handedToLibrary) {
       // The x402 library failed after taking the approved 402 (selection,
       // spend controls, signing) and before sending: nothing was paid
@@ -931,6 +942,18 @@ export class ProvenanceClient {
     }
     return error;
   }
+}
+
+/**
+ * A wallet's "user rejected the request" (EIP-1193 code 4001; viem's
+ * UserRejectedRequestError), here or in the error's cause chain.
+ */
+function isWalletRejection(error: unknown): boolean {
+  for (let e = error, depth = 0; e && typeof e === 'object' && depth < 8; e = (e as { cause?: unknown }).cause, depth++) {
+    const { code, name } = e as { code?: unknown; name?: unknown };
+    if (code === 4001 || name === 'UserRejectedRequestError') return true;
+  }
+  return false;
 }
 
 /** Stand-in stamp_id while the stamp is not known yet: as long as a batch ID (64 hex characters) */
