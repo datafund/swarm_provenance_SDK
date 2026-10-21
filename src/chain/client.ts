@@ -750,6 +750,13 @@ export class ChainClient {
     validateStorageRefFor(hash, normalizedStorageRef);
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
+    // registerDataFor requires the signer to be a delegate of actualOwner, and
+    // the contract never lets an address delegate to itself (#123)
+    if (await this.isSigner(actualOwner)) {
+      throw new ChainValidationError(
+        `Invalid owner ${actualOwner}: it is the signer's own address, which cannot be its own delegate. Use anchor() instead.`
+      );
+    }
     await this.checkNotRegistered(hash, dataHash);
 
     const data = encodeRegisterDataFor(hash, dataType, ownerAddress, normalizedStorageRef);
@@ -1070,6 +1077,18 @@ export class ChainClient {
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
     items.forEach((item) => validateStatus(item.status));
+    // The contract applies the items in order; a hash given again with the status
+    // its previous entry already set reverts 'Status unchanged' (#123)
+    const lastStatus = new Map<string, DataStatus>();
+    items.forEach((item, i) => {
+      const key = hashes[i]!.toLowerCase();
+      if (lastStatus.get(key) === item.status) {
+        throw new ChainValidationError(
+          `Item ${i}: ${item.dataHash} repeats the status ${item.status} set by its previous entry in this batch (the contract reverts 'Status unchanged')`
+        );
+      }
+      lastStatus.set(key, item.status);
+    });
     const statuses = items.map((item) => item.status as number);
     const data = encodeBatchSetDataStatus(hashes, statuses);
     // After local validation, before any network call (#115/#116)

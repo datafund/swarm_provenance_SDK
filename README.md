@@ -561,8 +561,10 @@ bytes; a transformation description that is empty or over 256 UTF-8 bytes; a `st
 to its data hash, or an encrypted (128 hex) Swarm reference, which does not fit the contract's
 `bytes32`; duplicate hashes or storage references in one `batchAnchor()` call; duplicate merge
 sources, or a merge's new hash among its sources; a transformation from a hash to itself; a
-status other than 0, 1 or 2; the zero address as owner, new owner or delegate; and the signer's
-own address as new owner or delegate (checked after the chain check, still before sending).
+status other than 0, 1 or 2; a hash repeated in one `batchSetDataStatus()` call with the status
+its previous entry in that call already sets; the zero address as owner, new owner or delegate;
+and the signer's own address as new owner, delegate, or `anchorFor()` owner (use `anchor()` to
+register for yourself). The signer checks run after the chain check, still before sending.
 Addresses, in reads and writes, may be all lowercase, all uppercase or EIP-55 checksummed; a
 mixed-case address with a wrong checksum is refused (`ChainValidationError`, or
 `ChainConfigurationError` for `contractAddress`).
