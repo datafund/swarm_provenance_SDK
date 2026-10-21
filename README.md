@@ -658,7 +658,9 @@ message comes from Node itself.
   (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
   instead of being sent to the gateway. `isValidSwarmReference()` now accepts 128-character
   encrypted references and the `0x` prefix.
-- A `Retry-After` header given as an HTTP date is honoured (#123). Before, it was read as `NaN`:
+- A `Retry-After` header given as an HTTP date is honoured (#123): the RFC 9110 forms only
+  (IMF-fixdate such as `Sun, 06 Nov 1994 08:49:37 GMT`, and the obsolete RFC 850 and asctime
+  forms), always read as GMT. Before, it was read as `NaN`:
   the 429 retry (`payment: 'none'` and x402 mode) did not wait, and
   `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
   date now falls back to the normal backoff. This includes a non-integer value such as `"1.5"`:

@@ -237,6 +237,20 @@ describe('retryAfterSeconds (#123)', () => {
     expect(retryAfterSeconds(new Date(now - 60_000).toUTCString(), now)).toBe(0);
   });
 
+  it('reads the obsolete RFC 850 and asctime forms as GMT', () => {
+    const at = Date.UTC(1994, 10, 6, 8, 49, 0);
+    expect(retryAfterSeconds('Sun, 06 Nov 1994 08:49:37 GMT', at)).toBe(37);
+    expect(retryAfterSeconds('Sunday, 06-Nov-94 08:49:37 GMT', at)).toBe(37);
+    expect(retryAfterSeconds('Sun Nov  6 08:49:37 1994', at)).toBe(37);
+  });
+
+  it('gives undefined for text that is not an HTTP date, even if Date.parse accepts it', () => {
+    expect(retryAfterSeconds('foo 1', now)).toBeUndefined();
+    expect(retryAfterSeconds('2026-10-21T12:00:30Z', now)).toBeUndefined();
+    expect(retryAfterSeconds('Wed, 21 Oct 2026 12:00:30 PST', now)).toBeUndefined();
+    expect(retryAfterSeconds('Wed, 32 Oct 2026 12:00:30 GMT', now)).toBeUndefined();
+  });
+
   it('gives undefined for a missing or unreadable value', () => {
     expect(retryAfterSeconds(null, now)).toBeUndefined();
     expect(retryAfterSeconds('', now)).toBeUndefined();
