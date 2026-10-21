@@ -429,8 +429,9 @@ first 4096 characters as text (ending in `…`), and for a body that is not JSON
 also at most 4096 characters. Characters are UTF-16 code units, as JavaScript counts string
 length; a cut never splits a surrogate pair. A 402 message names the price asked, for
 example `0.01 USDC on base-sepolia`: at most three options, then how many more (all are in
-`error.body`), within the 4096-character cap. A signature
-declined in the wallet throws `PaymentRefusedError` (`PAYMENT_REFUSED`).
+`error.body`). The gateway's message is cut to leave room for the price, so both fit
+within the 4096-character cap. A signature declined in the wallet throws
+`PaymentRefusedError` (`PAYMENT_REFUSED`).
 
 How a 429 is handled depends on its code and on the request:
 

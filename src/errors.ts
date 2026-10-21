@@ -64,8 +64,10 @@ export class ProvenanceError extends Error {
   public stampPayment?: import('./types.js').PaymentReceipt;
 
   /**
-   * Gateway error responses only: the response body, parsed if it is JSON,
-   * else its text (at most 4096 characters). Codes and fields the SDK does not map are here.
+   * Gateway error responses only: the response body, parsed if it is JSON of
+   * at most 16384 characters. A larger JSON body, or one that is not JSON, is
+   * kept as its text, cut to 4096 characters with an ellipsis when longer.
+   * Codes and fields the SDK does not map are here.
    */
   public body?: unknown;
 
