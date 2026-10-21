@@ -264,7 +264,8 @@ export class ProvenanceClient {
     try {
       stampId = await this.resolveStampId(options, idempotencyKey);
     } catch (error) {
-      // Nothing uploaded yet: the same key acquires the same (paid) stamp again
+      // Nothing uploaded yet. The hint is only added after a payment, so the
+      // acquisition was paid (payForPool): the same key gets the same stamp again
       throw withRetryHint(error, 'upload()', idempotencyKey);
     }
 
@@ -466,9 +467,12 @@ export class ProvenanceClient {
     }
 
     // Pre-check pool availability to fail fast. Not on a caller's retry with a
-    // key: the first attempt may have taken the last stamp, which the gateway
-    // replays for that key even though the pool now looks empty.
-    if (options.idempotencyKey !== undefined) {
+    // key when the acquisition is paid (payForPool): the first attempt may have
+    // taken the last stamp, which the gateway replays for that key even though
+    // the pool now looks empty. An unpaid acquisition sends no key, so nothing
+    // is replayed and the pre-check runs as for any other call (#109).
+    const paidAcquisition = typeof this.paymentMode === 'object' && this.paymentMode.payForPool === true;
+    if (options.idempotencyKey !== undefined && paidAcquisition) {
       return (await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey)).batchId;
     }
     try {

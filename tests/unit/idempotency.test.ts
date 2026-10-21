@@ -274,6 +274,18 @@ describe('review round 2 (#153)', () => {
     }
   });
 
+  it('without payForPool, a keyed upload still runs the pool status pre-check (#109)', async () => {
+    // Unpaid acquisition sends no key, so the gateway has no stamp to replay
+    await client().upload('hello', { idempotencyKey: 'k1' });
+    expect(seen.filter((s) => s.path === '/api/v1/pool/status')).toHaveLength(1);
+
+    // A paid acquisition with a key still skips it
+    seen = [];
+    poolPaid = true;
+    await client(PAY_FOR_POOL).upload('hello', { idempotencyKey: 'k2' });
+    expect(seen.filter((s) => s.path === '/api/v1/pool/status')).toHaveLength(0);
+  });
+
   it('retry advice does not double a full stop', async () => {
     poolPaid = true;
     paidAnswers = [{ status: 502, body: { detail: { message: 'Bee down', suggestion: 'Try later.' } } }];
