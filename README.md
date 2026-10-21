@@ -99,7 +99,12 @@ try {
   await client.upload(data);
 } catch (error) {
   // PaymentOutcomeError needs a person, not a retry (see below)
-  if (error instanceof ProvenanceError && !(error instanceof PaymentOutcomeError) && error.payment?.idempotencyKey) {
+  if (
+    error instanceof ProvenanceError &&
+    !(error instanceof PaymentOutcomeError) &&
+    error.code !== 'IDEMPOTENCY_KEY_REUSED' &&
+    error.payment?.idempotencyKey
+  ) {
     const { idempotencyKey, stampId } = error.payment;
     await client.upload(data, { idempotencyKey, ...(stampId ? { stampId } : {}) });
   }
@@ -108,7 +113,8 @@ try {
 
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
-(so `onBeforePayment` runs again), at most 3 signatures per request. The gateway does not charge
+(so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
+for its pool stamp makes two paid requests). The gateway does not charge
 those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
 upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
 

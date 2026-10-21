@@ -452,7 +452,12 @@ export class ProvenanceClient {
       return options.stampId;
     }
 
-    // Pre-check pool availability to fail fast
+    // Pre-check pool availability to fail fast. Not on a caller's retry with a
+    // key: the first attempt may have taken the last stamp, which the gateway
+    // replays for that key even though the pool now looks empty.
+    if (options.idempotencyKey !== undefined) {
+      return (await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey)).batchId;
+    }
     try {
       const status = await this.poolStatus();
       if (status.enabled && status.totalStamps === 0) {
@@ -946,7 +951,7 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;
-  error.message += `. To retry without paying twice, call ${operation} again with ${args}`;
+  error.message += `${/[.!?]$/.test(error.message) ? '' : '.'} To retry without paying twice, call ${operation} again with ${args}`;
   return error;
 }
 

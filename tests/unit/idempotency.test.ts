@@ -247,6 +247,39 @@ describe('retrying a timed-out paid upload (#102 acceptance)', () => {
   });
 });
 
+describe('review round 2 (#153)', () => {
+  it('a retry with a key skips the empty-pool pre-check: the paid stamp is replayed', async () => {
+    poolPaid = true;
+    const status = vi.fn(() => ({ enabled: true, total_stamps: 0, current_levels: {}, reserve_config: {} }));
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      // Read the URL without consuming a Request body, which gateway() still needs
+      const url = input instanceof Request ? input.url : String(input);
+      if (new URL(url).pathname === '/api/v1/pool/status') {
+        return Promise.resolve(new Response(JSON.stringify(status()), { status: 200, headers: { 'content-type': 'application/json' } }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      // Without a key the empty pool still fails fast
+      await expect(client().upload('hello')).rejects.toMatchObject({ code: 'POOL_EXHAUSTED' });
+      // With the first attempt's key it goes to acquisition, which the gateway replays
+      const result = await client().upload('hello', { idempotencyKey: 'retry-1' });
+      expect(result.reference).toBe(REFERENCE);
+      expect(paid().find((s) => s.path === '/api/v1/pool/acquire')?.key).toBe('retry-1');
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+
+  it('retry advice does not double a full stop', async () => {
+    poolPaid = true;
+    paidAnswers = [{ status: 502, body: { detail: { message: 'Bee down', suggestion: 'Try later.' } } }];
+    const error = await client().acquireStamp('small', { idempotencyKey: 'p1' }).catch((e: unknown) => e);
+    expect((error as Error).message).not.toContain('..');
+    expect((error as Error).message).toContain('call acquireStamp() again with idempotencyKey "p1"');
+  });
+});
+
 describe('retry codes: same key, new authorization', () => {
   it('IDEMPOTENCY_KEY_IN_PROGRESS is retried after Retry-After and returns the first result', async () => {
     paidAnswers = [IN_PROGRESS, { status: 200 }];
