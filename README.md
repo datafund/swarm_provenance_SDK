@@ -899,10 +899,11 @@ issue numbers and lists the open release-gate items.
   registered owner is the signer's address, `false` if another address owns the record,
   `undefined` if the owner could not be read. For `anchorFor()`, compare `error.owner` with the
   owner you passed.
-- `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
-  `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
-  rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch
-  and returned the partial graph as if complete.
+- `getProvenanceChain()` fails closed: an RPC error in a node's child or parent lookup rejects
+  the call with `ChainConnectionError` naming the node, and a linked hash that reads as
+  unregistered rejects with `DataNotRegisteredError`. 0.6.1 already threw an RPC error from a
+  node's own record read, but it ignored errors from the child and parent lookups and skipped
+  unregistered linked hashes, then returned the partial graph as if complete.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
@@ -946,6 +947,10 @@ issue numbers and lists the open release-gate items.
   invalid signatures, signatures by other keys, and any document when no notary address is
   available. Results gain `verification`; `DownloadOptions` gains `notaryAddress`
   (a malformed one throws `INVALID_INPUT`).
+- `verified` is now `true` when at least one signature by the expected notary is valid
+  (`anyValid`, #113); 0.6.1 required every signature to pass (`allValid`). A document with one
+  valid notary signature and one invalid signature changed from `verified: false` to `true`.
+  `verification.results` shows each signature.
 - `verifySignature` / `verifyAllSignatures` are invalid without an expected signer;
   `verifyAllSignatures([])` gives `allValid: false` (was `true`) and now also returns
   `anyValid`. `verifyDataHash` accepts only `hashed_fields: ['data']`.
@@ -984,8 +989,8 @@ issue numbers and lists the open release-gate items.
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry
   `payment.idempotencyKey` (and `payment.stampId` for uploads). The three idempotency answers
   that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
-  (not `StampError` / `NotaryError`). Gateway error messages are read from the top-level
-  `message` of the error envelope when `detail` has none.
+  (not `StampError` / `NotaryError`). Gateway error messages use the top-level `message` of
+  the error envelope first, whatever `detail` holds (see "Error handling (#112)" below).
 - Paid results carry the payment receipt (#111): `payment` on `UploadResult`,
   `DocumentUploadResult` and `AcquiredStamp`, and `stampPayment` on upload results when
   `upload()` paid for its pool stamp. Errors from `upload()` after a pool acquisition carry

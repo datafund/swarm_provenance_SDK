@@ -13,20 +13,37 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - In x402 mode, `payment.maxAmount` is required on any network other than Base Sepolia test
   USDC. On Base Sepolia it defaults to `'1'`. (#106)
-- `PaymentWallet` is now a type, not an interface. It requires `address` or `account.address`.
-  Code that has `interface X extends PaymentWallet` must use an intersection type. (#106)
+- `PaymentWallet` changed from an interface to a union type. It still accepts a wallet with
+  `address`, and now also one with `account.address`, such as a viem `WalletClient`. Code that
+  has `interface X extends PaymentWallet` must use an intersection type. (#122, PR #136)
 - `download()` and `downloadDocument()` report `verified: false` for documents that 0.6.1
   reported as verified. This covers empty, missing or invalid signatures, signatures by other
   keys, and every document when no notary address is available. (#113)
+- `verified` is now `true` when at least one signature by the expected notary is valid
+  (`anyValid`). 0.6.1 required every signature to pass (`allValid`). A document with one valid
+  notary signature and one invalid signature changed from `verified: false` to `true`. Check
+  `verification.results` to see each signature. (#113, PR #135)
+- When the notary address lookup fails, the download returns `verified: false` with
+  `verification.error`. In 0.6.1 the download rejected. (#113, PR #135)
 - `verifySignature()` and `verifyAllSignatures()` report every signature as invalid without an
-  expected signer.
-  `verifyAllSignatures([])` returns `allValid: false` (it returned `true`). `verifyDataHash()`
-  accepts only `hashed_fields: ['data']`. (#113)
+  expected signer. `verifyAllSignatures([])` returns `allValid: false` (it returned `true`).
+  `verifyDataHash()` accepts only `hashed_fields: ['data']`. (#113)
 - Raw documents (`raw: true`) use SHA-256 of canonical JSON as `content_hash`. This version
-  still reads the old form. SDK 0.6.x rejects documents uploaded with this version. (#114)
-- `ChainSigner` requires `getChainId()`. (#115)
+  still reads the old form. SDK 0.6.x may reject documents uploaded with this version: it hashed
+  `JSON.stringify(data)`, which matches the canonical form only when the keys are already
+  sorted. (#114)
+- `ChainSigner` requires `getChainId()`, and `sendTransaction()` receives an optional
+  `chainId`. The parameter type of `fromViemWalletClient()` now requires `getChainId()`, so
+  hand-typed mocks without it no longer typecheck. (#115, PR #139)
 - A config with only `payment.network: 'eip155:8453'` now pays in mainnet USDC on the
   gateway's x402 v1 path too. Before, it paired with Base Sepolia for v1. (#108)
+- An unknown CAIP-2 `payment.network` without `payment.v1Network` is a configuration error.
+  0.6.1 used `'base-sepolia'` for v1. (#108, PR #140)
+- In x402 mode, `new ProvenanceClient()` throws `PaymentConfigurationError` for an invalid
+  payment config, such as a mainnet config without `maxAmount`. In 0.6.1 the constructor threw
+  nothing. (#106, PR #138)
+- `new ProvenanceClient()` throws `INVALID_INPUT` when `maxUploadBytes` is not a positive
+  integer. (#112)
 - In x402 mode, `acquireStamp()` and `upload()` without `stampId` no longer pay for pool
   stamps unless `payment.payForPool` is `true`. Without it, a 402 from the pool throws
   `StampError`. (#109)
@@ -43,8 +60,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `BASE_SEPOLIA`, `BASE_MAINNET` and `CHAIN_PRESETS` are frozen and typed `Readonly`. TypeScript
   and strict-mode code reject changes to them. Sloppy-mode CommonJS code ignores the change
   silently. (#101, PR #105)
-- For the three idempotency stop codes, `acquireStamp()` and notary uploads throw the new
-  `PaymentOutcomeError` instead of `StampError` or `NotaryError`. (#102)
+- For the three idempotency stop codes (`IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN`,
+  `IDEMPOTENCY_KEY_SETTLED_PENDING`, `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED`), `acquireStamp()`
+  and notary uploads throw the new `PaymentOutcomeError` instead of `StampError` or
+  `NotaryError`. (#102)
 - In `'free'` mode, a 429 whose code is not a rate limit no longer throws
   `PaymentRateLimitError`. The call throws an error with the gateway's code instead. Examples
   are `DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_SPEND_BUDGET_EXHAUSTED` and
@@ -59,8 +78,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `GatewayConnectionError` with code `INVALID_RESPONSE`. Before, a raw `SyntaxError` escaped.
   (#107, PR #138)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
-  on the wrong chain now asks the wallet to switch, adding the chain if the wallet does not know
-  it. Wallet users see a new prompt. (#115, PR #139)
+  on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
+  `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)
+- If the wallet does not know the chain, it is asked to add it. This happens only for the
+  built-in presets, and with `fromViemWalletClient` only when the client has `addChain`. A
+  custom preset's chain must be added to the wallet by hand. (#115, PR #139)
 
 ### Payments (x402 mode)
 
@@ -79,8 +101,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `upload()` and `acquireStamp()` take your own key in the `idempotencyKey` option. (#102)
 - Errors after a payment carry `payment.idempotencyKey`, and `payment.stampId` for uploads.
   (#102)
-- Paid attempts use `paidTimeout`. Its default is the larger of `timeout` and 120 seconds.
-  (#102)
+- Attempts that may pay, and owner-proof uploads, use the new `paidTimeout` option instead of
+  `timeout`. Its default is the larger of `timeout` and 120 seconds. (#102, #124)
 - Paid results carry the payment receipt in `payment`, and `stampPayment` when `upload()` paid
   for its pool stamp. (#111)
 - Errors from `upload()` after a pool acquisition carry `stampId`, and `stampPayment` when the
@@ -103,9 +125,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `DownloadOptions` gains `notaryAddress`. (#113)
 - A malformed `notaryAddress` throws `INVALID_INPUT`. (#113)
 - `verifyAllSignatures()` also returns `anyValid`. (#113)
-- `verifySignature()` refuses any `signed_message_format` other than `'{data_hash}|{timestamp}'`.
+- `verifySignature()` refuses any `signed_message_format` other than
+  `'{data_hash}|{timestamp}'`. (#113, PR #135)
+- `recoverSigner()` works and is exported. In 0.6.1 it threw `NOT_IMPLEMENTED`. (#113, PR #135)
+- New runtime dependency: `@noble/curves` `^1.9.1`, used for signature recovery.
   (#113, PR #135)
-- New runtime dependency: `@noble/curves` `^1.9.1`, used for signature recovery. (#113, PR #135)
 - `downloadDocument()` accepts genuine notary signatures that 0.6.1 rejected. (#114)
 - The README and docs state only the guarantees the code gives. The content-hash check is a
   self-consistency check only. (#122, #123)
@@ -117,8 +141,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   changes. (#115)
 - A write succeeds only when the contract's event is in the receipt. Otherwise it throws
   `ChainTransactionError` with `txHash`. (#116)
-- A missing receipt throws `ReceiptTimeoutError` with `txHash`. Resume with
-  `waitForTransaction()`. (#117)
+- A missing receipt throws `ReceiptTimeoutError` with `txHash`. Resume with the new
+  `ChainClient.waitForTransaction()` method. (#117)
 - Error messages no longer contain RPC URLs or request bodies. (#118)
 - `ChainTransactionError.originalError` is not enumerable. (#118)
 - RPC read errors in the pre-checks before a write (already registered, duplicate
@@ -126,22 +150,25 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `ChainClient` fails over between RPC endpoints. The new `ChainClientConfig.rpcFallbacks`
   option sets the fallback list. An explicit `rpcUrl` that is not one of the preset's URLs gets
   no public fallbacks unless you set `rpcFallbacks`. (#101, PR #105)
-- The `base-sepolia` primary RPC is
-  `base-sepolia-rpc.publicnode.com`. `sepolia.base.org` is no longer the primary; it is the last
-  fallback. (#101, #86)
+- `ChainPreset` has a new optional `rpcFallbacks` field for custom presets. (#101, PR #105)
+- The `base-sepolia` primary RPC is `base-sepolia-rpc.publicnode.com`. `sepolia.base.org` is no
+  longer the primary; it is the last fallback. (#101, #86)
 - `getProvenanceChain()` records carry `parents`. (#100)
-- `getProvenanceChain()` fails closed. An RPC error on any node throws
-  `ChainConnectionError`, and an unregistered linked hash throws `DataNotRegisteredError`.
-  Before, the branch was dropped and the partial graph returned. (#100, PR #132)
+- `getProvenanceChain()` fails closed. An RPC error in a node's child or parent lookup now
+  throws `ChainConnectionError` naming the node. A linked hash that reads as unregistered throws
+  `DataNotRegisteredError`. 0.6.1 already threw an RPC error from a node's own record read, but
+  it ignored errors from the child and parent lookups and skipped unregistered linked hashes.
+  It then returned the partial graph. (#100, PR #132)
 - `getProvenanceChain()` throws `ChainValidationError` for a `NaN` `maxDepth`. Before, `NaN`
   turned off the depth limit. (#100, PR #132)
 - A fractional `maxDepth` is floored. Before, it was used as given. (#100, PR #132)
 - The CommonJS `/chain` entry throws an error that names `viem` when viem is missing. (#99)
 - Chain writes no longer retry "replacement underpriced". (#123)
-- For wallet signers, "replacement underpriced" and "already known" throw
+- For every signer, a send that fails with "replacement underpriced" or "already known" throws
   `ChainTransactionError` that says the transaction may still confirm. (#123)
-- For `fromPrivateKey` signers, "already known" returns the hash of the signed transaction, and
-  the write waits for its receipt. (#123)
+- A `fromPrivateKey` signer handles "already known" itself: it returns the hash of the signed
+  transaction, and the write waits for its receipt. Its "replacement underpriced" still throws
+  the error above. (#123)
 - `fromPrivateKey` signers prepare, sign and send the raw transaction themselves, with the same
   steps as viem's `sendTransaction` for a local account. (#123)
 - Writes check their input and throw `ChainValidationError` before any network call, instead of
@@ -153,9 +180,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `gasLimit` that is not a positive integer. (#123)
 - A mixed-case address with a wrong EIP-55 checksum throws `ChainValidationError` before any
   network call. An all-uppercase address is accepted and sent in lowercase. (#123)
-- Write results that echo an input address (`anchorFor().owner`, `transferOwnership().newOwner`,
-  `setDelegate().delegate`) hold the address that was sent. An all-uppercase input comes back
-  in lowercase. (#123)
+- Write results that echo an input address (`anchorFor().owner`,
+  `transferOwnership().newOwner`, `setDelegate().delegate`) hold the address that was sent. An
+  all-uppercase input comes back in lowercase. (#123)
 - `getProvenanceChainResult()` is new. It says whether `maxDepth` cut the lineage off. (#123)
 - `DataAlreadyRegisteredError` gains `ownedBySigner`. (#123)
 
@@ -163,8 +190,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - Gateway errors show the gateway's message, keep the response in `error.body`, and a 402
   message names the price. PR #170 merged this and the other #112 changes. (#112)
-- Gateway error messages are read from the top-level `message` of the error envelope when
-  `detail` has none. (#102)
+- Gateway error messages use the top-level `message` of the error envelope first, whatever
+  `detail` holds. A `detail.detail` text is added when the message lacks it. 0.6.1 read only
+  `detail`. (#102, #112)
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body". (#112)
 - `error.body` holds parsed JSON up to 16384 characters. A larger or non-JSON body is kept as
@@ -178,6 +206,16 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   the normal backoff. Before, `"1.5"` was read as 1 second. (#123)
 - `isValidSwarmReference()` accepts 128-character encrypted references and the `0x` prefix.
   (#123)
+- New error codes from the SDK: `PAYMENT_REFUSED` (`PaymentRefusedError`), `PAYMENT_FAILED`,
+  `PAYMENT_UNCONFIRMED`, `PAYMENT_REQUIRED` (pool `StampError` without a gateway code),
+  `INVALID_RESPONSE`, `FILE_TOO_LARGE` (also before any request), `OWNER_PROOF_FAILED`, and
+  `INVALID_SIGNATURE` (`recoverSigner()`). `UNSUPPORTED_SIGNATURE` is used for an unsupported
+  message format; `verifySignature()` reports it as an invalid signature with an error text.
+  (#102, #106, #107, #109, #112, #113, #124)
+- Gateway codes the SDK now handles: `IDEMPOTENCY_KEY_IN_PROGRESS` and
+  `IDEMPOTENCY_UNAVAILABLE` (retried), `IDEMPOTENCY_KEY_REUSED` and `IDEMPOTENCY_KEY_INVALID`
+  (thrown with the gateway's code), and the three stop codes above. (#102)
+- The code `NOT_IMPLEMENTED` is no longer used. (#113)
 
 ### New
 
@@ -185,6 +223,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `UploadOptions.ownerSigner` uploads to a stamp you own with a signed owner proof instead of a
   payment. An owner-proof upload uses the free tier and never pays, in any payment mode. (#124)
 - Upload results and `AcquiredStamp` gain `expiresAt`. (#112)
+- New client options: `paidTimeout` (#102) and `maxUploadBytes` (#112). New x402 options:
+  `maxAmount`, `asset`, `assetDecimals`, `payTo`, `maxTimeoutSeconds`, `onBeforePayment`,
+  `payForReads` (#106) and `payForPool` (#109).
+- Errors gain `body` (#112), `payment` (#107, #111), and on upload errors `stampId` and
+  `stampPayment` (#111). `PaymentRefusedError` has `refusals`, `PaymentOutcomeError` has
+  `outcome`, and `ReceiptTimeoutError` has `txHash`, `explorerUrl` and `expected`.
 - New exports from `@datafund/swarm-provenance`:
   - Errors: `PaymentOutcomeError` (#102), `PaymentRefusedError` (#106).
   - Payment types: `PaymentReceipt` (#111), `PaymentRequest` (#106), and the type
