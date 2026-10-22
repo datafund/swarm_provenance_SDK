@@ -393,7 +393,8 @@ describe('owner-proof options and isolation', () => {
       }
       return Promise.resolve(json(200, { reference: REFERENCE }));
     });
-    const c = client({ wallet });
+    // A paid pool acquisition needs payForPool since #109
+    const c = client({ wallet, payForPool: true });
 
     await c.upload('hello', { stampId: STAMP, ownerSigner: wallet });
     await c.pricing();

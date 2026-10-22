@@ -55,6 +55,20 @@ export interface ChainProvenanceRecord {
   parents?: string[];
 }
 
+/** Result of getProvenanceChainResult: the records plus whether the traversal covered the whole DAG */
+export interface ProvenanceChainResult {
+  /** Same records, in the same order, as getProvenanceChain returns */
+  records: ChainProvenanceRecord[];
+  /**
+   * True if maxDepth cut nothing off, so the records are the whole connected
+   * DAG. False if a node at maxDepth has a parent or child that was not
+   * visited, or its parents could not be looked up.
+   */
+  complete: boolean;
+  /** Hashes of the nodes at maxDepth with an unvisited neighbour or a failed parent lookup (empty when complete) */
+  truncated: string[];
+}
+
 /** Base result for all write transactions */
 export interface TransactionResult {
   txHash: Hex;

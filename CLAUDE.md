@@ -55,14 +55,14 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 6. Use `client.upload(jsonObj, { raw: true })` or `client.upload(jsonStr, { raw: true })`
 
 ### Download (default)
-1. GET reference from gateway
+1. Validate the reference (`checkedReference`: 64 or 128 hex, optional `0x` removed; else `INVALID_INPUT`, no request), then GET it from the gateway
 2. Parse response as ProvenanceMetadata (+ optional signatures)
-3. Verify content_hash matches decoded data (base64)
+3. Verify content_hash matches decoded data (base64). Self-consistency only: hash and data come from the same response, so this does not bind the data to the reference (#123)
 4. If signed, verify signatures against notary address
 5. Return decoded file content as `Uint8Array`
 
 ### Download (document)
-1. GET reference from gateway
+1. Validate the reference (as above), then GET it from the gateway
 2. Parse response — `data` field is raw JSON object (not base64)
 3. Verify content_hash matches the canonical JSON of `data` (lossless, from the response text), or `JSON.stringify(data)` for SDK 0.6.x uploads
 4. If signed, verify signatures
@@ -74,7 +74,10 @@ Base URL: `https://provenance-gateway.datafund.io` (default)
 - `const target = await this.ensureWriteTarget()` in every write method, after local validation and before any network call; `sendAndWait(data, expected, target)` requires that token, so a new write method cannot skip the check. `ensureWriteTarget()`: RPC `getChainId()` and contract `getBytecode()` once per client (cached; retried after a failure), signer `getChainId()` every write (`switchChain()` if the signer has it, one shared request at a time; chain details for adding an unknown chain only for built-in presets). Mismatch or declined switch → `ChainConfigurationError`; signer unreachable → `ChainConnectionError`; nothing sent.
 - `sendAndWait(data, { event, count })`: success requires `count` logs of `event` emitted by `contractAddress`, decoded with the embedded ABI (verified against live Base Sepolia logs). Event per write: anchor/anchorFor/batchAnchor `DataRegistered`, recordAccess `DataAccessed`, recordTransformation `DataTransformed`, mergeTransform `DataMerged`, setDataStatus `DataStatusChanged`, transferOwnership `DataOwnershipTransferred`, setDelegate `DelegateAuthorized`.
 - Pre-checks only proceed on `DataNotRegisteredError`; any other read error is thrown.
+- Write input checks (#123, `validation.ts`), all before `ensureWriteTarget()`: zero data/source hash, data type non-empty after trimming (stricter than the contract, which accepts whitespace-only; same rule for every method) and ≤ 64 UTF-8 bytes, description 1-256 bytes, storageRef ≠ data hash and not 128-hex, no duplicates within one call, new hash not a merge source, status 0-2, non-zero owner/new owner/delegate. Addresses go through `normalizeAddress()` (viem's rules: lowercase as is, all-uppercase lowercased because viem rejects it, mixed case must match `getAddress()`), and the normalized form is what reaches viem and what results echo (`owner`, `newOwner`, `delegate`). `batchSetDataStatus` refuses a hash repeated with the status its previous entry in the batch sets ("Status unchanged"); `[h:1, h:2]` is allowed. After `ensureWriteTarget()` and before sending: `transferOwnership`, `setDelegate` and `anchorFor` refuse the signer's own address ("Already the owner", "Cannot delegate to self", "Not authorized delegate"). The class (i)/(ii) split of every reachable contract revert is in the PR #160 summary: only reverts that hold whatever the chain state are checked locally. Only rules whose revert reason was confirmed by `eth_call` against the deployed Base Sepolia contract were added; the deployed contract accepts a zero new hash in `recordTransformation` and a zero `storageRef` (= none), so those are not refused.
+- `DataAlreadyRegisteredError.ownedBySigner` (#123): on-chain owner vs `signer.getAddress()`, case-insensitive; `undefined` when the owner could not be read.
 - All chain error text goes through `rpcErrorMessage()` (drops viem URL/body sections, redacts URLs).
+- Send retries (`sendWithRetry`) only on "nonce too low/high". "replacement underpriced" and "already known" are not retried and say the tx may still confirm (#123). "Already known" is recognised in one place, `isAlreadyKnown()` / `ALREADY_KNOWN` in `chain/errors.ts` (geth "already known", Nethermind "AlreadyKnown", "already imported", "known transaction" at the start; word-anchored), used by both `ChainClient` and `fromPrivateKey`. `fromPrivateKey` runs viem's local-account send steps itself (`prepareTransactionRequest` → `account.signTransaction` → `sendRawTransaction`, errors wrapped with `getTransactionError`) so that on "already known" it returns `keccak256(signed tx)`; viem would map that answer to `NonceTooLowError`. `tests/unit/chain/signer-private-key.test.ts` drives it against a stubbed JSON-RPC endpoint with a generated key.
 
 ## Notary Signature Verification
 
@@ -130,7 +133,8 @@ src/
 ├── utils.ts      # SHA256, base64, helpers
 ├── canonical-json.ts # Python-compatible canonical JSON (lossless parser)
 └── chain/        # Blockchain anchoring (sub-path: ./chain)
-    ├── index.ts      # Public exports for @datafund/swarm-provenance/chain
+    ├── index.ts      # Public exports for @datafund/swarm-provenance/chain (Node)
+    ├── browser.ts    # Same exports minus fromPrivateKey ("browser" condition)
     ├── client.ts     # ChainClient class
     ├── contract.ts   # ABI encode/decode via viem
     ├── types.ts      # Chain types (ChainProvenanceRecord, AnchorResult, etc.)
@@ -138,7 +142,7 @@ src/
     ├── abi.ts        # Embedded DataProvenance contract ABI
     ├── constants.ts  # Chain presets (Base Sepolia, Base mainnet)
     ├── signer.ts     # ChainSigner interface + factory helpers
-    └── validation.ts # Hash normalization, input validation
+    └── validation.ts # Hash normalization, input validation (contract limits confirmed by eth_call on Base Sepolia, #123)
 ```
 
 ## Testing Strategy
@@ -183,8 +187,9 @@ Chain entry (`@datafund/swarm-provenance/chain`):
 - ESM: `dist/chain/index.js`
 - CJS: `dist/chain/index.cjs`
 - Types: `dist/chain/index.d.ts`
+- Browser (`browser` export condition, listed first; #123): `dist/chain/browser.{js,cjs,d.ts,d.cts}` from `src/chain/browser.ts`, the same exports minus `fromPrivateKey`. `src/chain/index.ts` and `browser.ts` keep explicit export lists; `tests/unit/build/browser-entry.test.ts` checks they differ only by `fromPrivateKey`. The browser types come from a second tsup config (`dts: { only: true }`): one declaration build over both entries would put the shared declarations in `browser.d.ts` and re-export `fromPrivateKey` from it under a generated alias.
 
-Built with tsup for dual ESM/CJS output. viem is externalized.
+Built with tsup for dual ESM/CJS output. viem is externalized. `tsup.config.ts` has two configs that tsup builds concurrently, so neither uses `clean`; `pnpm build` deletes `dist/` before running tsup. The viem require guard (#99) is applied to both `dist/chain/index.cjs` and `dist/chain/browser.cjs`.
 
 ## Dev Commands
 
@@ -251,11 +256,11 @@ The gateway supports the x402 payment protocol for paid access with higher rate 
 |------|--------|----------|
 | Free (default) | `payment: 'free'` | Sends `X-Payment-Mode: free` header. Rate-limited (3 req/min). |
 | None | `payment: 'none'` | No payment header. Gets raw 402 responses. |
-| x402 paid | `payment: { wallet, maxAmount?, ... }` | Writes paid in USDC via `@x402/fetch`, within the payment policy. Reads use the free tier (rate-limited) unless `payForReads`. |
+| x402 paid | `payment: { wallet, maxAmount?, ... }` | Writes paid in USDC via `@x402/fetch`, within the payment policy. Reads use the free tier (rate-limited) unless `payForReads`. Pool acquisition is not paid unless `payForPool`. |
 
 **Dependencies for x402 mode**: `@x402/fetch` and `@x402/evm` (optional peer deps, dynamically imported). Peer range `>=2.5.0 <2.29.0`: the lockfile tests the lower bound, a CI step re-runs the payment tests on 2.23.0 (first with the $1 spend cap) and 2.28.0. Widen only after testing a newer version there.
 
-**Payment policy** (`src/payment.ts`, #106/#107/#110): the SDK's inner fetch (under `wrapFetchWithPayment`) reads every 402 first, refuses options outside the policy (`maxAmount`, USDC asset, `payTo`, `maxTimeoutSeconds`, scheme `exact`, EIP-3009 only, `onBeforePayment`) with `PaymentRefusedError`, and narrows `accepts` to the one approved option. `onBeforePaymentCreation` re-checks the library's selection before signing. On 2.23+ `setSpendControls` is aligned with `maxAmount`. Reads use the free tier unless `payForReads`. `createX402Transport()` sets up once and hands out `fetchFor(state)` per request attempt: a fresh x402 client whose hooks, and the SDK's inner fetch, record into that attempt's `PaymentAttemptState` (`paid` only when a payment header goes out with a live signal; `refusal`; `creationFailure`). `requestFailure()` classifies errors from that state, never from error text. Paid attempts are never retried and their errors carry `payment`; unpaid attempts retry normally. Exception (#102): paid writes carry an `Idempotency-Key` (one per logical operation: `upload()` passes one key to both the pool acquisition and the upload; `operationKey()` validates a caller's key), and a paid attempt answered `IDEMPOTENCY_KEY_IN_PROGRESS` (409) or `IDEMPOTENCY_UNAVAILABLE` (503) is retried with the same key and a new authorization, at most `MAX_IDEMPOTENT_RETRIES` (3 signatures per request). Retry advice is added at the operation level (`withRetryHint`): `upload()` names the key and the stamp (the gateway hashes the query, `stamp_id` included), `acquireStamp()` the key; none for the stop codes or REUSED/INVALID. The gateway's `X-Payment-Transaction: unknown` placeholder is dropped. The three stop codes map to `PaymentOutcomeError` in `handleError()` (`PAYMENT_OUTCOMES`). Attempts that may pay use `paidTimeout`. `tests/unit/idempotency.test.ts` drives this against a stubbed gateway. The client timeout bounds the whole attempt, including `onBeforePayment` and wallet signing (`untilAborted`). The policy checks the network configured for the 402's x402 version, and the amount field that version signs. `maxAmount` defaults only on Base Sepolia test USDC. `tests/unit/x402-policy.test.ts` drives the real libraries against a stubbed gateway.
+**Payment policy** (`src/payment.ts`, #106/#107/#110): the SDK's inner fetch (under `wrapFetchWithPayment`) reads every 402 first, refuses options outside the policy (`maxAmount`, USDC asset, `payTo`, `maxTimeoutSeconds`, scheme `exact`, EIP-3009 only, `onBeforePayment`) with `PaymentRefusedError`, and narrows `accepts` to the one approved option. `onBeforePaymentCreation` re-checks the library's selection before signing. On 2.23+ `setSpendControls` is aligned with `maxAmount`. Reads use the free tier unless `payForReads`. Pool acquisition (#109) goes through plain fetch, without the free-tier header (the gateway ignores it there), unless `payForPool` (`fetch()` option `payable: false`): once the shared daily allowance is spent the pool answers 402 where a payment bypasses it, else 429, both with `DAILY_STAMP_ALLOWANCE_EXHAUSTED`, and the 429 must stay a `StampError`, not a free-tier `PaymentRateLimitError`; and `acquireWithKey()` turns an unpaid 402 into a `StampError` that keeps the gateway's code (fallback `PAYMENT_REQUIRED`) and names `payForPool`. `createX402Transport()` sets up once and hands out `fetchFor(state)` per request attempt: a fresh x402 client whose hooks, and the SDK's inner fetch, record into that attempt's `PaymentAttemptState` (`paid` only when a payment header goes out with a live signal; `refusal`; `creationFailure`). `requestFailure()` classifies errors from that state, never from error text. Paid attempts are never retried and their errors carry `payment`; unpaid attempts retry normally. Exception (#102): paid writes carry an `Idempotency-Key` (one per logical operation: `upload()` passes one key to both the pool acquisition and the upload; `operationKey()` validates a caller's key), and a paid attempt answered `IDEMPOTENCY_KEY_IN_PROGRESS` (409) or `IDEMPOTENCY_UNAVAILABLE` (503) is retried with the same key and a new authorization, at most `MAX_IDEMPOTENT_RETRIES` (3 signatures per request). Retry advice is added at the operation level (`withRetryHint`): `upload()` names the key and the stamp (the gateway hashes the query, `stamp_id` included), `acquireStamp()` the key; none for the stop codes or REUSED/INVALID. The gateway's `X-Payment-Transaction: unknown` placeholder is dropped. Receipt (#111): `onBeforePaymentCreation` records the requirement it clears in `state.approved`, and `paidResponses` keeps it with the key. `receiptOf()` puts a `PaymentReceipt` on paid results (`payment` on upload results and `AcquiredStamp`; `stampPayment` for the pool stamp an `upload()` paid for): transaction, network and payer from `X-Payment-Transaction` and the decoded `PAYMENT-RESPONSE` / `X-PAYMENT-RESPONSE`, and `amount` (atomic units), `amountDecimal` and `asset` from what was signed, never from the gateway. A paid response with `X-Payment-Mode: free-tier` or a receipt with `success: false` gets no `payment`. `paymentAttempt()` adds network, payer and amount to `error.payment` only when a receipt header decodes; `handleError()` takes a missing transaction from the body (`detail.transaction` or top-level `transaction`, the shape of the gateway's `_paid_request_crashed`). An `upload()` that fails after a pool acquisition sets `error.stampId` and, if the stamp was paid for, `error.stampPayment`, without setting `error.payment` on a request that did not pay; `withRetryHint()` then says to reuse the stamp. `Idempotent-Replayed: true` (Node only, not CORS-exposed) sets `replayed`: the transaction is the first attempt's, the amount the retry's unsettled authorization. `tests/unit/payment-receipt.test.ts` covers it. The three stop codes map to `PaymentOutcomeError` in `handleError()` (`PAYMENT_OUTCOMES`). Attempts that may pay use `paidTimeout`. `tests/unit/idempotency.test.ts` drives this against a stubbed gateway. The client timeout bounds the whole attempt, including `onBeforePayment` and wallet signing (`untilAborted`). The policy checks the network configured for the 402's x402 version, and the amount field that version signs. `maxAmount` defaults only on Base Sepolia test USDC. `tests/unit/x402-policy.test.ts` drives the real libraries against a stubbed gateway.
 
 **Setup**:
 ```typescript
@@ -378,12 +383,13 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 | `getTransformationParents(hash)` | Read | No | Get parent hashes (reverse traversal) |
 | `getChildHashes(hash)` | Read | No | Get child hashes (lightweight) |
 | `getProvenanceChain(hash, maxDepth?)` | Read | No | BFS traversal of provenance DAG; records carry `parents` (undefined at maxDepth) and `transformationLinks` (children). BFS order, not topological |
+| `getProvenanceChainResult(hash, maxDepth?)` | Read | No | Same traversal, returns `{ records, complete, truncated }` (#123). Also looks up parents of nodes at maxDepth: a node is truncated only if it has an unvisited parent or child, or that lookup fails (fail closed). `getProvenanceChain` skips that lookup |
 | `supportsTransformationLinks()` | Read | No | Detect v2 contract support |
 | `healthCheck()` | Read | No | Check RPC can serve contract reads (probes a real `eth_call`) |
 | `waitForTransaction(txHash, { event?, count?, timeout? })` | Read | No | Wait for a sent tx and check it emitted the expected event |
 | `getBalance()` | Read | Yes | Get signer's ETH balance |
 | `anchor(hash, type, storageRef?)` | Write | Yes | Register hash on-chain (optionally link storage ref) |
-| `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref) |
+| `anchorFor(hash, type, owner, storageRef?)` | Write | Yes | Register on behalf of owner (optionally link storage ref); the signer must be an authorized delegate of `owner` and cannot be `owner` |
 | `getDataHashByStorageRef(ref)` | Read | No | Reverse lookup: storage ref → data hash |
 | `recordAccess(hash)` | Write | Yes | Record access event |
 | `recordTransformation(orig, new, desc)` | Write | Yes | Record 1-to-1 data transformation |

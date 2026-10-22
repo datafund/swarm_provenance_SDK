@@ -69,6 +69,13 @@ export interface X402PaymentConfig {
    * (`X-Payment-Mode: free`, rate-limited) and only writes are paid.
    */
   payForReads?: boolean;
+  /**
+   * Pay for pool stamps (`acquireStamp()`, and `upload()` without `stampId`)
+   * when the gateway asks for payment, e.g. after the daily free allowance is
+   * spent. Default false: that 402 is not paid and the call fails with a
+   * `StampError`. When true, the payment policy above still applies.
+   */
+  payForPool?: boolean;
 }
 
 /** A payment the gateway asked for, as shown to `onBeforePayment` and in refusals */
@@ -277,6 +284,39 @@ export interface SignedDocument {
 }
 
 /**
+ * What a paid request cost, as far as the SDK can tell (#111). Present on a
+ * result only when the request carried a payment the gateway accepted.
+ */
+export interface PaymentReceipt {
+  /**
+   * Settlement transaction, from the gateway's receipt headers. Absent when the
+   * gateway did not send one (e.g. a browser, when CORS hides the headers).
+   */
+  transaction?: string;
+  /** Network the payment was made on: the receipt's, else the one signed for */
+  network?: string;
+  /** Paying address, from the gateway's receipt */
+  payer?: string;
+  /**
+   * Amount the SDK signed, in the token's smallest unit (integer string, e.g.
+   * '10000' = 0.01 USDC). Taken from the approved payment requirement: x402 v1
+   * `maxAmountRequired`, v2 `amount`.
+   */
+  amount?: string;
+  /** `amount` in tokens, with the policy's decimals (e.g. '0.01') */
+  amountDecimal?: string;
+  /** Token contract the amount is in */
+  asset?: string;
+  /**
+   * The gateway replayed the first result for this Idempotency-Key
+   * (`Idempotent-Replayed: true`, readable in Node, not in browsers). The
+   * charge is the first attempt's (`transaction`); `amount` describes this
+   * retry's signed authorization, which the gateway did not settle.
+   */
+  replayed?: true;
+}
+
+/**
  * Result of an upload operation
  */
 export interface UploadResult {
@@ -284,6 +324,10 @@ export interface UploadResult {
   reference: string;
   /** The provenance metadata that was uploaded */
   metadata: ProvenanceMetadata;
+  /** The upload's payment, when it was paid (x402 mode) */
+  payment?: PaymentReceipt;
+  /** The pool stamp's payment, when `upload()` acquired the stamp and paid for it */
+  stampPayment?: PaymentReceipt;
 }
 
 /**
@@ -294,6 +338,10 @@ export interface DocumentUploadResult {
   reference: string;
   /** The document metadata that was uploaded (data is raw JSON, not base64) */
   metadata: DocumentMetadata;
+  /** The upload's payment, when it was paid (x402 mode) */
+  payment?: PaymentReceipt;
+  /** The pool stamp's payment, when `upload()` acquired the stamp and paid for it */
+  stampPayment?: PaymentReceipt;
 }
 
 /**
@@ -382,6 +430,8 @@ export interface AcquiredStamp {
   sizeName: string;
   /** Whether a larger stamp was used as fallback */
   fallbackUsed: boolean;
+  /** The acquisition's payment, when it was paid (x402 mode) */
+  payment?: PaymentReceipt;
 }
 
 /**

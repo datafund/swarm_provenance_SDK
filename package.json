@@ -18,6 +18,16 @@
       }
     },
     "./chain": {
+      "browser": {
+        "import": {
+          "types": "./dist/chain/browser.d.ts",
+          "default": "./dist/chain/browser.js"
+        },
+        "require": {
+          "types": "./dist/chain/browser.d.cts",
+          "default": "./dist/chain/browser.cjs"
+        }
+      },
       "import": {
         "types": "./dist/chain/index.d.ts",
         "default": "./dist/chain/index.js"
@@ -33,7 +43,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsup",
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",

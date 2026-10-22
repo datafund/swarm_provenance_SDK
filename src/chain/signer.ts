@@ -1,5 +1,5 @@
 import type { Address, Hex, ChainSigner } from './types.js';
-import { ChainConfigurationError } from './errors.js';
+import { ChainConfigurationError, isAlreadyKnown } from './errors.js';
 
 /**
  * EIP-1193 provider interface (window.ethereum / MetaMask)
@@ -102,10 +102,12 @@ export function fromViemWalletClient(walletClient: {
 export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<ChainSigner> {
   let viem: typeof import('viem');
   let viemAccounts: typeof import('viem/accounts');
+  let viemUtils: typeof import('viem/utils');
 
   try {
     viem = await import('viem');
     viemAccounts = await import('viem/accounts');
+    viemUtils = await import('viem/utils');
   } catch (error) {
     // Once the chain entry has loaded, viem resolves, so this mostly catches a
     // broken install: keep the original error for diagnosis.
@@ -130,14 +132,25 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
     getChainId(): Promise<number> {
       return client.getChainId();
     },
-    sendTransaction(tx: { to: Address; data: Hex; gas?: bigint; chainId?: number }): Promise<Hex> {
-      return client.sendTransaction({
-        to: tx.to,
-        data: tx.data,
-        // Signed for this chain ID (EIP-155): it cannot execute anywhere else
-        chain: tx.chainId ? boundChain(tx.chainId) : null,
-        ...(tx.gas ? { gas: tx.gas } : {}),
-      });
+    async sendTransaction(tx: { to: Address; data: Hex; gas?: bigint; chainId?: number }): Promise<Hex> {
+      // Signed for this chain ID (EIP-155): it cannot execute anywhere else
+      const chain = tx.chainId ? boundChain(tx.chainId) : null;
+      const parameters = { account, chain, to: tx.to, data: tx.data, ...(tx.gas ? { gas: tx.gas } : {}) };
+      // The steps of viem's sendTransaction for a local account (prepare, sign,
+      // send raw; same nonce, gas and fee filling), done here so the signed
+      // transaction is known if the node answers "already known" (#123)
+      let serializedTransaction: Hex | undefined;
+      try {
+        viem.assertRequest(parameters);
+        const request = await client.prepareTransactionRequest({ ...parameters, nonceManager: account.nonceManager });
+        serializedTransaction = await account.signTransaction(request as Parameters<typeof account.signTransaction>[0]);
+        return await client.sendRawTransaction({ serializedTransaction });
+      } catch (error) {
+        // The node already has this exact transaction in its mempool: it was
+        // sent, and its hash is the hash of the signed bytes
+        if (serializedTransaction && isAlreadyKnown(error)) return viem.keccak256(serializedTransaction);
+        throw viemUtils.getTransactionError(error as Error, { ...parameters, chain: chain ?? undefined });
+      }
     },
   };
 }

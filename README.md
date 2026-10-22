@@ -76,13 +76,64 @@ or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing 
 | `maxTimeoutSeconds` | `600` | Longest authorization validity the gateway may ask for |
 | `onBeforePayment` | none | `(payment) => boolean`: sees amount, asset, recipient, network; return `false` to refuse. A payment may still not happen after it (signing fails, timeout): do not count spend here |
 | `payForReads` | `false` | Also pay for reads; by default reads use the free tier (`X-Payment-Mode: free`, rate-limited) |
+| `payForPool` | `false` | Also pay for pool stamps when the gateway asks for payment; by default that 402 is not paid (see below) |
 
 Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Permit2
 approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
+
+**Pool stamps are not paid unless you set `payForPool`.** `acquireStamp()` and `upload()` without
+`stampId` take a stamp from the gateway's pool, which is free within a daily allowance. Callers
+without an `Origin` header, such as Node.js servers, share one allowance. When it is spent, the
+gateway answers in one of these ways. The first two carry the code
+`DAILY_STAMP_ALLOWANCE_EXHAUSTED` (or `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`):
+
+| Gateway answer | When | SDK result without `payForPool` | SDK result with `payForPool: true` |
+|----------------|------|---------------------------------|------------------------------------|
+| 402 with a price | The gateway has x402 payments enabled, and a payment bypasses the allowance there (mainnet, or a testnet the operator enabled it for) | `StampError` with the gateway's code; nothing is paid | Pays, within the payment policy above, and returns the stamp |
+| 429 | A payment would not bypass the allowance (testnets by default), or the gateway could not price the stamp | `StampError` with the gateway's code | `StampError` with the gateway's code |
+| 409 `REQUESTED_SIZE_UNAVAILABLE` | The requested size is out of stock, and the allowance for the larger size the pool would hand out instead is spent | `StampError` with that code | `StampError` with that code |
+
+The 402 price starts from the gateway's own price for buying a stamp of the requested size, which
+already includes its purchase markup, and adds the pool markup. With the default pool markup of
+100%, the 402 asks for twice the gateway's purchase price for that stamp. The `StampError` message
+says how to continue: pass a `stampId` you own, or set `payForPool`.
+
 A request that sent a payment is never retried automatically (unpaid attempts still retry
 on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
-(`{ paymentSent: true, transaction?, idempotencyKey?, stampId? }`). A timeout while the wallet
+(`{ paymentSent: true, transaction?, idempotencyKey?, stampId?, ... }`). A timeout while the wallet
 is still approving the payment is not reported as paid: nothing was sent.
+
+**Payment receipt (#111).** A paid result carries `payment`: `upload()` results (both
+`UploadResult` and `DocumentUploadResult`) and `acquireStamp()`. An `upload()` that also paid for
+its pool stamp made two payments: the upload's is `payment` and the stamp's is `stampPayment`.
+Unpaid results have neither field.
+
+```typescript
+const { reference, payment, stampPayment } = await client.upload(data);
+// payment: { transaction, network, payer, amount: '10000', amountDecimal: '0.01', asset }
+```
+
+| Field | Source |
+|-------|--------|
+| `transaction` | The gateway's `X-Payment-Transaction` header, else the `transaction` in its `X-PAYMENT-RESPONSE` (v1) or `PAYMENT-RESPONSE` (v2) receipt. Its placeholder `unknown` is never reported |
+| `network`, `payer` | The receipt. `network` falls back to the network the SDK signed for |
+| `amount` | What the SDK signed, in the token's smallest unit (integer string): v1 `maxAmountRequired`, v2 `amount`. The gateway's receipt has no amount |
+| `amountDecimal` | `amount` in tokens, using the policy's decimals (6 for USDC) |
+| `asset` | The token contract `amount` is in |
+| `replayed` | `true` when the gateway replayed the first result for the Idempotency-Key (see below) |
+
+A browser can read the receipt headers only if the gateway exposes them through CORS. Without
+them, `payment` has the signed amount but no `transaction`, `payer` or `replayed`. No `payment`
+is reported when the gateway says it answered on the free tier (`X-Payment-Mode: free-tier`) or
+its receipt reports `success: false`. Errors after a payment carry the same fields on
+`error.payment`. The transaction is set whenever the gateway sent one (header, or the body's
+`transaction`, at the top level or in `detail`). Network, payer and amount are set only when the
+gateway sent a receipt header: without one the SDK cannot tell whether the payment settled.
+
+When `upload()` took its stamp from the pool and then failed, the error also carries `stampId`
+(the stamp it acquired) and, if that stamp was paid for, `stampPayment` (its receipt). This holds
+even when the failed request paid nothing itself, such as a `PaymentRefusedError` for the upload:
+`error.payment` is then unset, and the message says to pass `stampId` to reuse the paid stamp.
 
 **Retrying without paying twice.** Paid writes carry an `Idempotency-Key`: one random key per
 `upload()` or `acquireStamp()` call, or yours (`idempotencyKey` option, 1-255 printable ASCII
@@ -114,7 +165,11 @@ try {
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
 (so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
-for its pool stamp makes two paid requests). The gateway does not charge
+for its pool stamp, with `payForPool`, makes two paid requests). When the gateway returns the
+first result for a key, the response carries `Idempotent-Replayed: true` and `payment.replayed`
+is `true`. The charge is then the first attempt's, named by `payment.transaction`.
+`payment.amount` describes the retry's own signed authorization, which the gateway did not
+settle. Browsers cannot read this header, so `replayed` is set in Node only. The gateway does not charge
 those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
 upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
 
@@ -125,8 +180,7 @@ upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers n
 | `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | `delivered` | It worked and was paid once; the gateway kept no copy of the response. Do not pay again |
 
 An attempt that may pay is bounded by `paidTimeout` (default 120 s, or `timeout` if longer),
-not `timeout`: settlement happens on-chain. The receipt for a
-successful payment is not returned yet (#111). Tested with `@x402/*` 2.5.0 to 2.28.x.
+not `timeout`: settlement happens on-chain. Tested with `@x402/*` 2.5.0 to 2.28.x.
 x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
 **Server (Node.js):** load the key from the environment or a secret store, never from source code:
@@ -231,8 +285,12 @@ await chain.anchor(contentHash, 'dataset');
 
 What the SDK checks, and what it does not:
 
-- **`content_hash`** is recomputed on every download. It proves the content matches the hash
-  stored next to it, not who wrote either: anyone can compute it.
+- **`content_hash`** is recomputed on every download. It is a self-consistency check: it proves
+  the content matches the hash stored next to it in the same response, so it detects
+  corruption. It does not prove who wrote either (anyone can compute it), and it does not bind
+  the data to the Swarm reference you asked for: a gateway, or anyone between you and an `http`
+  gateway URL, can return a different document whose hash matches its own content. Use
+  `https`, notary signatures and on-chain anchors for those guarantees.
 - **Notary signatures** prove that the notary key signed this exact `data` together with a
   timestamp. The timestamp is the gateway's claim, not independent proof of time: whoever
   holds the notary key can sign any timestamp. For time you can verify, anchor the hash
@@ -425,6 +483,10 @@ const result = await client.download(reference, {
 // }
 ```
 
+`reference` must be 64 hex characters, or 128 for an encrypted reference, with an optional
+`0x` prefix (removed before the request). Any other value throws `ProvenanceError`
+(`INVALID_INPUT`) before a request is sent. `downloadDocument()` applies the same check.
+
 #### What `verified` means
 
 `verified: true` means at least one signature on the document is an EIP-191 signature
@@ -559,7 +621,7 @@ const chain = new ChainClient({
   rpcUrl?: string,            // override RPC endpoint; a URL outside the preset's list disables its fallbacks
   rpcFallbacks?: string[],    // tried in order on any error but a revert; defaults to the preset's, [] disables
   signer?: ChainSigner,       // required for write operations
-  retry?: RetryConfig,        // auto-retry on nonce errors (default: 2 retries, 1s backoff)
+  retry?: RetryConfig,        // auto-retry on "nonce too low/high" (default: 2 retries, 1s backoff)
 });
 ```
 
@@ -612,6 +674,12 @@ await chain.getProvenanceChain(dataHash, 10);
 // => ChainProvenanceRecord[]: ancestors + descendants up to maxDepth, in BFS order (not topological).
 //    Edges: transformationLinks (children) and parents. Rejects if any lookup fails.
 
+// The same, plus whether maxDepth cut the traversal off
+await chain.getProvenanceChainResult(dataHash, 10);
+// => { records, complete, truncated }: complete is false if a node at maxDepth has a parent or
+//    child that was not visited (or its parents could not be looked up); truncated lists those
+//    nodes. A lineage exactly maxDepth deep is complete. Costs one extra call per node at maxDepth.
+
 // Detect v2 contract support
 await chain.supportsTransformationLinks();  // => boolean
 
@@ -627,7 +695,8 @@ await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 const result = await chain.anchor(dataHash, 'dataset');
 // => { txHash, blockNumber, gasUsed, explorerUrl, dataHash, dataType, owner }
 
-// Anchor on behalf of another owner (operator only)
+// Anchor on behalf of another owner: the owner must first have authorized the signer as a
+// delegate (the owner calls setDelegate(signerAddress, true))
 await chain.anchorFor(dataHash, 'dataset', ownerAddress);
 
 // Record access
@@ -667,6 +736,22 @@ await chain.batchSetDataStatus([
 ]);
 ```
 
+**Input checks.** Writes refuse, with `ChainValidationError` and before any network call, input
+the contract would revert on: a zero data hash or merge source hash; a data type that is empty
+or over 64 UTF-8 bytes (a data type of only whitespace is refused too: stricter than the
+contract, which requires only a non-empty byte string); a transformation description that is empty or over 256 UTF-8 bytes; a `storageRef` equal
+to its data hash, or an encrypted (128 hex) Swarm reference, which does not fit the contract's
+`bytes32`; duplicate hashes or storage references in one `batchAnchor()` call; duplicate merge
+sources, or a merge's new hash among its sources; a transformation from a hash to itself; a
+status other than 0, 1 or 2; a hash repeated in one `batchSetDataStatus()` call with the status
+its previous entry in that call already sets; the zero address as owner, new owner or delegate;
+and the signer's own address as new owner, delegate, or `anchorFor()` owner (use `anchor()` to
+register for yourself). The signer checks run after the chain check, still before sending.
+Addresses, in reads and writes, may be all lowercase, all uppercase or EIP-55 checksummed; a
+mixed-case address with a wrong checksum is refused (`ChainValidationError`, or
+`ChainConfigurationError` for `contractAddress`). All-uppercase is sent in lowercase, and results
+echo the address as sent.
+
 ### Signer Factories
 
 ```typescript
@@ -686,12 +771,19 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 const signer = fromViemWalletClient(walletClient);
 ```
 
+`fromPrivateKey` is not exported to browser builds: the `/chain` entry has a `browser` export
+condition that points to a build without it, so a bundler that targets the browser fails with
+"No matching export" instead of shipping code that expects a raw key. Node `import` and
+`require` are unchanged. TypeScript applies the condition only with
+`customConditions: ["browser"]`; otherwise the editor still offers `fromPrivateKey`.
+
 ### Chain Error Handling
 
 ```typescript
 import {
   ChainConfigurationError,
   ChainTransactionError,
+  DataAlreadyRegisteredError,
   ReceiptTimeoutError,
   SignerRequiredError,
 } from '@datafund/swarm-provenance/chain';
@@ -701,6 +793,11 @@ try {
 } catch (error) {
   if (error instanceof SignerRequiredError) {
     console.error('Connect a wallet first');
+  } else if (error instanceof DataAlreadyRegisteredError) {
+    // anchor()/anchorFor(): the hash is registered. Check whose record it is before
+    // treating it as done: ownedBySigner is false if another address owns it, and
+    // undefined if the owner could not be read (error.owner is then '')
+    if (error.ownedBySigner !== true) console.error('Registered by', error.owner || 'unknown owner');
   } else if (error instanceof ChainConfigurationError) {
     // Before anything was sent: wrong chain (RPC or wallet), or no contract at the address
     console.error(error.message);
@@ -744,6 +841,32 @@ message comes from Node itself.
 
 ### Behavior changes since v0.6.1
 
+- `download()` and `downloadDocument()` validate `reference` before the request (#123). It must
+  be 64 or 128 hex characters with an optional `0x` prefix, which is removed. Other values
+  (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
+  instead of being sent to the gateway. `isValidSwarmReference()` now accepts 128-character
+  encrypted references and the `0x` prefix.
+- A `Retry-After` header given as an HTTP date is honoured (#123): the RFC 9110 forms only
+  (IMF-fixdate such as `Sun, 06 Nov 1994 08:49:37 GMT`, and the obsolete RFC 850 and asctime
+  forms), always read as GMT. Before, it was read as `NaN`:
+  the 429 retry (`payment: 'none'` and x402 mode) did not wait, and
+  `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
+  date now falls back to the normal backoff. This includes a non-integer value such as `"1.5"`:
+  RFC 9110 allows only whole delta-seconds. Before, `parseInt` read it as 1 second.
+- Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
+  transaction with that nonce is already pending, and a resend could write twice. That error and
+  "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
+  still confirm ... do not resend" instead of "Transaction failed". Check the wallet's pending
+  transactions before sending again.
+- `fromPrivateKey` signers return the transaction hash when the node answers "already known"
+  (#123): the node already holds that signed transaction, so the write proceeds to wait for its
+  receipt instead of failing. The signer now prepares, signs and sends the raw transaction itself,
+  the same steps viem's `sendTransaction` takes for a local account (same nonce, gas and fee
+  handling, still signed for the preset's chain ID).
+- `DataAlreadyRegisteredError` has `ownedBySigner` (new, optional; #123): `true` if the
+  registered owner is the signer's address, `false` if another address owns the record,
+  `undefined` if the owner could not be read. For `anchorFor()`, compare `error.owner` with the
+  owner you passed.
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch
@@ -751,6 +874,36 @@ message comes from Node itself.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
+- Chain input checks (#123): the writes listed under "Input checks" now throw
+  `ChainValidationError` before any network call, instead of sending a transaction that the
+  contract reverts. `mergeTransform()` now validates `newDataType` like the other data types:
+  empty, whitespace-only or over 64 UTF-8 bytes is refused. Whitespace-only is stricter than the
+  contract, which accepts it; `anchor()`, `anchorFor()` and `batchAnchor()` already refused it.
+  `getUserDataRecordsPaginated()` throws `ChainValidationError` for a negative or non-integer
+  `offset` or `limit` (was a mislabelled `ChainConnectionError`). `new ChainClient()` throws
+  `ChainConfigurationError` for a malformed `contractAddress` or a `gasLimit` that is not a
+  positive integer. Reads such as `verifyOnChain()` still accept the zero hash. A mixed-case
+  address with a wrong EIP-55 checksum now throws `ChainValidationError` before any network
+  call (it used to reach viem and throw a raw `InvalidAddressError`); an all-uppercase address,
+  which viem rejected, is now accepted and passed to viem in lowercase. Result fields that echo an
+  input address (`anchorFor().owner`, `transferOwnership().newOwner`, `setDelegate().delegate`)
+  hold the address that was sent: an all-uppercase input comes back in lowercase, other
+  spellings unchanged.
+- `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
+  now has a `browser` export condition, listed first, that resolves to a build without
+  `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node
+  `import`/`require` resolution is unchanged. **Any runtime or bundler that resolves the
+  `browser` export condition gets the build without `fromPrivateKey`**, also for server code.
+  Examples are Cloudflare Workers and esbuild with `platform: 'browser'`. Code built that way
+  must create a viem wallet client with `privateKeyToAccount` and pass it to
+  `fromViemWalletClient` instead.
+  TypeScript does not apply the `browser` condition unless `customConditions: ["browser"]` is
+  set in `tsconfig.json`. Without it, your editor still shows `fromPrivateKey` in browser code,
+  and only the bundler reports the error.
+- `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
+  tell a lineage cut off by `maxDepth` from a whole one. A node at `maxDepth` counts as truncated
+  only if it has a parent or child that was not visited, or its parent lookup fails.
+  `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
   (false for a wrong contract address; true if any fallback RPC serves the call).
 - The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);
@@ -787,6 +940,12 @@ message comes from Node itself.
   `CHAIN_CONNECTION`) with `txHash` and `expected`, resumable with `waitForTransaction()`; RPC read errors in pre-checks (already
   registered? duplicate transformation?) are thrown instead of ignored; error messages no
   longer contain RPC URLs, and `ChainTransactionError.originalError` is not enumerable.
+- Paid pool acquisition is opt-in (#109): in x402 mode, `acquireStamp()` and `upload()` without
+  `stampId` no longer pay for pool stamps unless `payment.payForPool` is `true`. Without it, a 402
+  from `POST /api/v1/pool/acquire` is not paid and the call throws `StampError` (the gateway's
+  code, or `PAYMENT_REQUIRED`). The unpaid acquisition carries no `Idempotency-Key`. In `'free'`
+  and `'none'` modes, a pool 402 is still a `StampError`. Its message now also says how to
+  continue, and its code is the gateway's code, or `PAYMENT_REQUIRED` where it used to have none.
 - Paid writes send an `Idempotency-Key` (#102); see "Retrying without paying twice". Attempts that
   may pay use `paidTimeout` (default 120 s, or `timeout` if longer) instead of `timeout`, so a
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry
@@ -794,6 +953,12 @@ message comes from Node itself.
   that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
   (not `StampError` / `NotaryError`). Gateway error messages are read from the top-level
   `message` of the error envelope when `detail` has none.
+- Paid results carry the payment receipt (#111): `payment` on `UploadResult`,
+  `DocumentUploadResult` and `AcquiredStamp`, and `stampPayment` on upload results when
+  `upload()` paid for its pool stamp. Errors from `upload()` after a pool acquisition carry
+  `stampId` and, when the stamp was paid for, `stampPayment`. `error.payment` gains `network`, `payer`, `amount`,
+  `amountDecimal` and `asset` when the gateway sent a receipt header, and `replayed` on an
+  idempotent replay. All fields are new and optional. Unpaid results carry no `payment`.
 - New (#124): `pricing()` returns the gateway's price quotes (`GET /api/v1/pricing`), and
   `UploadOptions.ownerSigner` uploads to a stamp you own with a signed owner proof instead of
   a payment. An owner-proof upload uses the free tier and never pays, in any payment mode.

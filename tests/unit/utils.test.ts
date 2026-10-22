@@ -7,6 +7,7 @@ import {
   isValidHex,
   isValidSwarmReference,
   normalizeReference,
+  retryAfterSeconds,
 } from '../../src/utils.js';
 
 describe('toBytes', () => {
@@ -178,6 +179,27 @@ describe('isValidSwarmReference', () => {
     const ref = 'g'.repeat(64);
     expect(isValidSwarmReference(ref)).toBe(false);
   });
+
+  it('should accept a 128-char encrypted reference (#123)', () => {
+    expect(isValidSwarmReference('a'.repeat(128))).toBe(true);
+  });
+
+  it('should accept an optional 0x prefix (#123)', () => {
+    expect(isValidSwarmReference('0x' + 'a'.repeat(64))).toBe(true);
+    expect(isValidSwarmReference('0X' + 'a'.repeat(128))).toBe(true);
+  });
+
+  it('should reject lengths between 64 and 128 and above 128 (#123)', () => {
+    expect(isValidSwarmReference('a'.repeat(96))).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(127))).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(129))).toBe(false);
+  });
+
+  it('should reject a bare 0x and path or query characters (#123)', () => {
+    expect(isValidSwarmReference('0x')).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(63) + '/')).toBe(false);
+    expect(isValidSwarmReference('a'.repeat(64) + '?')).toBe(false);
+  });
 });
 
 describe('normalizeReference', () => {
@@ -194,5 +216,46 @@ describe('normalizeReference', () => {
   it('should handle mixed case with whitespace', () => {
     const ref = '  AbCdEf123456789AbCdEf123456789AbCdEf123456789AbCdEf123456789AbCd  ';
     expect(normalizeReference(ref)).toBe('abcdef123456789abcdef123456789abcdef123456789abcdef123456789abcd');
+  });
+});
+
+describe('retryAfterSeconds (#123)', () => {
+  const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+
+  it('reads delta-seconds', () => {
+    expect(retryAfterSeconds('120', now)).toBe(120);
+    expect(retryAfterSeconds('0', now)).toBe(0);
+    expect(retryAfterSeconds(' 5 ', now)).toBe(5);
+  });
+
+  it('reads an HTTP date as seconds from now, rounded up', () => {
+    expect(retryAfterSeconds(new Date(now + 30_000).toUTCString(), now)).toBe(30);
+    expect(retryAfterSeconds(new Date(now + 30_000).toUTCString(), now + 500)).toBe(30);
+  });
+
+  it('gives 0 for an HTTP date in the past', () => {
+    expect(retryAfterSeconds(new Date(now - 60_000).toUTCString(), now)).toBe(0);
+  });
+
+  it('reads the obsolete RFC 850 and asctime forms as GMT', () => {
+    const at = Date.UTC(1994, 10, 6, 8, 49, 0);
+    expect(retryAfterSeconds('Sun, 06 Nov 1994 08:49:37 GMT', at)).toBe(37);
+    expect(retryAfterSeconds('Sunday, 06-Nov-94 08:49:37 GMT', at)).toBe(37);
+    expect(retryAfterSeconds('Sun Nov  6 08:49:37 1994', at)).toBe(37);
+  });
+
+  it('gives undefined for text that is not an HTTP date, even if Date.parse accepts it', () => {
+    expect(retryAfterSeconds('foo 1', now)).toBeUndefined();
+    expect(retryAfterSeconds('2026-10-21T12:00:30Z', now)).toBeUndefined();
+    expect(retryAfterSeconds('Wed, 21 Oct 2026 12:00:30 PST', now)).toBeUndefined();
+    expect(retryAfterSeconds('Wed, 32 Oct 2026 12:00:30 GMT', now)).toBeUndefined();
+  });
+
+  it('gives undefined for a missing or unreadable value', () => {
+    expect(retryAfterSeconds(null, now)).toBeUndefined();
+    expect(retryAfterSeconds('', now)).toBeUndefined();
+    expect(retryAfterSeconds('soon', now)).toBeUndefined();
+    expect(retryAfterSeconds('-5', now)).toBeUndefined();
+    expect(retryAfterSeconds('1.5', now)).toBeUndefined();
   });
 });

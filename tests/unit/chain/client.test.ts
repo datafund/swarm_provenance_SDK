@@ -11,7 +11,7 @@ import {
 } from '../../../src/chain/errors.js';
 import { DataStatus } from '../../../src/chain/types.js';
 import type { Address, Hex, ChainSigner } from '../../../src/chain/types.js';
-import { encodeAbiParameters, encodeEventTopics, type AbiEvent } from 'viem';
+import { encodeAbiParameters, encodeEventTopics, getAddress, type AbiEvent } from 'viem';
 import { DATA_PROVENANCE_ABI } from '../../../src/chain/abi.js';
 import { BASE_SEPOLIA } from '../../../src/chain/constants.js';
 
@@ -58,6 +58,8 @@ const SAMPLE_VALUES: Record<string, unknown> = {
 
 const MOCK_ADDRESS: Address = '0x1234567890abcdef1234567890abcdef12345678';
 const MOCK_TX_HASH: Hex = `0x${'bb'.repeat(32)}`;
+/** anchorFor's owner: not the mock signer, which cannot be its own delegate (#123) */
+const DATA_OWNER: Address = '0x5555555555555555555555555555555555555555';
 const SAMPLE_HASH = 'ab'.repeat(32);
 const SAMPLE_HASH_0X: Hex = `0x${SAMPLE_HASH}`;
 const ZERO_HASH: Hex = `0x${'00'.repeat(32)}`;
@@ -282,6 +284,75 @@ describe('ChainClient', () => {
       await expect(client.anchor(SAMPLE_HASH, 'dataset')).rejects.toThrow(DataAlreadyRegisteredError);
     });
 
+    describe('ownedBySigner on DataAlreadyRegisteredError (#123)', () => {
+      const registeredBy = (owner: string) => ({
+        dataHash: SAMPLE_HASH_0X,
+        owner,
+        timestamp: BigInt(1700000000),
+        dataType: 'dataset',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+      const notRegistered = {
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      };
+
+      it('is true when the signer owns the record (address case ignored)', async () => {
+        mockReadContract.mockResolvedValueOnce(registeredBy(MOCK_ADDRESS.toUpperCase().replace('0X', '0x')));
+        const client = new ChainClient({ chain: 'base-sepolia', signer: createMockSigner() });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DataAlreadyRegisteredError);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(true);
+      });
+
+      it('is false when another address owns the record', async () => {
+        mockReadContract.mockResolvedValueOnce(registeredBy('0x' + '99'.repeat(20)));
+        const client = new ChainClient({ chain: 'base-sepolia', signer: createMockSigner() });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(false);
+        expect((error as DataAlreadyRegisteredError).owner).toBe('0x' + '99'.repeat(20));
+      });
+
+      it('is set by anchorFor too (compared with the signer, not the owner passed)', async () => {
+        mockReadContract.mockResolvedValueOnce(registeredBy('0x' + '99'.repeat(20)));
+        const client = new ChainClient({ chain: 'base-sepolia', signer: createMockSigner() });
+        const error = await client.anchorFor(SAMPLE_HASH, 'dataset', '0x' + '99'.repeat(20)).catch((e: unknown) => e);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(false);
+      });
+
+      it('is set after an already-registered revert when the record can be read', async () => {
+        mockReadContract.mockResolvedValueOnce(notRegistered).mockResolvedValueOnce(registeredBy(MOCK_ADDRESS));
+        const signer: ChainSigner = {
+          ...createMockSigner(),
+          sendTransaction: () => Promise.reject(new Error('execution reverted: Data already registered')),
+        };
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DataAlreadyRegisteredError);
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBe(true);
+      });
+
+      it('is undefined when the owner could not be read', async () => {
+        mockReadContract.mockResolvedValueOnce(notRegistered).mockRejectedValueOnce(new Error('rpc down'));
+        const signer: ChainSigner = {
+          ...createMockSigner(),
+          sendTransaction: () => Promise.reject(new Error('execution reverted: Data already registered')),
+        };
+        const client = new ChainClient({ chain: 'base-sepolia', signer });
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(DataAlreadyRegisteredError);
+        expect((error as DataAlreadyRegisteredError).owner).toBe('');
+        expect((error as DataAlreadyRegisteredError).ownedBySigner).toBeUndefined();
+      });
+    });
+
     it('should proceed when hash is not registered', async () => {
       // Pre-check: hash not registered (getDataRecord returns zero)
       mockReadContract.mockResolvedValueOnce({
@@ -400,7 +471,7 @@ describe('ChainClient', () => {
 
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
-      await expect(client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS)).rejects.toThrow(DataAlreadyRegisteredError);
+      await expect(client.anchorFor(SAMPLE_HASH, 'dataset', DATA_OWNER)).rejects.toThrow(DataAlreadyRegisteredError);
     });
 
     it('should anchor for another owner', async () => {
@@ -424,9 +495,9 @@ describe('ChainClient', () => {
 
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
-      const result = await client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS);
+      const result = await client.anchorFor(SAMPLE_HASH, 'dataset', DATA_OWNER);
 
-      expect(result.owner).toBe(MOCK_ADDRESS);
+      expect(result.owner).toBe(DATA_OWNER);
       expect(result.dataHash).toBe(SAMPLE_HASH_0X);
     });
   });
@@ -551,11 +622,13 @@ describe('ChainClient', () => {
         gasUsed: BigInt(35000),
       });
 
+      // Not the signer's own address: the contract reverts that ("Cannot delegate to self", #123)
+      const DELEGATE: Address = '0x9999999999999999999999999999999999999999';
       const signer = createMockSigner();
       const client = new ChainClient({ chain: 'base-sepolia', signer });
-      const result = await client.setDelegate(MOCK_ADDRESS, true);
+      const result = await client.setDelegate(DELEGATE, true);
 
-      expect(result.delegate).toBe(MOCK_ADDRESS);
+      expect(result.delegate).toBe(DELEGATE);
       expect(result.authorized).toBe(true);
     });
   });
@@ -719,6 +792,246 @@ describe('ChainClient', () => {
     });
   });
 
+  describe('input validation gaps (#123)', () => {
+    // Each case is refused locally: no RPC read, no chain check, nothing sent.
+    // Contract rules marked "deployed" were confirmed by eth_call against the
+    // Base Sepolia contract (revert reason in the comment).
+    const H1: Hex = `0x${'11'.repeat(32)}`;
+    const H2: Hex = `0x${'22'.repeat(32)}`;
+    const H3: Hex = `0x${'33'.repeat(32)}`;
+    const OTHER: Address = '0x9999999999999999999999999999999999999999';
+    const ZERO_ADDR = '0x' + '00'.repeat(20);
+    let sendTransaction: ReturnType<typeof vi.fn<[unknown], Promise<Hex>>>;
+    let client: ChainClient;
+
+    beforeEach(() => {
+      sendTransaction = vi.fn<[unknown], Promise<Hex>>().mockResolvedValue(MOCK_TX_HASH);
+      client = new ChainClient({
+        chain: 'base-sepolia',
+        signer: { ...createMockSigner(), sendTransaction },
+      });
+    });
+
+    const refusedLocally = async (call: () => Promise<unknown>, pattern: RegExp) => {
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainValidationError);
+      expect((error as Error).message).toMatch(pattern);
+      expect(mockReadContract).not.toHaveBeenCalled();
+      expect(mockGetChainId).not.toHaveBeenCalled();
+      expect(sendTransaction).not.toHaveBeenCalled();
+    };
+
+    // deployed: "Invalid data hash"
+    it('anchor, anchorFor and batchAnchor refuse the zero hash', async () => {
+      await refusedLocally(() => client.anchor(ZERO_HASH, 'dataset'), /zero hash/);
+      await refusedLocally(() => client.anchorFor(ZERO_HASH, 'dataset', OTHER), /zero hash/);
+      await refusedLocally(() => client.batchAnchor([{ dataHash: H1, dataType: 'a' }, { dataHash: ZERO_HASH, dataType: 'b' }]), /zero hash/);
+    });
+
+    // deployed: "Data type too long"
+    it('refuses a data type over 64 UTF-8 bytes (anchor, batchAnchor, mergeTransform)', async () => {
+      await refusedLocally(() => client.anchor(H1, 'a'.repeat(65)), /64 bytes/);
+      await refusedLocally(() => client.anchor(H1, '€'.repeat(22)), /64 bytes/); // 66 bytes, 22 characters
+      await refusedLocally(() => client.batchAnchor([{ dataHash: H1, dataType: 'a'.repeat(65) }]), /64 bytes/);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', 'a'.repeat(65)), /64 bytes/);
+    });
+
+    // deployed: "Data type cannot be empty"
+    it('mergeTransform refuses an empty newDataType', async () => {
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', ''), /Data type/);
+    });
+
+    // Stricter than the contract (which accepts any non-empty bytes), as for anchor()
+    // and batchAnchor(): kept for consistency across methods (#123)
+    it('mergeTransform refuses a whitespace-only newDataType', async () => {
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'merge', '   '), /Data type must not be empty/);
+    });
+
+    // deployed: "Transformation cannot be empty" / "Transformation too long"
+    it('refuses an empty description or one over 256 UTF-8 bytes', async () => {
+      await refusedLocally(() => client.recordTransformation(H1, H2, ''), /description/i);
+      await refusedLocally(() => client.recordTransformation(H1, H2, 'd'.repeat(257)), /256 bytes/);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, ''), /description/i);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H3, 'd'.repeat(257)), /256 bytes/);
+    });
+
+    // deployed: "Storage ref cannot equal data hash"
+    it('refuses a storageRef equal to the data hash', async () => {
+      await refusedLocally(() => client.anchor(H1, 'dataset', H1.toUpperCase().replace('0X', '0x')), /storageRef/);
+      await refusedLocally(() => client.anchorFor(H1, 'dataset', OTHER, H1), /storageRef/);
+      await refusedLocally(() => client.batchAnchor([{ dataHash: H1, dataType: 'a', storageRef: H1 }]), /storageRef/);
+    });
+
+    it('explains that an encrypted (128-hex) Swarm reference does not fit the contract', async () => {
+      await refusedLocally(() => client.anchor(H1, 'dataset', 'ab'.repeat(64)), /encrypted.*bytes32/);
+    });
+
+    // deployed: "Data already registered" / "Storage ref already mapped" on the second item
+    it('batchAnchor refuses duplicate data hashes or storageRefs within the batch', async () => {
+      await refusedLocally(
+        () => client.batchAnchor([{ dataHash: H1, dataType: 'a' }, { dataHash: H1.toUpperCase().replace('0X', '0x'), dataType: 'b' }]),
+        /[Dd]uplicate/,
+      );
+      await refusedLocally(
+        () => client.batchAnchor([{ dataHash: H1, dataType: 'a', storageRef: H3 }, { dataHash: H2, dataType: 'b', storageRef: H3 }]),
+        /[Dd]uplicate/,
+      );
+    });
+
+    // deployed: "Invalid source hash", "Duplicate source hash", "New data hash already exists"
+    it('mergeTransform refuses a zero source, duplicate sources, and a new hash among the sources', async () => {
+      await refusedLocally(() => client.mergeTransform([H1, ZERO_HASH], H3, 'merge'), /zero hash/);
+      await refusedLocally(() => client.mergeTransform([H1, H2, H1], H3, 'merge'), /[Dd]uplicate/);
+      await refusedLocally(() => client.mergeTransform([H1, H2], H2, 'merge'), /source/);
+    });
+
+    // deployed: "New data hash already exists"
+    it('recordTransformation refuses the same original and new hash', async () => {
+      await refusedLocally(() => client.recordTransformation(H1, H1, 'step'), /differ/);
+    });
+
+    it('setDataStatus and batchSetDataStatus accept only DataStatus values 0, 1 and 2', async () => {
+      await refusedLocally(() => client.setDataStatus(H1, 3 as DataStatus), /status/);
+      await refusedLocally(() => client.setDataStatus(H1, 1.5 as DataStatus), /status/);
+      await refusedLocally(() => client.setDataStatus(H1, -1 as DataStatus), /status/);
+      await refusedLocally(() => client.batchSetDataStatus([{ dataHash: H1, status: DataStatus.ACTIVE }, { dataHash: H2, status: 7 as DataStatus }]), /status/);
+    });
+
+    it('refuses the zero address as owner, new owner or delegate', async () => {
+      await refusedLocally(() => client.anchorFor(H1, 'dataset', ZERO_ADDR), /zero address/);
+      await refusedLocally(() => client.transferOwnership(H1, ZERO_ADDR), /zero address/);
+      await refusedLocally(() => client.setDelegate(ZERO_ADDR, true), /zero address/);
+    });
+
+    // deployed: "Already the owner" / "Cannot delegate to self" (checked against the signer
+    // after the chain check, so the chain check runs but nothing is sent)
+    it('transferOwnership refuses the signer\'s own address as the new owner', async () => {
+      // The checksummed spelling: compared case-insensitively with the signer's lowercase address
+      const error = await client.transferOwnership(H1, getAddress(MOCK_ADDRESS)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainValidationError);
+      expect((error as Error).message).toMatch(/already the owner|signer/i);
+      expect(sendTransaction).not.toHaveBeenCalled();
+    });
+
+    it('setDelegate refuses the signer\'s own address as delegate', async () => {
+      for (const authorized of [true, false]) {
+        const error = await client.setDelegate(getAddress(MOCK_ADDRESS), authorized).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ChainValidationError);
+        expect((error as Error).message).toMatch(/yourself|own address|self/i);
+      }
+      expect(sendTransaction).not.toHaveBeenCalled();
+    });
+
+    // A mixed-case address must carry a valid EIP-55 checksum, or viem's encoder throws a raw
+    // InvalidAddressError; all-uppercase is passed to viem in lowercase
+    const BAD_MIXED = '0x1234567890ABCDEF1234567890abcdef12345678';
+
+    it('refuses a mixed-case address with a wrong checksum before any network call', async () => {
+      await refusedLocally(() => client.getUserDataRecords(BAD_MIXED), /checksum/);
+      await refusedLocally(() => client.isAuthorizedDelegate(BAD_MIXED, OTHER), /checksum/);
+      await refusedLocally(() => client.transferOwnership(H1, BAD_MIXED), /checksum/);
+      await refusedLocally(() => client.setDelegate(BAD_MIXED, true), /checksum/);
+      await refusedLocally(() => client.anchorFor(H1, 'dataset', BAD_MIXED), /checksum/);
+    });
+
+    it('accepts an all-uppercase address and passes it to viem in lowercase', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        logs: eventLogs('DataOwnershipTransferred'),
+        blockNumber: BigInt(1),
+        gasUsed: BigInt(1),
+      });
+      const upper = '0xABCDEF1234567890ABCDEF1234567890ABCDEF12';
+      // The calldata is encoded by the real viem, which rejects all-uppercase hex
+      await expect(client.transferOwnership(H1, upper)).resolves.toMatchObject({ newOwner: upper.toLowerCase() });
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+
+      mockReadContract.mockResolvedValueOnce([]);
+      await client.getUserDataRecords(upper);
+      expect((mockReadContract.mock.calls.at(-1) as [{ args: unknown[] }])[0].args).toEqual([upper.toLowerCase()]);
+    });
+
+    // deployed: registerDataFor "Not authorized delegate" (self-delegation is impossible)
+    it('anchorFor refuses the signer as actualOwner and points to anchor()', async () => {
+      const error = await client.anchorFor(H1, 'dataset', getAddress(MOCK_ADDRESS)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainValidationError);
+      expect((error as Error).message).toContain('anchor()');
+      expect(mockReadContract).not.toHaveBeenCalled(); // before the already-registered pre-check
+      expect(sendTransaction).not.toHaveBeenCalled();
+    });
+
+    // deployed: "Status unchanged" when a hash repeats with the status of its previous entry
+    it('batchSetDataStatus refuses a hash repeated with the same status as its previous entry', async () => {
+      await refusedLocally(
+        () => client.batchSetDataStatus([{ dataHash: H1, status: DataStatus.RESTRICTED }, { dataHash: H1, status: DataStatus.RESTRICTED }]),
+        /status/i,
+      );
+      await refusedLocally(
+        () =>
+          client.batchSetDataStatus([
+            { dataHash: H1, status: DataStatus.RESTRICTED },
+            { dataHash: H2, status: DataStatus.RESTRICTED },
+            { dataHash: H1.toUpperCase().replace('0X', '0x'), status: DataStatus.DELETED },
+            { dataHash: H1, status: DataStatus.DELETED },
+          ]),
+        /status/i,
+      );
+    });
+
+    it('batchSetDataStatus still allows a hash repeated with a different status', async () => {
+      mockWaitForTransactionReceipt.mockResolvedValueOnce({
+        status: 'success',
+        logs: eventLogs('DataStatusChanged', 3),
+        blockNumber: BigInt(1),
+        gasUsed: BigInt(1),
+      });
+      await expect(
+        client.batchSetDataStatus([
+          { dataHash: H1, status: DataStatus.RESTRICTED },
+          { dataHash: H1, status: DataStatus.DELETED },
+          { dataHash: H1, status: DataStatus.RESTRICTED },
+        ]),
+      ).resolves.toMatchObject({ count: 3 });
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('results echo the address that was sent (normalized), not the raw input', async () => {
+      const upper = '0xABCDEF1234567890ABCDEF1234567890ABCDEF12';
+      const lower = upper.toLowerCase();
+      mockWaitForTransactionReceipt
+        .mockResolvedValueOnce({ status: 'success', logs: eventLogs('DelegateAuthorized'), blockNumber: BigInt(1), gasUsed: BigInt(1) })
+        .mockResolvedValueOnce({ status: 'success', logs: eventLogs('DataRegistered'), blockNumber: BigInt(1), gasUsed: BigInt(1) });
+      await expect(client.setDelegate(upper, true)).resolves.toMatchObject({ delegate: lower });
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+      await expect(client.anchorFor(H1, 'dataset', upper)).resolves.toMatchObject({ owner: lower });
+    });
+
+    it('getUserDataRecordsPaginated accepts only non-negative safe integers', async () => {
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, -1, 10), /offset/);
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, 0, 1.5), /limit/);
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, Number.NaN, 10), /offset/);
+      await refusedLocally(() => client.getUserDataRecordsPaginated(MOCK_ADDRESS, 0, 2 ** 60), /limit/);
+    });
+
+    it('the constructor refuses a malformed contract address or gas limit', () => {
+      expect(() => new ChainClient({ chain: 'base-sepolia', contractAddress: '0x1234' as Address })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: { ...BASE_SEPOLIA, contractAddress: 'not-an-address' as Address } })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', contractAddress: '0x1234567890ABCDEF1234567890abcdef12345678' })).toThrow(/checksum/);
+      expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: 0 })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: 1.5 })).toThrow(ChainConfigurationError);
+      expect(() => new ChainClient({ chain: 'base-sepolia', gasLimit: -1n })).toThrow(ChainConfigurationError);
+      expect(new ChainClient({ chain: 'base-sepolia', gasLimit: 500_000n })).toBeInstanceOf(ChainClient);
+    });
+  });
+
   describe('getExplorerUrl', () => {
     it('should return correct explorer URL', () => {
       const client = new ChainClient({ chain: 'base-sepolia' });
@@ -839,6 +1152,96 @@ describe('ChainClient', () => {
       expect(chain.map((r) => r.dataHash)).toEqual([hashA, hashB, hashC]);
       // Parent edges fetched during traversal are kept, so the DAG can be rebuilt (#100)
       expect(chain.map((r) => r.parents)).toEqual([[], [hashA], [hashB]]);
+    });
+
+    describe('getProvenanceChainResult: result-level completeness (#123)', () => {
+      it('is complete when no node reached maxDepth', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [hashC], parents: [hashA] },
+          [hashC]: { children: [], parents: [hashB] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB, hashC]);
+        expect(result.complete).toBe(true);
+        expect(result.truncated).toEqual([]);
+      });
+
+      it('is incomplete and names the unexpanded nodes when maxDepth cuts the traversal', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [hashC], parents: [hashA] },
+          [hashC]: { children: [], parents: [hashB] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB]);
+        expect(result.complete).toBe(false);
+        expect(result.truncated).toEqual([hashB]);
+        expect(result.records[1]!.parents).toBeUndefined();
+      });
+
+      it('is complete when the lineage is exactly maxDepth deep: a frontier leaf cuts nothing off', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [], parents: [hashA] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB]);
+        expect(result.complete).toBe(true);
+        expect(result.truncated).toEqual([]);
+      });
+
+      it('is incomplete when a frontier node has an unvisited parent (cut on the ancestor side)', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [hashC], parents: [hashA] },
+          [hashC]: { children: [], parents: [hashB] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(hashC, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashC, hashB]);
+        expect(result.complete).toBe(false);
+        expect(result.truncated).toEqual([hashB]);
+      });
+
+      it('fails closed: a frontier node whose parents lookup fails counts as truncated', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [], parents: new Error('rpc down') },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const result = await client.getProvenanceChainResult(SAMPLE_HASH, 1);
+        expect(result.records.map((r) => r.dataHash)).toEqual([hashA, hashB]);
+        expect(result.complete).toBe(false);
+        expect(result.truncated).toEqual([hashB]);
+      });
+
+      it('getProvenanceChain does not look up the frontier (no extra RPC calls)', async () => {
+        mockDag({
+          [hashA]: { children: [hashB], parents: [] },
+          [hashB]: { children: [], parents: [hashA] },
+        });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        await client.getProvenanceChain(SAMPLE_HASH, 1);
+        expect(calledFunctions().filter((f) => f === 'getTransformationParents')).toHaveLength(1);
+      });
+
+      it('an unregistered start hash gives no records and a complete result', async () => {
+        mockDag({});
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        await expect(client.getProvenanceChainResult(SAMPLE_HASH)).resolves.toEqual({ records: [], complete: true, truncated: [] });
+      });
+
+      it('getProvenanceChain still returns the plain array', async () => {
+        mockDag({ [hashA]: { children: [hashB], parents: [] }, [hashB]: { children: [], parents: [hashA] } });
+        const client = new ChainClient({ chain: 'base-sepolia' });
+        const chain = await client.getProvenanceChain(SAMPLE_HASH, 1);
+        expect(Array.isArray(chain)).toBe(true);
+        expect(Object.keys(chain)).toEqual(['0', '1']);
+      });
     });
 
     it('starting from the leaf, walks ancestors and the leaf carries its parent edge', async () => {
@@ -1511,7 +1914,7 @@ describe('ChainClient', () => {
       expect(sendTransaction).toHaveBeenCalledTimes(2);
     });
 
-    it('should retry on replacement-underpriced and succeed', async () => {
+    it('does not retry on replacement-underpriced: a tx with that nonce is already pending (#123)', async () => {
       mockReadContract.mockResolvedValueOnce({
         dataHash: ZERO_HASH,
         owner: '0x' + '00'.repeat(20),
@@ -1526,12 +1929,38 @@ describe('ChainClient', () => {
         .mockRejectedValueOnce(new Error('replacement underpriced'))
         .mockResolvedValueOnce(MOCK_TX_HASH);
 
-      mockWaitForTransactionReceipt.mockResolvedValueOnce({
-        status: 'success',
-        logs: eventLogs('DataRegistered'),
-        blockNumber: BigInt(302),
-        gasUsed: BigInt(50000),
+      const signer: ChainSigner = {
+        getAddress: () => Promise.resolve(MOCK_ADDRESS),
+        getChainId: () => Promise.resolve(84532),
+        sendTransaction,
+      };
+      const client = new ChainClient({
+        chain: 'base-sepolia',
+        signer,
+        retry: { maxRetries: 2, baseDelayMs: 1 },
       });
+
+      const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainTransactionError);
+      expect((error as Error).message).toContain('already pending');
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+      expect(mockWaitForTransactionReceipt).not.toHaveBeenCalled();
+    });
+
+    it('does not retry on already-known and says the tx may still confirm (#123)', async () => {
+      mockReadContract.mockResolvedValueOnce({
+        dataHash: ZERO_HASH,
+        owner: '0x' + '00'.repeat(20),
+        timestamp: BigInt(0),
+        dataType: '',
+        transformationLinks: [],
+        accessors: [],
+        status: 0,
+      });
+
+      const sendTransaction = vi.fn()
+        .mockRejectedValueOnce(new Error('already known'))
+        .mockResolvedValueOnce(MOCK_TX_HASH);
 
       const signer: ChainSigner = {
         getAddress: () => Promise.resolve(MOCK_ADDRESS),
@@ -1544,10 +1973,39 @@ describe('ChainClient', () => {
         retry: { maxRetries: 2, baseDelayMs: 1 },
       });
 
-      const result = await client.anchor(SAMPLE_HASH, 'dataset');
-      expect(result.txHash).toBe(MOCK_TX_HASH);
-      expect(sendTransaction).toHaveBeenCalledTimes(2);
+      const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ChainTransactionError);
+      expect((error as Error).message).toContain('may still confirm');
+      expect((error as Error).message).toContain('do not resend');
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
     });
+
+    it.each(['AlreadyKnown', 'Transaction already imported', 'known transaction: 0x1234'])(
+      'reports the node answer "%s" from a wallet signer as not confirmed (#123)',
+      async (message) => {
+        mockReadContract.mockResolvedValueOnce({
+          dataHash: ZERO_HASH,
+          owner: '0x' + '00'.repeat(20),
+          timestamp: BigInt(0),
+          dataType: '',
+          transformationLinks: [],
+          accessors: [],
+          status: 0,
+        });
+        const sendTransaction = vi.fn().mockRejectedValue(new Error(message));
+        const client = new ChainClient({
+          chain: 'base-sepolia',
+          signer: { ...createMockSigner(), sendTransaction },
+          retry: { maxRetries: 2, baseDelayMs: 1 },
+        });
+
+        const error = await client.anchor(SAMPLE_HASH, 'dataset').catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ChainTransactionError);
+        expect((error as Error).message).toContain('may still confirm');
+        expect((error as Error).message).toContain('do not resend');
+        expect(sendTransaction).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it('should not retry on non-transient errors', async () => {
       mockReadContract.mockResolvedValueOnce({
@@ -1690,10 +2148,10 @@ describe('ChainClient', () => {
 
         const signer = createMockSigner();
         const client = new ChainClient({ chain: 'base-sepolia', signer });
-        const result = await client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS, STORAGE_REF);
+        const result = await client.anchorFor(SAMPLE_HASH, 'dataset', DATA_OWNER, STORAGE_REF);
 
         expect(result.storageRef).toBe(STORAGE_REF_0X);
-        expect(result.owner).toBe(MOCK_ADDRESS);
+        expect(result.owner).toBe(DATA_OWNER);
       });
 
       it('should anchorFor without storageRef (backward compatible)', async () => {
@@ -1716,7 +2174,7 @@ describe('ChainClient', () => {
 
         const signer = createMockSigner();
         const client = new ChainClient({ chain: 'base-sepolia', signer });
-        const result = await client.anchorFor(SAMPLE_HASH, 'dataset', MOCK_ADDRESS);
+        const result = await client.anchorFor(SAMPLE_HASH, 'dataset', DATA_OWNER);
 
         expect(result.storageRef).toBeUndefined();
       });
