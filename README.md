@@ -1009,6 +1009,8 @@ issue numbers and lists the open release-gate items.
   In x402 mode the policy reads the 402's top-level payment request before the deprecated
   `detail` copy, and a signature declined in the wallet is `PaymentRefusedError` instead of
   `PAYMENT_FAILED`.
+- A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
+  "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.

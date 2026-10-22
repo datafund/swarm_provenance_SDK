@@ -18,7 +18,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `download()` and `downloadDocument()` report `verified: false` for documents that 0.6.1
   reported as verified. This covers empty, missing or invalid signatures, signatures by other
   keys, and every document when no notary address is available. (#113)
-- `verifySignature()` and `verifyAllSignatures()` are invalid without an expected signer.
+- `verifySignature()` and `verifyAllSignatures()` report every signature as invalid without an
+  expected signer.
   `verifyAllSignatures([])` returns `allValid: false` (it returned `true`). `verifyDataHash()`
   accepts only `hashed_fields: ['data']`. (#113)
 - Raw documents (`raw: true`) use SHA-256 of canonical JSON as `content_hash`. This version
@@ -39,10 +40,18 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `ChainClient.healthCheck()` makes a real `eth_call` to the contract
   (`getUserDataRecordsCount`) instead of `eth_chainId`. It returns `false` for a wrong contract
   address. (#101, PR #105)
-- `BASE_SEPOLIA`, `BASE_MAINNET` and `CHAIN_PRESETS` are frozen and typed `Readonly`. Code that
-  changes them fails. (#101, PR #105)
+- `BASE_SEPOLIA`, `BASE_MAINNET` and `CHAIN_PRESETS` are frozen and typed `Readonly`. TypeScript
+  and strict-mode code reject changes to them. Sloppy-mode CommonJS code ignores the change
+  silently. (#101, PR #105)
 - For the three idempotency stop codes, `acquireStamp()` and notary uploads throw the new
   `PaymentOutcomeError` instead of `StampError` or `NotaryError`. (#102)
+- In `'free'` mode, a 429 whose code is not a rate limit no longer throws
+  `PaymentRateLimitError`. The call throws an error with the gateway's code instead. Examples
+  are `DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_SPEND_BUDGET_EXHAUSTED` and
+  `FREE_QUOTA_EXCEEDED`. In every mode, such a 429 is not retried. (#112)
+- `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
+  on the wrong chain now asks the wallet to switch, adding the chain if the wallet does not know
+  it. Wallet users see a new prompt. (#115, PR #139)
 
 ### Payments (x402 mode)
 
@@ -74,6 +83,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - A paid request that times out says it may have been charged and is not retried. (#119)
 - In `'free'` and `'none'` modes, a pool 402 is still a `StampError`. Its code is now the
   gateway's code, or `PAYMENT_REQUIRED`. (#109)
+- An unpaid pool acquisition carries no `Idempotency-Key`. The pool's `StampError` message says
+  how to continue. (#109)
+- x402 mode on Node 18 without Web Crypto throws `PaymentConfigurationError` that says how to
+  fix it. Before, the library failed with an unclear error. (#106, PR #138)
 
 ### Verification
 
@@ -91,7 +104,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 ### Chain
 
 - Writes refuse a wrong RPC or signer chain and a contract address without code. (#115)
-- `ChainSigner` may implement `switchChain()`. (#115)
+- `ChainSigner` may implement `switchChain()`. The built-in wallet signers do; see Breaking
+  changes. (#115)
 - A write succeeds only when the contract's event is in the receipt. Otherwise it throws
   `ChainTransactionError` with `txHash`. (#116)
 - A missing receipt throws `ReceiptTimeoutError` with `txHash`. Resume with
@@ -99,7 +113,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - Error messages no longer contain RPC URLs or request bodies. (#118)
 - `ChainTransactionError.originalError` is not enumerable. (#118)
 - RPC read errors in the pre-checks before a write (already registered, duplicate
-  transformation) are thrown instead of ignored. (#115-#118)
+  transformation) are thrown instead of ignored. (#116, PR #139)
 - `ChainClient` fails over between RPC endpoints. The `base-sepolia` primary RPC is
   `base-sepolia-rpc.publicnode.com`. `sepolia.base.org` is no longer the primary; it is the last
   fallback. (#101, #86)
@@ -109,6 +123,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   Before, the branch was dropped and the partial graph returned. (#100, PR #132)
 - `getProvenanceChain()` throws `ChainValidationError` for a `NaN` `maxDepth`. Before, `NaN`
   turned off the depth limit. (#100, PR #132)
+- A fractional `maxDepth` is floored. Before, it was used as given. (#100, PR #132)
 - The CommonJS `/chain` entry throws an error that names `viem` when viem is missing. (#99)
 - Chain writes no longer retry "replacement underpriced". (#123)
 - For wallet signers, "replacement underpriced" and "already known" throw
@@ -136,12 +151,15 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - Gateway errors show the gateway's message, keep the response in `error.body`, and a 402
   message names the price. PR #170 merged this and the other #112 changes. (#112)
+- Gateway error messages are read from the top-level `message` of the error envelope when
+  `detail` has none. (#102)
+- A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
+  "Upload too large: the gateway's proxy refused the request body". (#112)
 - `error.body` holds parsed JSON up to 16384 characters. A larger or non-JSON body is kept as
   text, cut to 4096 characters. Gateway messages are cut to 4096 characters. (#112)
-- A 429 for a daily quota is not retried and keeps its code. (#112)
 - `health()` returns `false` when the gateway reports `status: 'critical'`. (#112)
 - `upload()` refuses metadata over `maxUploadBytes` (default 10485760) with `FILE_TOO_LARGE`
-  before it acquires a stamp. (#112)
+  before it acquires a stamp. It also refuses invalid raw input before that. (#112)
 - A signature declined in the wallet throws `PaymentRefusedError`. (#112)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)
 - A `Retry-After` value that is neither whole seconds nor a date, such as `"1.5"`, falls back to
@@ -153,7 +171,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - `pricing()` returns the gateway's price quotes. (#124)
 - `UploadOptions.ownerSigner` uploads to a stamp you own with a signed owner proof instead of a
-  payment. (#124)
+  payment. An owner-proof upload uses the free tier and never pays, in any payment mode. (#124)
 - Upload results and `AcquiredStamp` gain `expiresAt`. (#112)
 - New exports from `@datafund/swarm-provenance`:
   - Errors: `PaymentOutcomeError` (#102), `PaymentRefusedError` (#106).
