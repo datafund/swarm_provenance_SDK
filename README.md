@@ -960,7 +960,8 @@ issue numbers and lists the open release-gate items.
   default stays Base Sepolia.
 - x402 mode enforces a payment policy (#106): `maxAmount` (default `'1'` on Base Sepolia test
   USDC, required elsewhere), USDC only (or `asset` + `assetDecimals`), `exact`/EIP-3009 only,
-  validity ≤ 600 s, optional `payTo` and `onBeforePayment`. Refusals throw
+  validity up to `maxTimeoutSeconds` (default 600 s, configurable), optional `payTo` and
+  `onBeforePayment`. Refusals throw
   `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
   back in), and attempts that sent a payment are not retried (#107); a failure after payment
   carries `error.payment`. On `@x402/*` 2.23+ the library's $1 default cap is
@@ -1008,7 +1009,13 @@ issue numbers and lists the open release-gate items.
   `FILE_TOO_LARGE` before acquiring a stamp, and also refuses invalid raw input before that.
   In x402 mode the policy reads the 402's top-level payment request before the deprecated
   `detail` copy, and a signature declined in the wallet is `PaymentRefusedError` instead of
-  `PAYMENT_FAILED`.
+  `GatewayConnectionError` (`CONNECTION_FAILED`).
+- x402 payment-library failures are no longer `GatewayConnectionError` (`CONNECTION_FAILED`)
+  (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
+  sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:
+  `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
+  catches these. In any mode, a success response that is not valid JSON throws
+  `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`.
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.

@@ -49,6 +49,15 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `PaymentRateLimitError`. The call throws an error with the gateway's code instead. Examples
   are `DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_SPEND_BUDGET_EXHAUSTED` and
   `FREE_QUOTA_EXCEEDED`. In every mode, such a 429 is not retried. (#112)
+- In x402 mode, failures inside the payment library are no longer `GatewayConnectionError`
+  (`CONNECTION_FAILED`). A failure before the payment is sent throws `PaymentError` with code
+  `PAYMENT_FAILED`. A failure after the payment is sent throws `PaymentError` with code
+  `PAYMENT_UNCONFIRMED` and carries `error.payment`. A signature rejected in the wallet throws
+  `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
+  catches these. (#106, #107, PR #138; #112)
+- In any mode, a success response whose body is not valid JSON throws
+  `GatewayConnectionError` with code `INVALID_RESPONSE`. Before, a raw `SyntaxError` escaped.
+  (#107, PR #138)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch, adding the chain if the wallet does not know
   it. Wallet users see a new prompt. (#115, PR #139)
@@ -114,7 +123,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `ChainTransactionError.originalError` is not enumerable. (#118)
 - RPC read errors in the pre-checks before a write (already registered, duplicate
   transformation) are thrown instead of ignored. (#116, PR #139)
-- `ChainClient` fails over between RPC endpoints. The `base-sepolia` primary RPC is
+- `ChainClient` fails over between RPC endpoints. The new `ChainClientConfig.rpcFallbacks`
+  option sets the fallback list. An explicit `rpcUrl` that is not one of the preset's URLs gets
+  no public fallbacks unless you set `rpcFallbacks`. (#101, PR #105)
+- The `base-sepolia` primary RPC is
   `base-sepolia-rpc.publicnode.com`. `sepolia.base.org` is no longer the primary; it is the last
   fallback. (#101, #86)
 - `getProvenanceChain()` records carry `parents`. (#100)
