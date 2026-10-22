@@ -7,6 +7,7 @@ import {
   GatewayConnectionError,
   PaymentConfigurationError,
   PaymentRefusedError,
+  StampError,
 } from '../../src/errors.js';
 import type { PaymentRequest, X402PaymentConfig } from '../../src/types.js';
 
@@ -23,6 +24,8 @@ const wallet = createWalletClient({
 const USDC_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const GATEWAY_PAYTO = '0x1111111111111111111111111111111111111111';
 const STAMP = 'a'.repeat(64);
+const POOL_STAMP = 'd'.repeat(64);
+const POOL_BODY = { batch_id: POOL_STAMP, depth: 17, size_name: 'small', fallback_used: false };
 /** Matches the generated Idempotency-Key (#102) */
 const ANY_KEY: unknown = expect.any(String);
 
@@ -48,6 +51,8 @@ interface Seen {
   paid: boolean;
   /** X-Payment-Mode header, if sent */
   mode?: string;
+  /** Idempotency-Key header, if sent */
+  key?: string;
 }
 
 let seen: Seen[];
@@ -65,7 +70,8 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
   const paid = request.headers.has('X-PAYMENT') || request.headers.has('PAYMENT-SIGNATURE');
   const path = new URL(request.url).pathname;
   const mode = request.headers.get('X-Payment-Mode') ?? undefined;
-  seen.push({ method: request.method, path, paid, ...(mode ? { mode } : {}) });
+  const key = request.headers.get('Idempotency-Key') ?? undefined;
+  seen.push({ method: request.method, path, paid, ...(mode ? { mode } : {}), ...(key ? { key } : {}) });
   if (request.headers.has('x-provenance-sdk-attempt')) throw new Error('internal attempt header leaked to the gateway');
 
   if (!paid && beforePayment.length > 0) {
@@ -76,9 +82,14 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
     return Promise.resolve(new Response('{}', { status: 402, headers: { 'PAYMENT-REQUIRED': header } }));
   }
   if (!paid) {
-    // The gateway wraps the x402 payload in FastAPI's `detail`
+    // The gateway wraps the x402 payload in FastAPI's `detail`. A pool acquisition
+    // past the daily allowance also carries the refusal's code and message (#109).
+    const refusal =
+      path === '/api/v1/pool/acquire'
+        ? { code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED', message: 'Daily stamp allowance used up.' }
+        : {};
     return Promise.resolve(
-      new Response(JSON.stringify({ detail: { x402Version: 1, error: 'Payment required', accepts } }), {
+      new Response(JSON.stringify({ detail: { x402Version: 1, error: 'Payment required', accepts, ...refusal } }), {
         status: 402,
         headers: { 'content-type': 'application/json' },
       }),
@@ -91,7 +102,7 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
     });
   }
   return Promise.resolve(
-    new Response(JSON.stringify(afterPayment.body ?? { reference: 'b'.repeat(64) }), {
+    new Response(JSON.stringify(afterPayment.body ?? (path === '/api/v1/pool/acquire' ? POOL_BODY : { reference: 'b'.repeat(64) })), {
       status: afterPayment.status,
       headers: { 'content-type': 'application/json', ...afterPayment.headers },
     }),
@@ -303,6 +314,85 @@ describe('a paid request is never retried (#107)', () => {
       stampId: STAMP,
     });
     expect(payments()).toBe(1);
+  });
+});
+
+describe('paid pool acquisition is opt-in (#109)', () => {
+  it('without payForPool, upload() does not pay a pool 402 and says how to opt in', async () => {
+    const error = await client().upload('hello').catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as StampError).code).toBe('DAILY_STAMP_ALLOWANCE_EXHAUSTED');
+    expect((error as Error).message).toMatch(/payForPool/);
+    expect((error as StampError).payment).toBeUndefined();
+    expect(payments()).toBe(0);
+    expect(seen.filter((s) => s.path === '/api/v1/data/')).toHaveLength(0);
+    // The unpaid acquisition carries no Idempotency-Key
+    const acquisitions = seen.filter((s) => s.path === '/api/v1/pool/acquire');
+    expect(acquisitions.length).toBeGreaterThan(0);
+    expect(acquisitions.every((s) => s.key === undefined)).toBe(true);
+  });
+
+  it('without payForPool, a 429 allowance refusal stays a StampError with the gateway code', async () => {
+    // The gateway answers 429 instead of 402 where a payment would not bypass the
+    // allowance (testnets by default) or the price cannot be computed
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (new URL(url).pathname === '/api/v1/pool/acquire') {
+        seen.push({ method: 'POST', path: '/api/v1/pool/acquire', paid: false });
+        const detail = { code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED', message: 'Daily stamp allowance used up.' };
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail }), { status: 429, headers: { 'content-type': 'application/json' } })
+        );
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await new ProvenanceClient({
+        gatewayUrl: 'http://gateway.test',
+        payment: { wallet },
+        retry: { maxRetries: 0 },
+      })
+        .acquireStamp()
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(StampError);
+      expect((error as StampError).code).toBe('DAILY_STAMP_ALLOWANCE_EXHAUSTED');
+      expect((error as Error).message).not.toMatch(/payForReads/);
+      expect(payments()).toBe(0);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+
+  it('without payForPool, acquireStamp() does not pay a pool 402 or ask onBeforePayment', async () => {
+    const onBeforePayment = vi.fn(() => true);
+    const error = await client({ onBeforePayment }).acquireStamp('medium').catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as Error).message).toMatch(/payForPool/);
+    expect(onBeforePayment).not.toHaveBeenCalled();
+    expect(payments()).toBe(0);
+  });
+
+  it('payForPool: true pays an in-policy pool 402 and the upload', async () => {
+    const result = await client({ payForPool: true }).upload('hello');
+    expect(result.reference).toBe('b'.repeat(64));
+    expect(result.metadata.stamp_id).toBe(POOL_STAMP);
+    expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/data/']);
+  });
+
+  it.each([
+    ['above maxAmount', {}, { maxAmountRequired: '1000001' }, /exceeds maxAmount 1/],
+    ['with a non-USDC asset', {}, { asset: '0x2222222222222222222222222222222222222222' }, /is not the expected/],
+    ['to a recipient outside payTo', { payTo: ['0x3333333333333333333333333333333333333333'] }, {}, /not in payment.payTo/],
+  ])('payForPool: true still refuses a pool 402 %s', async (_label, config, overrides, reason) => {
+    accepts = [requirement(overrides)];
+    const error = await client({ payForPool: true, ...config }).acquireStamp().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).toMatch(reason);
+    expect(payments()).toBe(0);
   });
 });
 

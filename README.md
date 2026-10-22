@@ -76,9 +76,28 @@ or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing 
 | `maxTimeoutSeconds` | `600` | Longest authorization validity the gateway may ask for |
 | `onBeforePayment` | none | `(payment) => boolean`: sees amount, asset, recipient, network; return `false` to refuse. A payment may still not happen after it (signing fails, timeout): do not count spend here |
 | `payForReads` | `false` | Also pay for reads; by default reads use the free tier (`X-Payment-Mode: free`, rate-limited) |
+| `payForPool` | `false` | Also pay for pool stamps when the gateway asks for payment; by default that 402 is not paid (see below) |
 
 Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Permit2
 approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
+
+**Pool stamps are not paid unless you set `payForPool`.** `acquireStamp()` and `upload()` without
+`stampId` take a stamp from the gateway's pool, which is free within a daily allowance. Callers
+without an `Origin` header, such as Node.js servers, share one allowance. When it is spent, the
+gateway answers in one of these ways. The first two carry the code
+`DAILY_STAMP_ALLOWANCE_EXHAUSTED` (or `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`):
+
+| Gateway answer | When | SDK result without `payForPool` | SDK result with `payForPool: true` |
+|----------------|------|---------------------------------|------------------------------------|
+| 402 with a price | The gateway has x402 payments enabled, and a payment bypasses the allowance there (mainnet, or a testnet the operator enabled it for) | `StampError` with the gateway's code; nothing is paid | Pays, within the payment policy above, and returns the stamp |
+| 429 | A payment would not bypass the allowance (testnets by default), or the gateway could not price the stamp | `StampError` with the gateway's code | `StampError` with the gateway's code |
+| 409 `REQUESTED_SIZE_UNAVAILABLE` | The requested size is out of stock, and the allowance for the larger size the pool would hand out instead is spent | `StampError` with that code | `StampError` with that code |
+
+The 402 price starts from the gateway's own price for buying a stamp of the requested size, which
+already includes its purchase markup, and adds the pool markup. With the default pool markup of
+100%, the 402 asks for twice the gateway's purchase price for that stamp. The `StampError` message
+says how to continue: pass a `stampId` you own, or set `payForPool`.
+
 A request that sent a payment is never retried automatically (unpaid attempts still retry
 on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
 (`{ paymentSent: true, transaction?, idempotencyKey?, stampId? }`). A timeout while the wallet
@@ -114,7 +133,7 @@ try {
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
 (so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
-for its pool stamp makes two paid requests). The gateway does not charge
+for its pool stamp, with `payForPool`, makes two paid requests). The gateway does not charge
 those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
 upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
 
@@ -661,6 +680,12 @@ message comes from Node itself.
   `CHAIN_CONNECTION`) with `txHash` and `expected`, resumable with `waitForTransaction()`; RPC read errors in pre-checks (already
   registered? duplicate transformation?) are thrown instead of ignored; error messages no
   longer contain RPC URLs, and `ChainTransactionError.originalError` is not enumerable.
+- Paid pool acquisition is opt-in (#109): in x402 mode, `acquireStamp()` and `upload()` without
+  `stampId` no longer pay for pool stamps unless `payment.payForPool` is `true`. Without it, a 402
+  from `POST /api/v1/pool/acquire` is not paid and the call throws `StampError` (the gateway's
+  code, or `PAYMENT_REQUIRED`). The unpaid acquisition carries no `Idempotency-Key`. In `'free'`
+  and `'none'` modes, a pool 402 is still a `StampError`. Its message now also says how to
+  continue, and its code is the gateway's code, or `PAYMENT_REQUIRED` where it used to have none.
 - Paid writes send an `Idempotency-Key` (#102); see "Retrying without paying twice". Attempts that
   may pay use `paidTimeout` (default 120 s, or `timeout` if longer) instead of `timeout`, so a
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry
