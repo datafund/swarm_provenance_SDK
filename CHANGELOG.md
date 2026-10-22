@@ -29,7 +29,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - In x402 mode, `acquireStamp()` and `upload()` without `stampId` no longer pay for pool
   stamps unless `payment.payForPool` is `true`. Without it, a 402 from the pool throws
   `StampError`. (#109)
-- Reads use the free tier instead of being paid. Set `payForReads` to pay for them. (#106)
+- In x402 mode, reads use the free tier instead of being paid. Set `payForReads` to pay for
+  them. (#106)
 - `download()` and `downloadDocument()` throw `INVALID_INPUT` for a `reference` that is not 64
   or 128 hex characters (with an optional `0x` prefix). (#123)
 - `fromPrivateKey` is not in browser builds of `@datafund/swarm-provenance/chain`. Any runtime
@@ -47,8 +48,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - The SDK checks every 402 before anything is signed: amount up to `maxAmount`, USDC only
   (or `asset` with `assetDecimals`), scheme `exact` with EIP-3009 only, validity up to
-  `payment.maxTimeoutSeconds` (default 600), and optional `payTo` and `onBeforePayment`. A refused payment throws
-  `PaymentRefusedError`. (#106)
+  `payment.maxTimeoutSeconds` (default 600), and optional `payTo` and `onBeforePayment`. A
+  refused payment throws `PaymentRefusedError`. (#106)
 - An attempt that sent a payment is not retried. Its error carries `error.payment`. (#107)
   The one exception is a paid write answered `IDEMPOTENCY_KEY_IN_PROGRESS` (409) or
   `IDEMPOTENCY_UNAVAILABLE` (503). It is retried with the same key and a new authorization, at
@@ -57,10 +58,19 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `payment.network: 'base' | 'base-sepolia'` sets both x402 network identifiers. Settings that
   disagree are a configuration error. The default stays Base Sepolia. (#108)
 - Paid writes send an `Idempotency-Key`, so a retry with the same key does not pay twice.
-  Paid attempts use `paidTimeout`. Its default is the larger of `timeout` and 120 seconds.
+  `upload()` and `acquireStamp()` take your own key in the `idempotencyKey` option. (#102)
+- Errors after a payment carry `payment.idempotencyKey`, and `payment.stampId` for uploads.
+  (#102)
+- Paid attempts use `paidTimeout`. Its default is the larger of `timeout` and 120 seconds.
   (#102)
 - Paid results carry the payment receipt in `payment`, and `stampPayment` when `upload()` paid
   for its pool stamp. (#111)
+- Errors from `upload()` after a pool acquisition carry `stampId`, and `stampPayment` when the
+  stamp was paid for. (#111)
+- `error.payment` gains `network`, `payer`, `amount`, `amountDecimal` and `asset` when the
+  gateway sent a receipt header, and `replayed` on an idempotent replay. (#111)
+- The policy reads the 402's top-level payment request before the deprecated `detail` copy.
+  (#112)
 - A paid request that times out says it may have been charged and is not retried. (#119)
 - In `'free'` and `'none'` modes, a pool 402 is still a `StampError`. Its code is now the
   gateway's code, or `PAYMENT_REQUIRED`. (#109)
@@ -69,6 +79,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - Notary signatures are checked cryptographically. Download results gain `verification`.
   `DownloadOptions` gains `notaryAddress`. (#113)
+- A malformed `notaryAddress` throws `INVALID_INPUT`. (#113)
+- `verifyAllSignatures()` also returns `anyValid`. (#113)
+- `verifySignature()` refuses any `signed_message_format` other than `'{data_hash}|{timestamp}'`.
+  (#113, PR #135)
+- New runtime dependency: `@noble/curves` `^1.9.1`, used for signature recovery. (#113, PR #135)
 - `downloadDocument()` accepts genuine notary signatures that 0.6.1 rejected. (#114)
 - The README and docs state only the guarantees the code gives. The content-hash check is a
   self-consistency check only. (#122, #123)
@@ -85,8 +100,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `ChainTransactionError.originalError` is not enumerable. (#118)
 - RPC read errors in the pre-checks before a write (already registered, duplicate
   transformation) are thrown instead of ignored. (#115-#118)
-- `ChainClient` fails over between RPC endpoints. The `base-sepolia` default RPC is
-  `base-sepolia-rpc.publicnode.com` with fallbacks, not `sepolia.base.org`. (#101, #86)
+- `ChainClient` fails over between RPC endpoints. The `base-sepolia` primary RPC is
+  `base-sepolia-rpc.publicnode.com`. `sepolia.base.org` is no longer the primary; it is the last
+  fallback. (#101, #86)
 - `getProvenanceChain()` records carry `parents`. (#100)
 - `getProvenanceChain()` fails closed. An RPC error on any node throws
   `ChainConnectionError`, and an unregistered linked hash throws `DataNotRegisteredError`.
@@ -110,23 +126,28 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `gasLimit` that is not a positive integer. (#123)
 - A mixed-case address with a wrong EIP-55 checksum throws `ChainValidationError` before any
   network call. An all-uppercase address is accepted and sent in lowercase. (#123)
+- Write results that echo an input address (`anchorFor().owner`, `transferOwnership().newOwner`,
+  `setDelegate().delegate`) hold the address that was sent. An all-uppercase input comes back
+  in lowercase. (#123)
 - `getProvenanceChainResult()` is new. It says whether `maxDepth` cut the lineage off. (#123)
 - `DataAlreadyRegisteredError` gains `ownedBySigner`. (#123)
 
 ### Errors and retries
 
 - Gateway errors show the gateway's message, keep the response in `error.body`, and a 402
-  message names the price. (#112)
+  message names the price. PR #170 merged this and the other #112 changes. (#112)
+- `error.body` holds parsed JSON up to 16384 characters. A larger or non-JSON body is kept as
+  text, cut to 4096 characters. Gateway messages are cut to 4096 characters. (#112)
 - A 429 for a daily quota is not retried and keeps its code. (#112)
 - `health()` returns `false` when the gateway reports `status: 'critical'`. (#112)
-- `upload()` refuses metadata over `maxUploadBytes` (default 10485760) before it acquires a
-  stamp. (#112)
+- `upload()` refuses metadata over `maxUploadBytes` (default 10485760) with `FILE_TOO_LARGE`
+  before it acquires a stamp. (#112)
 - A signature declined in the wallet throws `PaymentRefusedError`. (#112)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)
+- A `Retry-After` value that is neither whole seconds nor a date, such as `"1.5"`, falls back to
+  the normal backoff. Before, `"1.5"` was read as 1 second. (#123)
 - `isValidSwarmReference()` accepts 128-character encrypted references and the `0x` prefix.
   (#123)
-
-PR #170 merged the #112 fix.
 
 ### New
 
@@ -136,20 +157,21 @@ PR #170 merged the #112 fix.
 - Upload results and `AcquiredStamp` gain `expiresAt`. (#112)
 - New exports from `@datafund/swarm-provenance`:
   - Errors: `PaymentOutcomeError` (#102), `PaymentRefusedError` (#106).
-  - Payment types: `PaymentReceipt` (#111), `PaymentRequest` (#106), the type `PaymentAttempt` (#107).
+  - Payment types: `PaymentReceipt` (#111), `PaymentRequest` (#106), and the type
+    `PaymentAttempt` (#107).
   - Notary verification: `recoverSigner`, `computeNotaryDataHash`, `NOTARY_MESSAGE_FORMAT`,
     and the types `SignatureCheck` and `SignatureVerification` (#113).
   - Canonical JSON: `canonicalizeJsonText`, `canonicalizeJsonValue` (#114).
   - Pricing and owner proof: `Pricing`, `PricingOptions`, `PriceQuote`, `OwnerSigner`,
     `ownerProofMessage` (#124).
 - New exports from `@datafund/swarm-provenance/chain`: `PRESET_RPC_FALLBACKS` (#101),
-  `ReceiptTimeoutError` (#117), `ProvenanceChainResult` (#123), `rpcErrorMessage` (#118), and
-  the type `ExpectedEvent` (#116).
+  `ReceiptTimeoutError` (#117), `rpcErrorMessage` (#118), and the types `ProvenanceChainResult`
+  (#123) and `ExpectedEvent` (#116).
 
 ### CI and repository
 
 - CI fails the build when new commits add a secret. (#121)
-- A local editor settings file is removed from the repository and ignored. (#103, #121)
+- A local editor settings file is removed from the repository and ignored. (#121, PR #103)
 - CI runs the payment tests against `@x402/*` 2.23.0 and 2.28.0. (#110)
 - Integration tests use the dev gateway by default. (#119)
 
@@ -170,6 +192,6 @@ The release gate in #129 is not fully met. These items are open:
     merge to `main` can run `publish.yml` before the `ci.yml` matrix has passed.
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- `publish.yml` installs without `--frozen-lockfile` and runs only on Node 24. It does not run
-  the Node 18 and 20 matrix or the `@x402` 2.23.0 and 2.28.0 tests. The CI run of the
-  `development` to `main` pull request must cover them.
+- `publish.yml` runs its tests only on Node 24. It does not run the Node 18 and 20 matrix or
+  the `@x402` 2.23.0 and 2.28.0 tests before it publishes. The CI run of the `development` to
+  `main` pull request must cover them.
