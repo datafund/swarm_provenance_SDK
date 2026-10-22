@@ -17,26 +17,37 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `address`, and now also one with `account.address`, such as a viem `WalletClient`. Code that
   has `interface X extends PaymentWallet` must use an intersection type. (#122, PR #136)
 - `download()` and `downloadDocument()` report `verified: false` for documents that 0.6.1
-  reported as verified. This covers empty, missing or invalid signatures, signatures by other
-  keys, and every document when no notary address is available. (#113)
+  reported as verified. This covers signature entries whose signature value is empty, missing
+  or invalid, signatures by other keys, and every document when no notary address is available.
+  A document with no signatures still gets `verified: undefined`, as in 0.6.1. (#113)
 - `verified` is now `true` when at least one signature by the expected notary is valid
-  (`anyValid`). 0.6.1 required every signature to pass (`allValid`). A document with one valid
-  notary signature and one invalid signature changed from `verified: false` to `true`. Check
-  `verification.results` to see each signature. (#113, PR #135)
+  (`anyValid`). 0.6.1 required every signature to pass (`allValid`), but it never checked the
+  signature bytes, only the data hash and the signer field. So a document with one valid notary
+  signature and one with a wrong data hash or a different signer changed from
+  `verified: false` to `true`. Check `verification.results` to see each signature.
+  (#113, PR #135)
 - When the notary address lookup fails, the download returns `verified: false` with
   `verification.error`. In 0.6.1 the download rejected. (#113, PR #135)
 - `verifySignature()` and `verifyAllSignatures()` report every signature as invalid without an
   expected signer. `verifyAllSignatures([])` returns `allValid: false` (it returned `true`).
-  `verifyDataHash()` accepts only `hashed_fields: ['data']`. (#113)
+  `verifyDataHash()` and `verifySignature()` accept only the gateway's notary scheme: `type`
+  `'notary'`, `hashed_fields: ['data']`, the message format `'{data_hash}|{timestamp}'`, a
+  non-empty `timestamp`, and string `signer` and `signature` values. Other signature types are
+  invalid. (#113)
 - Raw documents (`raw: true`) use SHA-256 of canonical JSON as `content_hash`. This version
-  still reads the old form. SDK 0.6.x may reject documents uploaded with this version: it hashed
-  `JSON.stringify(data)`, which matches the canonical form only when the keys are already
-  sorted. (#114)
+  still reads the old form. SDK 0.6.x hashed `JSON.stringify(data)`. The canonical form also
+  sorts keys, escapes every non-ASCII character as `\uXXXX`, and prints floats the way Python's
+  `repr` does. So SDK 0.6.x rejects a document uploaded with this version unless its keys are
+  sorted, its strings are plain ASCII, and its numbers print the same in both forms. (#114)
 - `ChainSigner` requires `getChainId()`, and `sendTransaction()` receives an optional
   `chainId`. The parameter type of `fromViemWalletClient()` now requires `getChainId()`, so
   hand-typed mocks without it no longer typecheck. (#115, PR #139)
 - A config with only `payment.network: 'eip155:8453'` now pays in mainnet USDC on the
   gateway's x402 v1 path too. Before, it paired with Base Sepolia for v1. (#108)
+- A config with only a known `payment.v1Network` now also sets `network`. In 0.6.1, only
+  `v1Network: 'base'` paid x402 v2 on Base Sepolia and v1 on mainnet. In 0.7.0 it pays on
+  mainnet on both paths, and so requires `maxAmount`. A lone unknown `v1Network` is a
+  configuration error. (#108, PR #140)
 - An unknown CAIP-2 `payment.network` without `payment.v1Network` is a configuration error.
   0.6.1 used `'base-sepolia'` for v1. (#108, PR #140)
 - In x402 mode, `new ProvenanceClient()` throws `PaymentConfigurationError` for an invalid
@@ -49,6 +60,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `StampError`. (#109)
 - In x402 mode, reads use the free tier instead of being paid. Set `payForReads` to pay for
   them. (#106)
+- In x402 mode, a rate-limited read now throws `PaymentRateLimitError` with a `payForReads`
+  hint. In 0.6.1, x402 mode retried a 429. (#106)
 - `download()` and `downloadDocument()` throw `INVALID_INPUT` for a `reference` that is not 64
   or 128 hex characters (with an optional `0x` prefix). (#123)
 - `fromPrivateKey` is not in browser builds of `@datafund/swarm-provenance/chain`. Any runtime
@@ -74,8 +87,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `PAYMENT_UNCONFIRMED` and carries `error.payment`. A signature rejected in the wallet throws
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
   catches these. (#106, #107, PR #138; #112)
-- In any mode, a success response whose body is not valid JSON throws
-  `GatewayConnectionError` with code `INVALID_RESPONSE`. Before, a raw `SyntaxError` escaped.
+- In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()` whose body is
+  not valid JSON throws `GatewayConnectionError` with code `INVALID_RESPONSE`. Before, a raw
+  `SyntaxError` escaped. The other read methods still throw `SyntaxError` (#173).
   (#107, PR #138)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.

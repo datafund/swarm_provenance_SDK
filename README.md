@@ -943,20 +943,24 @@ issue numbers and lists the open release-gate items.
   presets and `CHAIN_PRESETS` are frozen and typed `Readonly`.
 - The CommonJS `/chain` entry throws a `CHAIN_CONFIGURATION` error naming `viem` when it is missing.
 - `download()` / `downloadDocument()` verify notary signatures cryptographically (#113).
-  `verified` is now `false` for documents 0.6.1 reported as verified: empty, missing or
-  invalid signatures, signatures by other keys, and any document when no notary address is
-  available. Results gain `verification`; `DownloadOptions` gains `notaryAddress`
+  `verified` is now `false` for documents 0.6.1 reported as verified: signature entries whose
+  signature value is empty, missing or invalid, signatures by other keys, and any document when
+  no notary address is available. A document with no signatures still gets `verified: undefined`. Results gain `verification`; `DownloadOptions` gains `notaryAddress`
   (a malformed one throws `INVALID_INPUT`).
 - `verified` is now `true` when at least one signature by the expected notary is valid
-  (`anyValid`, #113); 0.6.1 required every signature to pass (`allValid`). A document with one
-  valid notary signature and one invalid signature changed from `verified: false` to `true`.
+  (`anyValid`, #113); 0.6.1 required every signature to pass (`allValid`), but checked only the
+  data hash and the signer field, never the signature bytes. A document with one valid notary
+  signature and one with a wrong data hash or a different signer changed from
+  `verified: false` to `true`.
   `verification.results` shows each signature.
 - `verifySignature` / `verifyAllSignatures` are invalid without an expected signer;
   `verifyAllSignatures([])` gives `allValid: false` (was `true`) and now also returns
   `anyValid`. `verifyDataHash` accepts only `hashed_fields: ['data']`.
 - Raw documents (`raw: true`): `content_hash` is SHA-256 of canonical JSON (the gateway and
   Python tools' convention) instead of `JSON.stringify(data)` (#114). This version still
-  accepts the old form; SDK 0.6.x rejects documents uploaded with this version.
+  accepts the old form. SDK 0.6.x rejects a document uploaded with this version unless its keys
+  are sorted, its strings are plain ASCII (the canonical form escapes the rest as `\uXXXX`), and
+  its numbers print the same in both forms (floats follow Python's `repr`).
 - x402 network (#108): `payment.network: 'base' | 'base-sepolia'` selects both x402 identifiers;
   a known CAIP-2 ID implies its v1 name, and a lone known `v1Network` implies `network`.
   **A config with only `network: 'eip155:8453'` now pays in mainnet USDC on the gateway's v1
@@ -1019,8 +1023,9 @@ issue numbers and lists the open release-gate items.
   (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
   sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
-  catches these. In any mode, a success response that is not valid JSON throws
-  `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`.
+  catches these. In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()`
+  that is not valid JSON throws `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw
+  `SyntaxError` (the other read methods still throw `SyntaxError`; #173).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
