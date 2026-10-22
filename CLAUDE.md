@@ -217,7 +217,7 @@ pnpm format         # Prettier
 1. Create feature branch from `development`
 2. Do work, commit, push, create PR to `development`
 3. Merge to `development` after CI passes
-4. When ready to release: bump version in `package.json`, create PR from `development` → `main`
+4. When ready to release: bump version in `package.json`, add the version's entry to `CHANGELOG.md`, create PR from `development` → `main`
 5. After merge to `main`, CI auto-publishes to npm and creates a git tag
 
 ### Releasing to npm
