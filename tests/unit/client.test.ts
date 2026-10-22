@@ -207,6 +207,35 @@ describe('ProvenanceClient', () => {
       await expect(client.acquireStamp()).rejects.toThrow(StampError);
     });
 
+    it.each([['free' as const], ['none' as const]])(
+      'a pool 402 in %s mode is a StampError that says how to continue (#109)',
+      async (payment) => {
+        const answer402 = (detail: unknown) => ({
+          ok: false,
+          status: 402,
+          statusText: 'Payment Required',
+          headers: new Headers({}),
+          json: () => Promise.resolve({ detail }),
+        });
+        const client = new ProvenanceClient({ payment, retry: { maxRetries: 0 } });
+
+        mockFetch.mockResolvedValueOnce(
+          answer402({ code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED', message: 'Daily stamp allowance used up.', accepts: [] })
+        );
+        const withCode = await client.acquireStamp().catch((e: unknown) => e);
+        expect(withCode).toBeInstanceOf(StampError);
+        expect((withCode as StampError).code).toBe('DAILY_STAMP_ALLOWANCE_EXHAUSTED');
+        expect((withCode as Error).message).toMatch(/payForPool/);
+        expect((withCode as Error).message).toMatch(/stampId/);
+
+        mockFetch.mockResolvedValueOnce(answer402({ x402Version: 1, error: 'Payment required', accepts: [] }));
+        const withoutCode = await client.acquireStamp().catch((e: unknown) => e);
+        expect(withoutCode).toBeInstanceOf(StampError);
+        expect((withoutCode as StampError).code).toBe('PAYMENT_REQUIRED');
+        expect((withoutCode as Error).message).toMatch(/payForPool/);
+      }
+    );
+
     it('should parse structured detail object (pool exhausted)', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,

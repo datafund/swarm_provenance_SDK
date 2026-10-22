@@ -69,6 +69,13 @@ export interface X402PaymentConfig {
    * (`X-Payment-Mode: free`, rate-limited) and only writes are paid.
    */
   payForReads?: boolean;
+  /**
+   * Pay for pool stamps (`acquireStamp()`, and `upload()` without `stampId`)
+   * when the gateway asks for payment, e.g. after the daily free allowance is
+   * spent. Default false: that 402 is not paid and the call fails with a
+   * `StampError`. When true, the payment policy above still applies.
+   */
+  payForPool?: boolean;
 }
 
 /** A payment the gateway asked for, as shown to `onBeforePayment` and in refusals */
