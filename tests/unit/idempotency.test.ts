@@ -143,6 +143,9 @@ function client(config: Partial<ProvenanceClientConfig> = {}): ProvenanceClient 
   });
 }
 
+/** Paid pool acquisition is opt-in (#109) */
+const PAY_FOR_POOL: Partial<ProvenanceClientConfig> = { payment: { wallet, payForPool: true } };
+
 const paid = () => seen.filter((s) => s.paid);
 const writes = () => seen.filter((s) => s.method === 'POST');
 
@@ -185,7 +188,7 @@ describe('Idempotency-Key on paid requests (#102)', () => {
 
   it('pool acquisition and the upload share the operation\'s key', async () => {
     poolPaid = true;
-    await client().upload('hello', { idempotencyKey: 'order-7' });
+    await client(PAY_FOR_POOL).upload('hello', { idempotencyKey: 'order-7' });
     expect(paid().map((s) => [s.path, s.key])).toEqual([
       ['/api/v1/pool/acquire', 'order-7'],
       ['/api/v1/data/', 'order-7'],
@@ -194,7 +197,7 @@ describe('Idempotency-Key on paid requests (#102)', () => {
 
   it('acquireStamp sends a key when it pays', async () => {
     poolPaid = true;
-    await client().acquireStamp('small', { idempotencyKey: 'stamp-1' });
+    await client(PAY_FOR_POOL).acquireStamp('small', { idempotencyKey: 'stamp-1' });
     expect(paid().map((s) => s.key)).toEqual(['stamp-1']);
   });
 
@@ -225,7 +228,7 @@ describe('retrying a timed-out paid upload (#102 acceptance)', () => {
   it('the error names the key and stamp; the retry carries the same key and a new authorization', async () => {
     poolPaid = true;
     paidAnswers = [{ status: 200 }, { status: 200, hang: true }, { status: 200 }];
-    const first = await client({ paidTimeout: 100 })
+    const first = await client({ ...PAY_FOR_POOL, paidTimeout: 100 })
       .upload('hello')
       .catch((e: unknown) => e);
 
@@ -239,7 +242,7 @@ describe('retrying a timed-out paid upload (#102 acceptance)', () => {
     // Nothing was retried automatically: one paid upload attempt
     expect(paid().filter((s) => s.path === '/api/v1/data/')).toHaveLength(1);
 
-    const result = await client().upload('hello', { idempotencyKey: payment.idempotencyKey!, stampId: payment.stampId! });
+    const result = await client(PAY_FOR_POOL).upload('hello', { idempotencyKey: payment.idempotencyKey!, stampId: payment.stampId! });
     expect(result.reference).toBe(REFERENCE);
 
     const uploads = paid().filter((s) => s.path === '/api/v1/data/');
@@ -255,11 +258,11 @@ describe('metadata built before the stamp is acquired (#112)', () => {
   it('a keyed retry sends exactly the body of the first attempt, pool stamp_id included', async () => {
     poolPaid = true;
     paidAnswers = [{ status: 200 }, { status: 200, hang: true }, { status: 200 }];
-    const first = (await client({ paidTimeout: 100 })
+    const first = (await client({ ...PAY_FOR_POOL, paidTimeout: 100 })
       .upload('hello', { standard: 'test-standard' })
       .catch((e: unknown) => e)) as GatewayConnectionError;
     const { idempotencyKey, stampId } = first.payment!;
-    await client().upload('hello', { standard: 'test-standard', idempotencyKey: idempotencyKey!, stampId: stampId! });
+    await client(PAY_FOR_POOL).upload('hello', { standard: 'test-standard', idempotencyKey: idempotencyKey!, stampId: stampId! });
 
     const uploads = paid().filter((s) => s.path === '/api/v1/data/');
     expect(uploads).toHaveLength(2);
@@ -292,9 +295,9 @@ describe('review round 2 (#153)', () => {
     });
     try {
       // Without a key the empty pool still fails fast
-      await expect(client().upload('hello')).rejects.toMatchObject({ code: 'POOL_EXHAUSTED' });
+      await expect(client(PAY_FOR_POOL).upload('hello')).rejects.toMatchObject({ code: 'POOL_EXHAUSTED' });
       // With the first attempt's key it goes to acquisition, which the gateway replays
-      const result = await client().upload('hello', { idempotencyKey: 'retry-1' });
+      const result = await client(PAY_FOR_POOL).upload('hello', { idempotencyKey: 'retry-1' });
       expect(result.reference).toBe(REFERENCE);
       expect(paid().find((s) => s.path === '/api/v1/pool/acquire')?.key).toBe('retry-1');
     } finally {
@@ -302,10 +305,22 @@ describe('review round 2 (#153)', () => {
     }
   });
 
+  it('without payForPool, a keyed upload still runs the pool status pre-check (#109)', async () => {
+    // Unpaid acquisition sends no key, so the gateway has no stamp to replay
+    await client().upload('hello', { idempotencyKey: 'k1' });
+    expect(seen.filter((s) => s.path === '/api/v1/pool/status')).toHaveLength(1);
+
+    // A paid acquisition with a key still skips it
+    seen = [];
+    poolPaid = true;
+    await client(PAY_FOR_POOL).upload('hello', { idempotencyKey: 'k2' });
+    expect(seen.filter((s) => s.path === '/api/v1/pool/status')).toHaveLength(0);
+  });
+
   it('retry advice does not double a full stop', async () => {
     poolPaid = true;
     paidAnswers = [{ status: 502, body: { detail: { message: 'Bee down', suggestion: 'Try later.' } } }];
-    const error = await client().acquireStamp('small', { idempotencyKey: 'p1' }).catch((e: unknown) => e);
+    const error = await client(PAY_FOR_POOL).acquireStamp('small', { idempotencyKey: 'p1' }).catch((e: unknown) => e);
     expect((error as Error).message).not.toContain('..');
     expect((error as Error).message).toContain('call acquireStamp() again with idempotencyKey "p1"');
   });
@@ -387,7 +402,7 @@ describe('retry codes: same key, new authorization', () => {
   it('a key-only retry advice for acquireStamp, whose body does not depend on a stamp', async () => {
     poolPaid = true;
     paidAnswers = [{ status: 502, body: envelope({ code: 'HTTP_502', message: 'Bee unreachable' }) }];
-    const error = await client().acquireStamp('small', { idempotencyKey: 'a1' }).catch((e: unknown) => e);
+    const error = await client(PAY_FOR_POOL).acquireStamp('small', { idempotencyKey: 'a1' }).catch((e: unknown) => e);
     expect((error as Error).message).toContain('may have been charged');
     expect((error as Error).message).toContain('call acquireStamp() again with idempotencyKey "a1"');
     expect((error as Error).message).not.toContain('stampId');
@@ -396,7 +411,7 @@ describe('retry codes: same key, new authorization', () => {
   it('a failed paid pool acquisition inside upload() advises the key alone', async () => {
     poolPaid = true;
     paidAnswers = [{ status: 502, body: envelope({ code: 'HTTP_502', message: 'Bee unreachable' }) }];
-    const error = await client().upload('hello', { idempotencyKey: 'u1' }).catch((e: unknown) => e);
+    const error = await client(PAY_FOR_POOL).upload('hello', { idempotencyKey: 'u1' }).catch((e: unknown) => e);
     expect((error as StampError).payment?.stampId).toBeUndefined();
     expect((error as Error).message).toContain('call upload() again with idempotencyKey "u1"');
     expect((error as Error).message).not.toContain('stampId');
@@ -494,7 +509,7 @@ describe('stop codes: never retried, identifiers surfaced', () => {
     paidAnswers = [
       { status: 409, body: envelope({ code: 'IDEMPOTENCY_KEY_SETTLED_PENDING', message: 'Paid.', transaction: '0x1' }) },
     ];
-    const error = await client().acquireStamp().catch((e: unknown) => e);
+    const error = await client(PAY_FOR_POOL).acquireStamp().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PaymentOutcomeError);
     expect(error).not.toBeInstanceOf(StampError);
   });

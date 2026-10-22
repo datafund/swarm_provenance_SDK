@@ -160,7 +160,7 @@ describe('paid results carry the payment receipt (#111)', () => {
   it('acquireStamp(): the paid acquisition carries its receipt', async () => {
     poolPaid = true;
     answers[ACQUIRE] = { status: 200, headers: settled(TX_POOL) };
-    const stamp = await client().acquireStamp();
+    const stamp = await client({ payment: { wallet, payForPool: true } }).acquireStamp();
     expect(stamp.batchId).toBe(POOL_STAMP);
     expect(stamp.payment).toEqual({ ...UPLOAD_RECEIPT, transaction: TX_POOL });
   });
@@ -168,7 +168,7 @@ describe('paid results carry the payment receipt (#111)', () => {
   it('upload() that paid for its pool stamp reports both payments, kept apart', async () => {
     poolPaid = true;
     answers[ACQUIRE] = { status: 200, headers: settled(TX_POOL) };
-    const result = await client().upload('hello');
+    const result = await client({ payment: { wallet, payForPool: true } }).upload('hello');
     expect(payments).toBe(2);
     expect(result.payment?.transaction).toBe(TX_UPLOAD);
     expect(result.stampPayment?.transaction).toBe(TX_POOL);
@@ -323,12 +323,15 @@ describe('errors after payment carry the receipt (#111)', () => {
   });
 });
 
+// A paid pool acquisition needs payForPool since #109; without it the pool stamp is acquired unpaid.
 describe('a failed upload() keeps the receipt of the pool stamp it paid for (#157 review)', () => {
   it('a paid upload that fails reports both payments and the stamp', async () => {
     poolPaid = true;
     answers[ACQUIRE] = { status: 200, headers: settled(TX_POOL) };
     answers[UPLOAD] = crashed(TX_UPLOAD);
-    const error = (await client().upload('hello').catch((e: unknown) => e)) as GatewayConnectionError;
+    const error = (await client({ payment: { wallet, payForPool: true } })
+      .upload('hello')
+      .catch((e: unknown) => e)) as GatewayConnectionError;
     expect(payments).toBe(2);
     expect(error.payment?.transaction).toBe(TX_UPLOAD);
     expect(error.payment?.stampId).toBe(POOL_STAMP);
@@ -341,7 +344,7 @@ describe('a failed upload() keeps the receipt of the pool stamp it paid for (#15
     poolPaid = true;
     answers[ACQUIRE] = { status: 200, headers: settled(TX_POOL) };
     let approvals = 0;
-    const error = (await client({ payment: { wallet, onBeforePayment: () => ++approvals === 1 } })
+    const error = (await client({ payment: { wallet, payForPool: true, onBeforePayment: () => ++approvals === 1 } })
       .upload('hello')
       .catch((e: unknown) => e)) as PaymentRefusedError;
     expect(payments).toBe(1); // the stamp only
