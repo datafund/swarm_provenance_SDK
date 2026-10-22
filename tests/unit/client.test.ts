@@ -566,6 +566,56 @@ describe('ProvenanceClient', () => {
     });
   });
 
+  describe('reference validation (#123)', () => {
+    const helloBody = () => ({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: 'aGVsbG8=',
+          content_hash: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+          stamp_id: 'stamp123',
+        }),
+    });
+
+    it.each([
+      ['a path', '../pool/status'],
+      ['a query', `${'a'.repeat(64)}?sign=notary`],
+      ['63 hex characters', 'a'.repeat(63)],
+      ['65 hex characters', 'a'.repeat(65)],
+      ['127 hex characters', 'a'.repeat(127)],
+      ['non-hex characters', 'g'.repeat(64)],
+      ['an empty string', ''],
+      ['surrounding whitespace', ` ${'a'.repeat(64)} `],
+    ])('download() rejects %s with INVALID_INPUT and sends no request', async (_name, reference) => {
+      const client = new ProvenanceClient();
+      const error = await client.download(reference).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('downloadDocument() rejects a malformed reference with INVALID_INPUT and sends no request', async () => {
+      const client = new ProvenanceClient();
+      const error = await client.downloadDocument('x/../../health').catch((e: unknown) => e);
+      expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('strips a 0x prefix before building the request path', async () => {
+      mockFetch.mockResolvedValueOnce(helloBody());
+      const client = new ProvenanceClient({ gatewayUrl: 'https://gw.test' });
+      await client.download(`0x${'ab'.repeat(32)}`);
+      expect((mockFetch.mock.calls[0] as unknown[])[0]).toBe(`https://gw.test/api/v1/data/${'ab'.repeat(32)}`);
+    });
+
+    it('accepts a 128-hex encrypted reference', async () => {
+      mockFetch.mockResolvedValueOnce(helloBody());
+      const client = new ProvenanceClient({ gatewayUrl: 'https://gw.test' });
+      await client.download('cd'.repeat(64));
+      expect((mockFetch.mock.calls[0] as unknown[])[0]).toBe(`https://gw.test/api/v1/data/${'cd'.repeat(64)}`);
+    });
+  });
+
   describe('upload raw mode (#89)', () => {
     it('should upload raw JSON object without base64 wrapping', async () => {
       // Mock upload (stampId provided, so no pool/acquire calls)
@@ -929,6 +979,42 @@ describe('ProvenanceClient', () => {
       expect(client).toBeInstanceOf(ProvenanceClient);
     });
 
+    it('does not cache a failed x402 transport setup: the next paid request tries again (#123)', async () => {
+      const createX402Transport = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('@x402/fetch could not be loaded'))
+        .mockResolvedValueOnce({ fetchFor: () => (url: string, init: RequestInit) => mockFetch(url, init) as Promise<Response> });
+      vi.resetModules();
+      vi.doMock('../../src/payment.js', async (importOriginal) => ({
+        ...(await importOriginal<typeof import('../../src/payment.js')>()),
+        createX402Transport,
+      }));
+      try {
+        const { ProvenanceClient: Client } = await import('../../src/client.js');
+        const client = new Client({
+          payment: {
+            wallet: {
+              address: '0x1234567890abcdef1234567890abcdef12345678',
+              signTypedData: vi.fn(),
+              readContract: vi.fn(),
+            },
+          },
+        });
+
+        await expect(client.acquireStamp()).rejects.toThrow('@x402/fetch could not be loaded');
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ batch_id: 'b'.repeat(64), depth: 17, size_name: 'small', fallback_used: false }),
+        });
+        await expect(client.acquireStamp()).resolves.toMatchObject({ batchId: 'b'.repeat(64) });
+        expect(createX402Transport).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.doUnmock('../../src/payment.js');
+        vi.resetModules();
+      }
+    });
+
     it('should throw PaymentRateLimitError on 429 in free mode', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -943,6 +1029,24 @@ describe('ProvenanceClient', () => {
 
       const client = new ProvenanceClient();
       await expect(client.health()).resolves.toBe(false);
+    });
+
+    it('reads a Retry-After HTTP date into retryAfterSeconds (#123)', async () => {
+      const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+      vi.useFakeTimers({ toFake: ['Date'], now });
+      try {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: new Headers({ 'Retry-After': new Date(now + 60_000).toUTCString() }),
+        });
+        const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(PaymentRateLimitError);
+        expect((error as PaymentRateLimitError).retryAfterSeconds).toBe(60);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should include retry metadata in PaymentRateLimitError', async () => {
@@ -1107,6 +1211,30 @@ describe('ProvenanceClient', () => {
 
       expect(result).toBe(true);
       expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits until a Retry-After given as an HTTP date (#123)', async () => {
+      const now = Date.UTC(2026, 9, 21, 12, 0, 0);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], now });
+      try {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: new Headers({ 'Retry-After': new Date(now + 3_000).toUTCString() }),
+        });
+        mockFetch.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const health = client.health();
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1_100);
+        await expect(health).resolves.toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should return error response after exhausting retries', async () => {

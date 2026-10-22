@@ -37,7 +37,7 @@ import {
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes, isAddress } from './utils.js';
+import { toBytes, isAddress, referencePathSegment, retryAfterSeconds } from './utils.js';
 import {
   base64Decode,
   formatAtomic,
@@ -337,10 +337,14 @@ export class ProvenanceClient {
    * Download a raw JSON document from Swarm.
    * Use this for documents uploaded with `raw: true` where the `data` field
    * contains structured JSON instead of base64-encoded content.
+   *
+   * As in download(), the content-hash check is self-consistency only: it does
+   * not bind the document to `reference`.
    */
   async downloadDocument(reference: string, options: DownloadOptions = {}): Promise<DocumentDownloadResult> {
+    const ref = checkedReference(reference);
     assertNotaryAddress(options);
-    const response = await this.fetch(`/api/v1/data/${reference}`);
+    const response = await this.fetch(`/api/v1/data/${ref}`);
 
     if (!response.ok) {
       throw await this.handleError(response);
@@ -594,11 +598,17 @@ export class ProvenanceClient {
   }
 
   /**
-   * Download and optionally verify provenance data from Swarm
+   * Download and optionally verify provenance data from Swarm.
+   *
+   * The content-hash check is self-consistency only: `content_hash` and `data`
+   * come from the same response, so it detects corruption but does not prove
+   * the gateway returned the document stored at `reference`. Notary signatures
+   * and on-chain anchors are what bind the data to an author or a time.
    */
   async download(reference: string, options: DownloadOptions = {}): Promise<DownloadResult> {
+    const ref = checkedReference(reference);
     assertNotaryAddress(options);
-    const response = await this.fetch(`/api/v1/data/${reference}`);
+    const response = await this.fetch(`/api/v1/data/${ref}`);
 
     if (!response.ok) {
       throw await this.handleError(response);
@@ -668,8 +678,9 @@ export class ProvenanceClient {
 
   private getRetryDelay(response: Response, attempt: number): number {
     if (response.status === 429) {
-      const retryAfter = response.headers.get('Retry-After');
-      if (retryAfter) return parseInt(retryAfter, 10) * 1000;
+      // Delta-seconds or an HTTP date (#123: a date used to give NaN, i.e. no wait)
+      const seconds = retryAfterSeconds(response.headers.get('Retry-After'));
+      if (seconds !== undefined) return seconds * 1000;
     }
     return this.retryConfig.baseDelayMs * Math.pow(2, attempt);
   }
@@ -764,7 +775,7 @@ export class ProvenanceClient {
             x402
               ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
               : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
-            retryAfter ? parseInt(retryAfter, 10) : undefined,
+            retryAfterSeconds(retryAfter),
             rateLimit ? parseInt(rateLimit, 10) : undefined,
             rateRemaining ? parseInt(rateRemaining, 10) : undefined
           );
@@ -814,8 +825,8 @@ export class ProvenanceClient {
       .then((body: GatewayErrorResponse) => errorCode(body))
       .catch(() => undefined);
     if (code === 'IDEMPOTENCY_KEY_IN_PROGRESS' && response.status === 409) {
-      const seconds = Number(response.headers.get('Retry-After') ?? '5');
-      return Math.min(Number.isFinite(seconds) && seconds >= 0 ? seconds : 5, MAX_IN_PROGRESS_WAIT_S) * 1000;
+      const seconds = retryAfterSeconds(response.headers.get('Retry-After')) ?? 5;
+      return Math.min(seconds, MAX_IN_PROGRESS_WAIT_S) * 1000;
     }
     if (code === 'IDEMPOTENCY_UNAVAILABLE' && response.status === 503) {
       return this.retryConfig.baseDelayMs * Math.pow(2, retry);
@@ -1047,6 +1058,21 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
 
 /** Minimum interval between re-checks of a cached notary address (see verifySignatures) */
 const NOTARY_RECHECK_MS = 60_000;
+
+/**
+ * The reference for the request path (#123): 64 or 128 hex characters, optional
+ * 0x (removed). Anything else (a path, a query, whitespace) throws before a request.
+ */
+function checkedReference(reference: string): string {
+  const ref = referencePathSegment(reference);
+  if (ref === undefined) {
+    throw new ProvenanceError(
+      `Invalid Swarm reference: expected 64 or 128 hex characters (optional 0x prefix), got ${JSON.stringify(reference)}`,
+      'INVALID_INPUT'
+    );
+  }
+  return ref;
+}
 
 /** A pinned notaryAddress must be an address: a typo must not read as "unverified". */
 function assertNotaryAddress(options: DownloadOptions): void {

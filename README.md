@@ -285,8 +285,12 @@ await chain.anchor(contentHash, 'dataset');
 
 What the SDK checks, and what it does not:
 
-- **`content_hash`** is recomputed on every download. It proves the content matches the hash
-  stored next to it, not who wrote either: anyone can compute it.
+- **`content_hash`** is recomputed on every download. It is a self-consistency check: it proves
+  the content matches the hash stored next to it in the same response, so it detects
+  corruption. It does not prove who wrote either (anyone can compute it), and it does not bind
+  the data to the Swarm reference you asked for: a gateway, or anyone between you and an `http`
+  gateway URL, can return a different document whose hash matches its own content. Use
+  `https`, notary signatures and on-chain anchors for those guarantees.
 - **Notary signatures** prove that the notary key signed this exact `data` together with a
   timestamp. The timestamp is the gateway's claim, not independent proof of time: whoever
   holds the notary key can sign any timestamp. For time you can verify, anchor the hash
@@ -355,6 +359,10 @@ const result = await client.download(reference, {
 //   signatures?: NotarySignature[],
 // }
 ```
+
+`reference` must be 64 hex characters, or 128 for an encrypted reference, with an optional
+`0x` prefix (removed before the request). Any other value throws `ProvenanceError`
+(`INVALID_INPUT`) before a request is sent. `downloadDocument()` applies the same check.
 
 #### What `verified` means
 
@@ -487,7 +495,7 @@ const chain = new ChainClient({
   rpcUrl?: string,            // override RPC endpoint; a URL outside the preset's list disables its fallbacks
   rpcFallbacks?: string[],    // tried in order on any error but a revert; defaults to the preset's, [] disables
   signer?: ChainSigner,       // required for write operations
-  retry?: RetryConfig,        // auto-retry on nonce errors (default: 2 retries, 1s backoff)
+  retry?: RetryConfig,        // auto-retry on "nonce too low/high" (default: 2 retries, 1s backoff)
 });
 ```
 
@@ -540,6 +548,12 @@ await chain.getProvenanceChain(dataHash, 10);
 // => ChainProvenanceRecord[]: ancestors + descendants up to maxDepth, in BFS order (not topological).
 //    Edges: transformationLinks (children) and parents. Rejects if any lookup fails.
 
+// The same, plus whether maxDepth cut the traversal off
+await chain.getProvenanceChainResult(dataHash, 10);
+// => { records, complete, truncated }: complete is false if a node at maxDepth has a parent or
+//    child that was not visited (or its parents could not be looked up); truncated lists those
+//    nodes. A lineage exactly maxDepth deep is complete. Costs one extra call per node at maxDepth.
+
 // Detect v2 contract support
 await chain.supportsTransformationLinks();  // => boolean
 
@@ -555,7 +569,8 @@ await chain.getBalance();  // => { address, balanceWei, balanceEth, chain }
 const result = await chain.anchor(dataHash, 'dataset');
 // => { txHash, blockNumber, gasUsed, explorerUrl, dataHash, dataType, owner }
 
-// Anchor on behalf of another owner (operator only)
+// Anchor on behalf of another owner: the owner must first have authorized the signer as a
+// delegate (the owner calls setDelegate(signerAddress, true))
 await chain.anchorFor(dataHash, 'dataset', ownerAddress);
 
 // Record access
@@ -595,6 +610,22 @@ await chain.batchSetDataStatus([
 ]);
 ```
 
+**Input checks.** Writes refuse, with `ChainValidationError` and before any network call, input
+the contract would revert on: a zero data hash or merge source hash; a data type that is empty
+or over 64 UTF-8 bytes (a data type of only whitespace is refused too: stricter than the
+contract, which requires only a non-empty byte string); a transformation description that is empty or over 256 UTF-8 bytes; a `storageRef` equal
+to its data hash, or an encrypted (128 hex) Swarm reference, which does not fit the contract's
+`bytes32`; duplicate hashes or storage references in one `batchAnchor()` call; duplicate merge
+sources, or a merge's new hash among its sources; a transformation from a hash to itself; a
+status other than 0, 1 or 2; a hash repeated in one `batchSetDataStatus()` call with the status
+its previous entry in that call already sets; the zero address as owner, new owner or delegate;
+and the signer's own address as new owner, delegate, or `anchorFor()` owner (use `anchor()` to
+register for yourself). The signer checks run after the chain check, still before sending.
+Addresses, in reads and writes, may be all lowercase, all uppercase or EIP-55 checksummed; a
+mixed-case address with a wrong checksum is refused (`ChainValidationError`, or
+`ChainConfigurationError` for `contractAddress`). All-uppercase is sent in lowercase, and results
+echo the address as sent.
+
 ### Signer Factories
 
 ```typescript
@@ -614,12 +645,19 @@ const signer = await fromPrivateKey(process.env.ANCHOR_PRIVATE_KEY as `0x${strin
 const signer = fromViemWalletClient(walletClient);
 ```
 
+`fromPrivateKey` is not exported to browser builds: the `/chain` entry has a `browser` export
+condition that points to a build without it, so a bundler that targets the browser fails with
+"No matching export" instead of shipping code that expects a raw key. Node `import` and
+`require` are unchanged. TypeScript applies the condition only with
+`customConditions: ["browser"]`; otherwise the editor still offers `fromPrivateKey`.
+
 ### Chain Error Handling
 
 ```typescript
 import {
   ChainConfigurationError,
   ChainTransactionError,
+  DataAlreadyRegisteredError,
   ReceiptTimeoutError,
   SignerRequiredError,
 } from '@datafund/swarm-provenance/chain';
@@ -629,6 +667,11 @@ try {
 } catch (error) {
   if (error instanceof SignerRequiredError) {
     console.error('Connect a wallet first');
+  } else if (error instanceof DataAlreadyRegisteredError) {
+    // anchor()/anchorFor(): the hash is registered. Check whose record it is before
+    // treating it as done: ownedBySigner is false if another address owns it, and
+    // undefined if the owner could not be read (error.owner is then '')
+    if (error.ownedBySigner !== true) console.error('Registered by', error.owner || 'unknown owner');
   } else if (error instanceof ChainConfigurationError) {
     // Before anything was sent: wrong chain (RPC or wallet), or no contract at the address
     console.error(error.message);
@@ -672,6 +715,32 @@ message comes from Node itself.
 
 ### Behavior changes since v0.6.1
 
+- `download()` and `downloadDocument()` validate `reference` before the request (#123). It must
+  be 64 or 128 hex characters with an optional `0x` prefix, which is removed. Other values
+  (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
+  instead of being sent to the gateway. `isValidSwarmReference()` now accepts 128-character
+  encrypted references and the `0x` prefix.
+- A `Retry-After` header given as an HTTP date is honoured (#123): the RFC 9110 forms only
+  (IMF-fixdate such as `Sun, 06 Nov 1994 08:49:37 GMT`, and the obsolete RFC 850 and asctime
+  forms), always read as GMT. Before, it was read as `NaN`:
+  the 429 retry (`payment: 'none'` and x402 mode) did not wait, and
+  `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
+  date now falls back to the normal backoff. This includes a non-integer value such as `"1.5"`:
+  RFC 9110 allows only whole delta-seconds. Before, `parseInt` read it as 1 second.
+- Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
+  transaction with that nonce is already pending, and a resend could write twice. That error and
+  "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
+  still confirm ... do not resend" instead of "Transaction failed". Check the wallet's pending
+  transactions before sending again.
+- `fromPrivateKey` signers return the transaction hash when the node answers "already known"
+  (#123): the node already holds that signed transaction, so the write proceeds to wait for its
+  receipt instead of failing. The signer now prepares, signs and sends the raw transaction itself,
+  the same steps viem's `sendTransaction` takes for a local account (same nonce, gas and fee
+  handling, still signed for the preset's chain ID).
+- `DataAlreadyRegisteredError` has `ownedBySigner` (new, optional; #123): `true` if the
+  registered owner is the signer's address, `false` if another address owns the record,
+  `undefined` if the owner could not be read. For `anchorFor()`, compare `error.owner` with the
+  owner you passed.
 - `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
   `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
   rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch
@@ -679,6 +748,36 @@ message comes from Node itself.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
+- Chain input checks (#123): the writes listed under "Input checks" now throw
+  `ChainValidationError` before any network call, instead of sending a transaction that the
+  contract reverts. `mergeTransform()` now validates `newDataType` like the other data types:
+  empty, whitespace-only or over 64 UTF-8 bytes is refused. Whitespace-only is stricter than the
+  contract, which accepts it; `anchor()`, `anchorFor()` and `batchAnchor()` already refused it.
+  `getUserDataRecordsPaginated()` throws `ChainValidationError` for a negative or non-integer
+  `offset` or `limit` (was a mislabelled `ChainConnectionError`). `new ChainClient()` throws
+  `ChainConfigurationError` for a malformed `contractAddress` or a `gasLimit` that is not a
+  positive integer. Reads such as `verifyOnChain()` still accept the zero hash. A mixed-case
+  address with a wrong EIP-55 checksum now throws `ChainValidationError` before any network
+  call (it used to reach viem and throw a raw `InvalidAddressError`); an all-uppercase address,
+  which viem rejected, is now accepted and passed to viem in lowercase. Result fields that echo an
+  input address (`anchorFor().owner`, `transferOwnership().newOwner`, `setDelegate().delegate`)
+  hold the address that was sent: an all-uppercase input comes back in lowercase, other
+  spellings unchanged.
+- `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
+  now has a `browser` export condition, listed first, that resolves to a build without
+  `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node
+  `import`/`require` resolution is unchanged. **Any runtime or bundler that resolves the
+  `browser` export condition gets the build without `fromPrivateKey`**, also for server code.
+  Examples are Cloudflare Workers and esbuild with `platform: 'browser'`. Code built that way
+  must create a viem wallet client with `privateKeyToAccount` and pass it to
+  `fromViemWalletClient` instead.
+  TypeScript does not apply the `browser` condition unless `customConditions: ["browser"]` is
+  set in `tsconfig.json`. Without it, your editor still shows `fromPrivateKey` in browser code,
+  and only the bundler reports the error.
+- `getProvenanceChainResult()` (new; #123) returns `{ records, complete, truncated }`, so you can
+  tell a lineage cut off by `maxDepth` from a whole one. A node at `maxDepth` counts as truncated
+  only if it has a parent or child that was not visited, or its parent lookup fails.
+  `getProvenanceChain()` is unchanged.
 - `healthCheck()` makes a real `eth_call` to the configured contract instead of `eth_chainId`
   (false for a wrong contract address; true if any fallback RPC serves the call).
 - The `base-sepolia` default RPC is `base-sepolia-rpc.publicnode.com` with fallbacks (see above);

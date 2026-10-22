@@ -21,8 +21,21 @@ import {
   ReceiptTimeoutError,
   rpcErrorMessage,
   sanitizeErrorText,
+  isAlreadyKnown,
 } from './errors.js';
-import { normalizeHash, validateDataType, validateAddress } from './validation.js';
+import {
+  normalizeHash,
+  normalizeRegisteredHash,
+  normalizeStorageRef,
+  validateDataType,
+  validateDescription,
+  normalizeAddress,
+  normalizeNonZeroAddress,
+  validateNoDuplicates,
+  validateStatus,
+  validateStorageRefFor,
+  validateCount,
+} from './validation.js';
 import {
   encodeRegisterData,
   encodeRegisterDataFor,
@@ -43,6 +56,7 @@ import type {
   ChainPreset,
   ChainProvenanceRecord,
   ChainSigner,
+  ProvenanceChainResult,
   RetryConfig,
   TransformationLink,
   AnchorResult,
@@ -106,10 +120,10 @@ export class ChainClient {
 
     this.builtinPresetName = Object.keys(CHAIN_PRESETS).find((name) => CHAIN_PRESETS[name] === this.preset);
     const rpcUrls = this.resolveRpcUrls(config);
-    this.contractAddress = config.contractAddress ?? this.preset.contractAddress;
+    this.contractAddress = checkedContractAddress(config.contractAddress ?? this.preset.contractAddress);
     this.signer = config.signer;
     this.txTimeout = config.txTimeout ?? 120_000;
-    this.gasLimit = config.gasLimit != null ? BigInt(config.gasLimit) : undefined;
+    this.gasLimit = config.gasLimit != null ? checkedGasLimit(config.gasLimit) : undefined;
     this.retryConfig = {
       maxRetries: config.retry?.maxRetries ?? 2,
       baseDelayMs: config.retry?.baseDelayMs ?? 1000,
@@ -267,14 +281,14 @@ export class ChainClient {
    * Get all data record hashes owned by a user.
    */
   async getUserDataRecords(user: string): Promise<string[]> {
-    validateAddress(user);
+    const userAddress = normalizeAddress(user);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'getUserDataRecords',
-        args: [user as Address],
+        args: [userAddress],
       });
 
       return [...(result as readonly Hex[])];
@@ -290,14 +304,14 @@ export class ChainClient {
    */
   async hasAddressAccessed(dataHash: string, accessor: string): Promise<boolean> {
     const hash = normalizeHash(dataHash);
-    validateAddress(accessor);
+    const accessorAddress = normalizeAddress(accessor);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'hasAddressAccessed',
-        args: [hash, accessor as Address],
+        args: [hash, accessorAddress],
       });
 
       return result;
@@ -312,15 +326,15 @@ export class ChainClient {
    * Check if an address is an authorized delegate for an owner.
    */
   async isAuthorizedDelegate(owner: string, delegate: string): Promise<boolean> {
-    validateAddress(owner);
-    validateAddress(delegate);
+    const ownerAddress = normalizeAddress(owner);
+    const delegateAddress = normalizeAddress(delegate);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'isAuthorizedDelegate',
-        args: [owner as Address, delegate as Address],
+        args: [ownerAddress, delegateAddress],
       });
 
       return result;
@@ -424,6 +438,28 @@ export class ChainClient {
    * @returns Array of ChainProvenanceRecord for each node in the DAG
    */
   async getProvenanceChain(dataHash: string, maxDepth = 10): Promise<ChainProvenanceRecord[]> {
+    return (await this.traverseProvenance(dataHash, maxDepth, false)).records;
+  }
+
+  /**
+   * getProvenanceChain, plus whether the result is the whole DAG (#123).
+   *
+   * `truncated` lists the nodes at `maxDepth` that have a neighbour the
+   * traversal did not visit: a child from their record, or a parent, which is
+   * looked up for each node at `maxDepth` (one extra call per such node). A
+   * node at `maxDepth` with no unvisited neighbour cuts nothing off, so a
+   * lineage exactly `maxDepth` deep is `complete`. If that parent lookup fails,
+   * the node counts as truncated (fails closed). `complete` is true when
+   * `truncated` is empty. Records are the same as from getProvenanceChain (a
+   * node at `maxDepth` keeps `parents` undefined). Other errors are as for
+   * getProvenanceChain.
+   */
+  async getProvenanceChainResult(dataHash: string, maxDepth = 10): Promise<ProvenanceChainResult> {
+    return this.traverseProvenance(dataHash, maxDepth, true);
+  }
+
+  /** The BFS behind getProvenanceChain(Result); `checkFrontier` looks up the parents of nodes at maxDepth */
+  private async traverseProvenance(dataHash: string, maxDepth: number, checkFrontier: boolean): Promise<ProvenanceChainResult> {
     // Coerce like the clamp always did ('5' -> 5, null -> 0 -> clamped to 1), but reject NaN: it
     // survives Math.min/max and makes `depth >= NaN` always false, i.e. no limit.
     const requestedDepth = Number(maxDepth);
@@ -434,6 +470,7 @@ export class ChainClient {
     const startHash = normalizeHash(dataHash);
 
     const records: ChainProvenanceRecord[] = [];
+    const truncated: string[] = [];
     // BFS queue of [hash, depth]. Hashes are marked when enqueued (BFS reaches
     // each at its minimum depth first), so every node is queued once; `head`
     // replaces O(n) shift().
@@ -449,7 +486,7 @@ export class ChainClient {
       const expand = depth < effectiveMaxDepth;
       const [recordResult, parentsResult] = await Promise.allSettled([
         this.getDataRecord(hash),
-        expand ? this.getTransformationParents(hash) : Promise.resolve(undefined),
+        expand || checkFrontier ? this.getTransformationParents(hash) : Promise.resolve(undefined),
       ]);
 
       if (recordResult.status === 'rejected') {
@@ -462,7 +499,22 @@ export class ChainClient {
       const record = recordResult.value;
       records.push(record);
 
-      if (!expand) continue; // at maxDepth: parents not fetched, stays undefined
+      if (!expand) {
+        // At maxDepth: edges not followed, and parents stays undefined. Every
+        // node within maxDepth is already queued by now, so an unqueued
+        // neighbour is one the result is missing. A failed lookup counts as one.
+        if (checkFrontier) {
+          const unvisited = (hashes: readonly string[]) => hashes.some((h) => !queued.has(h.toLowerCase()));
+          if (
+            unvisited(record.transformationLinks.map((link) => link.newDataHash)) ||
+            parentsResult.status === 'rejected' ||
+            unvisited(parentsResult.value ?? [])
+          ) {
+            truncated.push(record.dataHash);
+          }
+        }
+        continue;
+      }
       if (parentsResult.status === 'rejected') {
         throw this.traversalError(hash, depth, parentsResult.reason);
       }
@@ -480,7 +532,7 @@ export class ChainClient {
       }
     }
 
-    return records;
+    return { records, complete: truncated.length === 0, truncated };
   }
 
   /**
@@ -504,14 +556,14 @@ export class ChainClient {
    * Get the count of data records owned by a user.
    */
   async getUserDataRecordsCount(user: string): Promise<number> {
-    validateAddress(user);
+    const userAddress = normalizeAddress(user);
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'getUserDataRecordsCount',
-        args: [user as Address],
+        args: [userAddress],
       });
 
       return Number(result);
@@ -526,14 +578,16 @@ export class ChainClient {
    * Get paginated data record hashes owned by a user.
    */
   async getUserDataRecordsPaginated(user: string, offset: number, limit: number): Promise<string[]> {
-    validateAddress(user);
+    const userAddress = normalizeAddress(user);
+    validateCount(offset, 'offset');
+    validateCount(limit, 'limit');
 
     try {
       const result = await this.publicClient.readContract({
         address: this.contractAddress,
         abi: DATA_PROVENANCE_ABI,
         functionName: 'getUserDataRecordsPaginated',
-        args: [user as Address, BigInt(offset), BigInt(limit)],
+        args: [userAddress, BigInt(offset), BigInt(limit)],
       });
 
       return [...(result as readonly Hex[])];
@@ -626,8 +680,9 @@ export class ChainClient {
     this.requireSigner();
     validateDataType(dataType);
 
-    const hash = normalizeHash(dataHash);
-    const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
+    const hash = normalizeRegisteredHash(dataHash);
+    const normalizedStorageRef = storageRef ? normalizeStorageRef(storageRef) : undefined;
+    validateStorageRefFor(hash, normalizedStorageRef);
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
     await this.checkNotRegistered(hash, dataHash);
@@ -681,22 +736,33 @@ export class ChainClient {
   }
 
   /**
-   * Anchor a data hash on-chain on behalf of another owner (operator only).
-   * Optionally link a storage reference for bidirectional lookup.
-   * Requires a signer with operator role.
+   * Anchor a data hash on-chain on behalf of another owner (the contract's
+   * registerDataFor). Optionally link a storage reference for bidirectional lookup.
+   * Requires a signer that `actualOwner` has authorized as a delegate
+   * (`setDelegate(signerAddress, true)` sent by the owner); otherwise the
+   * contract reverts 'Not authorized delegate'. The signer cannot be
+   * `actualOwner` itself: use anchor() for that.
    */
   async anchorFor(dataHash: string, dataType: string, actualOwner: string, storageRef?: string): Promise<AnchorResult> {
     this.requireSigner();
     validateDataType(dataType);
-    validateAddress(actualOwner);
+    const ownerAddress = normalizeNonZeroAddress(actualOwner, 'owner');
 
-    const hash = normalizeHash(dataHash);
-    const normalizedStorageRef = storageRef ? normalizeHash(storageRef) : undefined;
+    const hash = normalizeRegisteredHash(dataHash);
+    const normalizedStorageRef = storageRef ? normalizeStorageRef(storageRef) : undefined;
+    validateStorageRefFor(hash, normalizedStorageRef);
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
+    // registerDataFor requires the signer to be a delegate of actualOwner, and
+    // the contract never lets an address delegate to itself (#123)
+    if (await this.isSigner(actualOwner)) {
+      throw new ChainValidationError(
+        `Invalid owner ${actualOwner}: it is the signer's own address, which cannot be its own delegate. Use anchor() instead.`
+      );
+    }
     await this.checkNotRegistered(hash, dataHash);
 
-    const data = encodeRegisterDataFor(hash, dataType, actualOwner as Address, normalizedStorageRef);
+    const data = encodeRegisterDataFor(hash, dataType, ownerAddress, normalizedStorageRef);
 
     let receipt: TransactionResult;
     try {
@@ -712,7 +778,8 @@ export class ChainClient {
       ...receipt,
       dataHash: hash,
       dataType,
-      owner: actualOwner as Address,
+      // The address that was sent (normalized; see normalizeAddress)
+      owner: ownerAddress,
     };
     if (normalizedStorageRef) {
       result.storageRef = normalizedStorageRef;
@@ -758,6 +825,10 @@ export class ChainClient {
 
     const origHash = normalizeHash(originalHash);
     const nHash = normalizeHash(newHash);
+    validateDescription(description);
+    if (origHash.toLowerCase() === nHash.toLowerCase()) {
+      throw new ChainValidationError('The new hash must differ from the original hash');
+    }
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
@@ -820,8 +891,14 @@ export class ChainClient {
       );
     }
 
-    const normalizedSources = sourceHashes.map((h) => normalizeHash(h));
+    const normalizedSources = sourceHashes.map((h) => normalizeRegisteredHash(h, 'source hash'));
     const normalizedNew = normalizeHash(newHash);
+    validateNoDuplicates(normalizedSources, 'source hash');
+    if (normalizedSources.some((h) => h.toLowerCase() === normalizedNew.toLowerCase())) {
+      throw new ChainValidationError(`The new hash ${newHash} must not be one of the source hashes`);
+    }
+    validateDescription(description);
+    validateDataType(newDataType);
 
     // Check for duplicate merge (saves gas)
     // After local validation, before any network call (#115/#116)
@@ -867,6 +944,7 @@ export class ChainClient {
     this.requireSigner();
 
     const hash = normalizeHash(dataHash);
+    validateStatus(newStatus);
     const data = encodeSetDataStatus(hash, newStatus as number);
 
     // After local validation, before any network call (#115/#116)
@@ -886,19 +964,23 @@ export class ChainClient {
    */
   async transferOwnership(dataHash: string, newOwner: string): Promise<TransferResult> {
     this.requireSigner();
-    validateAddress(newOwner);
+    const newOwnerAddress = normalizeNonZeroAddress(newOwner, 'new owner');
 
     const hash = normalizeHash(dataHash);
-    const data = encodeTransferDataOwnership(hash, newOwner as Address);
+    const data = encodeTransferDataOwnership(hash, newOwnerAddress);
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
+    // The contract reverts a transfer to the sender: "Already the owner" (#123)
+    if (await this.isSigner(newOwner)) {
+      throw new ChainValidationError(`Invalid new owner ${newOwner}: it is the signer's own address`);
+    }
     const receipt = await this.sendAndWait(data, { event: 'DataOwnershipTransferred' }, target);
 
     return {
       ...receipt,
       dataHash: hash,
-      newOwner: newOwner as Address,
+      newOwner: newOwnerAddress,
     };
   }
 
@@ -908,17 +990,21 @@ export class ChainClient {
    */
   async setDelegate(delegate: string, authorized: boolean): Promise<DelegateResult> {
     this.requireSigner();
-    validateAddress(delegate);
+    const delegateAddress = normalizeNonZeroAddress(delegate, 'delegate');
 
-    const data = encodeSetDelegate(delegate as Address, authorized);
+    const data = encodeSetDelegate(delegateAddress, authorized);
 
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
+    // The contract reverts both authorize and revoke for the sender: "Cannot delegate to self" (#123)
+    if (await this.isSigner(delegate)) {
+      throw new ChainValidationError(`Invalid delegate ${delegate}: it is the signer's own address (you cannot delegate to yourself)`);
+    }
     const receipt = await this.sendAndWait(data, { event: 'DelegateAuthorized' }, target);
 
     return {
       ...receipt,
-      delegate: delegate as Address,
+      delegate: delegateAddress,
       authorized,
     };
   }
@@ -932,18 +1018,24 @@ export class ChainClient {
     this.requireSigner();
     this.validateBatchSize(items.length);
 
-    const hashes = items.map((item) => normalizeHash(item.dataHash));
+    const hashes = items.map((item) => normalizeRegisteredHash(item.dataHash));
     const types = items.map((item) => {
       validateDataType(item.dataType);
       return item.dataType;
     });
+    // The contract registers items in order, so a repeat reverts the whole batch
+    validateNoDuplicates(hashes, 'data hash in batch');
 
     const hasAnyStorageRef = items.some((item) => item.storageRef);
     let storageRefs: Hex[] | undefined;
     if (hasAnyStorageRef) {
-      storageRefs = items.map((item) =>
-        item.storageRef ? normalizeHash(item.storageRef) : ZERO_BYTES32
-      );
+      storageRefs = items.map((item, i) => {
+        if (!item.storageRef) return ZERO_BYTES32;
+        const ref = normalizeStorageRef(item.storageRef);
+        validateStorageRefFor(hashes[i]!, ref);
+        return ref;
+      });
+      validateNoDuplicates(storageRefs.filter((ref) => ref !== ZERO_BYTES32), 'storageRef in batch');
     }
 
     const data = encodeBatchRegisterData(hashes, types, storageRefs);
@@ -988,6 +1080,19 @@ export class ChainClient {
     this.validateBatchSize(items.length);
 
     const hashes = items.map((item) => normalizeHash(item.dataHash));
+    items.forEach((item) => validateStatus(item.status));
+    // The contract applies the items in order; a hash given again with the status
+    // its previous entry already set reverts 'Status unchanged' (#123)
+    const lastStatus = new Map<string, DataStatus>();
+    items.forEach((item, i) => {
+      const key = hashes[i]!.toLowerCase();
+      if (lastStatus.get(key) === item.status) {
+        throw new ChainValidationError(
+          `Item ${i}: ${item.dataHash} repeats the status ${item.status} set by its previous entry in this batch (the contract reverts 'Status unchanged')`
+        );
+      }
+      lastStatus.set(key, item.status);
+    });
     const statuses = items.map((item) => item.status as number);
     const data = encodeBatchSetDataStatus(hashes, statuses);
     // After local validation, before any network call (#115/#116)
@@ -1035,12 +1140,23 @@ export class ChainClient {
         record.owner,
         record.timestamp,
         record.dataType,
+        await this.isSigner(record.owner),
       );
     } catch (error) {
       // Only "not registered" means the hash is free. Any other failure (RPC
       // down, wrong contract) is surfaced instead of anchoring blind (#116).
       if (error instanceof DataNotRegisteredError) return;
       throw error;
+    }
+  }
+
+  /** Whether `owner` is the signer's address (case-insensitive); undefined if that cannot be told */
+  private async isSigner(owner: string): Promise<boolean | undefined> {
+    if (!owner || !this.signer) return undefined;
+    try {
+      return (await this.signer.getAddress()).toLowerCase() === owner.toLowerCase();
+    } catch {
+      return undefined;
     }
   }
 
@@ -1059,6 +1175,7 @@ export class ChainClient {
         record.owner,
         record.timestamp,
         record.dataType,
+        await this.isSigner(record.owner),
       );
     } catch (error) {
       if (error instanceof DataAlreadyRegisteredError) {
@@ -1096,16 +1213,36 @@ export class ChainClient {
     return cleaned;
   }
 
-  private isTransientError(error: unknown): boolean {
-    let msg: string;
-    if (error instanceof Error) {
-      msg = error.message;
-    } else if (typeof error === 'object' && error !== null && 'message' in error) {
-      msg = String((error as Record<string, unknown>)['message']);
-    } else {
-      msg = String(error);
+  private errorText(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'object' && error !== null && 'message' in error) {
+      return String((error as Record<string, unknown>)['message']);
     }
-    return /nonce too (low|high)|replacement underpriced/i.test(msg);
+    return String(error);
+  }
+
+  /**
+   * Errors worth sending again: the node refused the nonce. Not "replacement
+   * underpriced" (#123): a transaction with that nonce is already pending,
+   * possibly this client's own earlier write, so a resend could write twice.
+   */
+  private isTransientError(error: unknown): boolean {
+    return /nonce too (low|high)/i.test(this.errorText(error));
+  }
+
+  /**
+   * Why a send error does not mean "nothing was sent" (#123), or undefined.
+   * Both cases mean a transaction is in the node's mempool and may confirm.
+   */
+  private pendingSendNote(error: unknown): string | undefined {
+    const text = this.errorText(error);
+    if (/replacement (transaction )?underpriced/i.test(text)) {
+      return 'a transaction with this nonce is already pending. It may still confirm: check the signer\'s pending transactions; do not resend';
+    }
+    if (isAlreadyKnown(error)) {
+      return 'the node already has this transaction (already known). It may still confirm: check the signer\'s pending transactions; do not resend';
+    }
+    return undefined;
   }
 
   private delay(ms: number): Promise<void> {
@@ -1215,8 +1352,9 @@ export class ChainClient {
           continue;
         }
         const originalError = error instanceof Error ? error : undefined;
+        const pending = this.pendingSendNote(error);
         throw new ChainTransactionError(
-          `Transaction failed: ${this.cleanTransactionError(error)}`,
+          pending ? `Transaction not confirmed: ${pending}` : `Transaction failed: ${this.cleanTransactionError(error)}`,
           undefined,
           originalError,
         );
@@ -1322,3 +1460,23 @@ export interface ExpectedEvent {
 declare const checkedWriteTarget: unique symbol;
 type CheckedWriteTarget = { readonly [checkedWriteTarget]: true };
 const CHECKED = {} as CheckedWriteTarget;
+
+/** A gas limit must be a positive integer (number or bigint) */
+function checkedGasLimit(gasLimit: bigint | number): bigint {
+  const valid = typeof gasLimit === 'bigint' ? gasLimit > 0n : Number.isSafeInteger(gasLimit) && gasLimit > 0;
+  if (!valid) {
+    throw new ChainConfigurationError(`Invalid gasLimit ${String(gasLimit)}: expected a positive integer`);
+  }
+  return BigInt(gasLimit);
+}
+
+/** The configured contract address, in the form viem accepts (see normalizeAddress) */
+function checkedContractAddress(address: string): Address {
+  try {
+    return normalizeAddress(address);
+  } catch (error) {
+    throw new ChainConfigurationError(
+      `Invalid contract address ${JSON.stringify(address)}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}

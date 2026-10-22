@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeHash, validateAddress, validateDataType } from '../../../src/chain/validation.js';
+import {
+  normalizeHash,
+  validateAddress,
+  normalizeAddress,
+  validateDataType,
+  validateDescription,
+  normalizeRegisteredHash,
+  normalizeStorageRef,
+  validateStatus,
+  validateCount,
+} from '../../../src/chain/validation.js';
 import { ChainValidationError } from '../../../src/chain/errors.js';
 
 describe('normalizeHash', () => {
@@ -61,5 +71,66 @@ describe('validateDataType', () => {
 
   it('should throw for whitespace-only string', () => {
     expect(() => validateDataType('   ')).toThrow(ChainValidationError);
+  });
+});
+
+describe('contract limits (#123)', () => {
+  it('validateDataType accepts exactly 64 UTF-8 bytes and refuses 65', () => {
+    expect(() => validateDataType('a'.repeat(64))).not.toThrow();
+    expect(() => validateDataType('a'.repeat(65))).toThrow(ChainValidationError);
+    expect(() => validateDataType('é'.repeat(32))).not.toThrow(); // 64 bytes
+    expect(() => validateDataType('é'.repeat(33))).toThrow(/66 bytes/);
+  });
+
+  it('validateDescription accepts 1 to 256 UTF-8 bytes', () => {
+    expect(() => validateDescription('d')).not.toThrow();
+    expect(() => validateDescription('d'.repeat(256))).not.toThrow();
+    expect(() => validateDescription('')).toThrow(ChainValidationError);
+    expect(() => validateDescription('d'.repeat(257))).toThrow(ChainValidationError);
+  });
+
+  it('normalizeRegisteredHash refuses the zero hash; normalizeHash still accepts it', () => {
+    expect(() => normalizeRegisteredHash('0'.repeat(64))).toThrow(/zero hash/);
+    expect(normalizeHash('0'.repeat(64))).toBe(`0x${'0'.repeat(64)}`);
+  });
+
+  it('normalizeStorageRef explains why an encrypted reference is refused', () => {
+    expect(() => normalizeStorageRef('a'.repeat(128))).toThrow(/encrypted/);
+    expect(() => normalizeStorageRef('not-a-hash')).toThrow(/Invalid data hash/);
+    expect(normalizeStorageRef('a'.repeat(64))).toBe(`0x${'a'.repeat(64)}`);
+  });
+
+  it('validateStatus accepts 0, 1 and 2 only', () => {
+    [0, 1, 2].forEach((s) => expect(() => validateStatus(s)).not.toThrow());
+    [3, -1, 0.5, '1', undefined].forEach((s) => expect(() => validateStatus(s)).toThrow(ChainValidationError));
+  });
+
+  it('validateCount accepts non-negative safe integers only', () => {
+    expect(() => validateCount(0, 'offset')).not.toThrow();
+    expect(() => validateCount(Number.MAX_SAFE_INTEGER, 'offset')).not.toThrow();
+    [-1, 1.5, Number.NaN, Infinity, 2 ** 60, '3'].forEach((v) => expect(() => validateCount(v, 'offset')).toThrow(ChainValidationError));
+  });
+});
+
+describe('validateAddress: EIP-55 checksum for mixed case (#123)', () => {
+  const lower = '0x1234567890abcdef1234567890abcdef12345678';
+  const checksummed = '0x1234567890AbcdEF1234567890aBcdef12345678'; // viem getAddress(lower)
+  const wrongChecksum = '0x1234567890ABCDEF1234567890abcdef12345678';
+
+  it('accepts all-lowercase, all-uppercase and correctly checksummed addresses', () => {
+    expect(() => validateAddress(lower)).not.toThrow();
+    expect(() => validateAddress('0x' + lower.slice(2).toUpperCase())).not.toThrow();
+    expect(() => validateAddress(checksummed)).not.toThrow();
+  });
+
+  it('refuses a mixed-case address with a wrong checksum', () => {
+    expect(() => validateAddress(wrongChecksum)).toThrow(ChainValidationError);
+    expect(() => validateAddress(wrongChecksum)).toThrow(/checksum/);
+  });
+
+  it('normalizeAddress gives viem a form it accepts: uppercase becomes lowercase, others unchanged', () => {
+    expect(normalizeAddress('0x' + lower.slice(2).toUpperCase())).toBe(lower);
+    expect(normalizeAddress(lower)).toBe(lower);
+    expect(normalizeAddress(checksummed)).toBe(checksummed);
   });
 });
