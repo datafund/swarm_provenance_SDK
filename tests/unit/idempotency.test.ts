@@ -49,6 +49,8 @@ interface Seen {
   key: string | null;
   /** Nonce of the payment authorization, on paid requests */
   nonce?: string;
+  /** The uploaded file (the metadata JSON), on uploads */
+  file?: string;
 }
 
 interface Answer {
@@ -84,12 +86,14 @@ const gateway = async (input: string | URL | Request, init?: RequestInit): Promi
   if (request.signal.aborted) throw new DOMException('aborted', 'AbortError');
   const payment = request.headers.get('X-PAYMENT');
   const path = new URL(request.url).pathname;
+  const file = path === '/api/v1/data/' ? (await request.clone().formData()).get('file') : null;
   seen.push({
     method: request.method,
     path,
     paid: payment !== null,
     key: request.headers.get('Idempotency-Key'),
     ...(payment ? { nonce: nonceOf(payment) } : {}),
+    ...(file instanceof Blob ? { file: await file.text() } : {}),
   });
 
   if (request.method === 'GET') {
@@ -247,6 +251,33 @@ describe('retrying a timed-out paid upload (#102 acceptance)', () => {
     expect(uploads[1]!.nonce).not.toBe(uploads[0]!.nonce);
     // The retry reused the stamp instead of acquiring another one
     expect(paid().filter((s) => s.path === '/api/v1/pool/acquire')).toHaveLength(1);
+  });
+});
+
+describe('metadata built before the stamp is acquired (#112)', () => {
+  it('a keyed retry sends exactly the body of the first attempt, pool stamp_id included', async () => {
+    poolPaid = true;
+    paidAnswers = [{ status: 200 }, { status: 200, hang: true }, { status: 200 }];
+    const first = (await client({ ...PAY_FOR_POOL, paidTimeout: 100 })
+      .upload('hello', { standard: 'test-standard' })
+      .catch((e: unknown) => e)) as GatewayConnectionError;
+    const { idempotencyKey, stampId } = first.payment!;
+    await client(PAY_FOR_POOL).upload('hello', { standard: 'test-standard', idempotencyKey: idempotencyKey!, stampId: stampId! });
+
+    const uploads = paid().filter((s) => s.path === '/api/v1/data/');
+    expect(uploads).toHaveLength(2);
+    expect(uploads[0]!.file).toBeDefined();
+    expect(uploads[1]!.file).toBe(uploads[0]!.file);
+    expect(JSON.parse(uploads[0]!.file!)).toMatchObject({ stamp_id: POOL_STAMP, provenance_standard: 'test-standard' });
+  });
+
+  it('an in-flight retry (IN_PROGRESS) resends the same body', async () => {
+    paidAnswers = [IN_PROGRESS, { status: 200 }];
+    await client().upload({ a: 1 }, { raw: true });
+    const uploads = paid().filter((s) => s.path === '/api/v1/data/');
+    expect(uploads).toHaveLength(2);
+    expect(uploads[1]!.file).toBe(uploads[0]!.file);
+    expect(JSON.parse(uploads[0]!.file!)).toMatchObject({ stamp_id: POOL_STAMP, data: { a: 1 } });
   });
 });
 
