@@ -25,6 +25,10 @@ export type {
   NotaryInfo,
   PoolStatus,
   AcquiredStamp,
+  PricingOptions,
+  Pricing,
+  PriceQuote,
+  OwnerSigner,
 } from './types.js';
 
 // Errors
@@ -70,4 +74,5 @@ export {
   bytesToBase64,
   base64ToBytes,
   isValidSwarmReference,
+  ownerProofMessage,
 } from './utils.js';

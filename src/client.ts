@@ -21,8 +21,14 @@ import type {
   GatewayPoolStatusResponse,
   GatewayAcquireStampResponse,
   GatewayErrorResponse,
+  GatewayPriceQuote,
+  GatewayPricingResponse,
+  Pricing,
+  PricingOptions,
+  PriceQuote,
   ProvenanceMetadata,
   NotarySignature,
+  OwnerSigner,
 } from './types.js';
 import {
   ProvenanceError,
@@ -37,7 +43,7 @@ import {
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes, isAddress, referencePathSegment, retryAfterSeconds } from './utils.js';
+import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds } from './utils.js';
 import {
   base64Decode,
   formatAtomic,
@@ -80,6 +86,8 @@ export class ProvenanceClient {
   /** Responses to attempts that sent a payment, with their Idempotency-Key and signed requirement (see fetch, handleError) */
   private readonly paidResponses = new WeakMap<Response, PaidAttempt>();
   private x402TransportPromise: Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> | undefined;
+  /** Last owner-proof timestamp used, per stamp and signer (see reserveOwnerProofTimestamp) */
+  private readonly ownerProofTimestamps = new Map<string, number>();
 
   constructor(config: ProvenanceClientConfig = {}) {
     this.gatewayUrl = (config.gatewayUrl ?? DEFAULT_GATEWAY_URL).replace(/\/$/, '');
@@ -114,6 +122,40 @@ export class ProvenanceClient {
       );
     }
     return this.x402TransportPromise;
+  }
+
+  /**
+   * A unix timestamp (seconds) no earlier than now and later than any this
+   * client used before for `key` (stamp and signer). Reserved synchronously, so
+   * concurrent uploads never share one: the gateway refuses a second use of the
+   * same signed message (#124). A burst runs the counter ahead of the clock;
+   * the gateway refuses timestamps more than 300 s ahead, so once it is more
+   * than OWNER_PROOF_MAX_LEAD_S ahead this waits for the clock, bounded by the
+   * attempt's signal.
+   */
+  private async reserveOwnerProofTimestamp(key: string, signal: AbortSignal): Promise<number> {
+    const now = Math.floor(Date.now() / 1000);
+    for (const [k, last] of this.ownerProofTimestamps) {
+      if (last < now) this.ownerProofTimestamps.delete(k); // now is later anyway
+    }
+    const timestamp = Math.max(now, (this.ownerProofTimestamps.get(key) ?? 0) + 1);
+    this.ownerProofTimestamps.set(key, timestamp);
+    const waitMs = (timestamp - OWNER_PROOF_MAX_LEAD_S) * 1000 - Date.now();
+    if (waitMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, waitMs);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+    return timestamp;
   }
 
   /**
@@ -178,6 +220,41 @@ export class ProvenanceClient {
       totalStamps: data.total_stamps,
       lowReserveWarning: data.low_reserve_warning,
     };
+  }
+
+  /**
+   * Price quotes for the gateway's paid operations, without paying
+   * (`GET /api/v1/pricing`). Only the options you set are sent; the gateway
+   * applies its defaults. `payTo` can seed `payment.payTo`.
+   */
+  async pricing(options: PricingOptions = {}): Promise<Pricing> {
+    const params = new URLSearchParams();
+    if (options.size !== undefined) params.set('size', options.size);
+    if (options.depth !== undefined) params.set('depth', String(options.depth));
+    if (options.durationHours !== undefined) params.set('duration_hours', String(options.durationHours));
+    if (options.uploadBytes !== undefined) params.set('upload_bytes', String(options.uploadBytes));
+    if (options.mb !== undefined) params.set('mb', String(options.mb));
+    const query = params.toString();
+    const response = await this.fetch(`/api/v1/pricing${query ? `?${query}` : ''}`);
+
+    if (!response.ok) {
+      throw await this.handleError(response);
+    }
+
+    const data = await this.readJson<GatewayPricingResponse>(response);
+    const pricing: Pricing = { x402Enabled: data.x402_enabled === true, quotes: {} };
+    if (data.currency !== undefined) pricing.currency = data.currency;
+    if (data.network !== undefined) pricing.network = data.network;
+    if (data.asset !== undefined) pricing.asset = data.asset;
+    if (data.pay_to !== undefined) pricing.payTo = data.pay_to;
+    if (data.min_price_usd !== undefined) pricing.minPriceUsd = data.min_price_usd;
+    if (data.free_tier !== undefined) pricing.freeTier = { enabled: data.free_tier.enabled, header: data.free_tier.header };
+    const quotes = data.quotes ?? {};
+    if (quotes.stamp_purchase) pricing.quotes.stampPurchase = toPriceQuote(quotes.stamp_purchase);
+    if (quotes.pool_acquire) pricing.quotes.poolAcquire = toPriceQuote(quotes.pool_acquire);
+    if (quotes.data_upload) pricing.quotes.dataUpload = toPriceQuote(quotes.data_upload);
+    if (quotes.bandwidth_credit) pricing.quotes.bandwidthCredit = toPriceQuote(quotes.bandwidth_credit);
+    return pricing;
   }
 
   /**
@@ -265,7 +342,9 @@ export class ProvenanceClient {
   ): Promise<UploadResult | DocumentUploadResult> {
     // One key for the whole operation: the pool acquisition and the upload are
     // different paths, so the gateway keeps them apart (#102)
-    const idempotencyKey = this.operationKey(options.idempotencyKey);
+    assertOwnerProofOptions(options);
+    // An owner-proof upload is unpaid: no key (#124)
+    const idempotencyKey = options.ownerSigner ? undefined : this.operationKey(options.idempotencyKey);
     // Get stamp - either from options or acquire from pool
     let stampId: string;
     let stampPayment: PaymentReceipt | undefined;
@@ -579,10 +658,21 @@ export class ProvenanceClient {
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' });
     formData.append('file', metadataBlob, 'provenance.json');
 
+    // Owner proof (#124): free tier, never paid, a new proof per attempt
+    const ownerSigner = options.ownerSigner;
     const response = await this.fetch(
       `/api/v1/data/?${params.toString()}`,
-      { method: 'POST', body: formData },
-      { idempotencyKey: options.idempotencyKey }
+      ownerSigner
+        ? { method: 'POST', body: formData, headers: { 'X-Payment-Mode': 'free' } }
+        : { method: 'POST', body: formData },
+      ownerSigner
+        ? {
+            unpaid: true,
+            attemptHeaders: ownerProofHeaders(ownerSigner, stampId, (key, signal) =>
+              this.reserveOwnerProofTimestamp(key, signal)
+            ),
+          }
+        : { idempotencyKey: options.idempotencyKey }
     );
 
     if (!response.ok) {
@@ -717,32 +807,58 @@ export class ProvenanceClient {
   private async fetch(
     path: string,
     init?: RequestInit,
-    options: { idempotencyKey?: string | undefined; payable?: boolean } = {}
+    options: {
+      idempotencyKey?: string | undefined;
+      /** false: a write that must not pay (pool acquisition without payForPool, #109) */
+      payable?: boolean;
+      /** Never pay, even in x402 mode: the request uses the free tier (owner proofs, #124) */
+      unpaid?: boolean;
+      /** Headers made anew for each attempt (owner proofs are single use) */
+      attemptHeaders?: AttemptHeaders;
+    } = {}
   ): Promise<Response> {
     const url = `${this.gatewayUrl}${path}`;
 
     const x402 = typeof this.paymentMode === 'object' ? this.paymentMode : undefined;
     const method = (init?.method ?? 'GET').toUpperCase();
     const isRead = method === 'GET' || method === 'HEAD';
-    const paying = x402 !== undefined && (isRead ? x402.payForReads === true : options.payable !== false);
+    const paying =
+      x402 !== undefined && !options.unpaid && (isRead ? x402.payForReads === true : options.payable !== false);
     // Unpaid reads in x402 mode use the free tier, as in 'free' mode. An unpaid
     // pool acquisition does not: the gateway ignores X-Payment-Mode there, and its
     // 429 is an allowance refusal for the caller to see, not a read rate limit (#109)
-    const freeTier = this.paymentMode === 'free' || (x402 !== undefined && !paying && isRead);
+    // Owner-proof requests (unpaid) send X-Payment-Mode: free in every mode, 'none' included
+    const freeTier =
+      this.paymentMode === 'free' || (x402 !== undefined && !paying && isRead) || options.unpaid === true;
     const transport = paying ? await this.getX402Transport() : undefined;
     const idempotencyKey = paying && !isRead ? options.idempotencyKey : undefined;
-    const timeout = transport ? this.paidTimeout : this.timeout;
+    // An owner proof may wait for a person to approve a wallet prompt, as a payment does
+    const timeout = transport || options.attemptHeaders ? this.paidTimeout : this.timeout;
 
     let idempotentRetries = 0;
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeout);
+      let extraHeaders: Record<string, string> | undefined;
+      if (options.attemptHeaders) {
+        // Bounded by the timeout, like payment signing
+        try {
+          extraHeaders = await untilAborted(options.attemptHeaders.make(controller.signal), controller.signal);
+        } catch (error) {
+          clearTimeout(timeoutId);
+          if (controller.signal.aborted) {
+            throw new GatewayConnectionError(options.attemptHeaders.timeoutMessage(), undefined, 'TIMEOUT');
+          }
+          throw error;
+        }
+      }
 
       const headers = new Headers(init?.headers);
       if (freeTier && !headers.has('X-Payment-Mode')) {
         headers.set('X-Payment-Mode', 'free');
       }
       if (idempotencyKey !== undefined) headers.set('Idempotency-Key', idempotencyKey);
+      if (extraHeaders) for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
       // Each attempt gets its own paying fetch, which records whether it paid
       const state: PaymentAttemptState = { paid: false };
       const fetchFn: typeof fetch = transport ? transport.fetchFor(state) : fetch;
@@ -772,9 +888,11 @@ export class ProvenanceClient {
           const rateRemaining = response.headers.get('X-RateLimit-Remaining');
 
           throw new PaymentRateLimitError(
-            x402
-              ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
-              : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
+            options.attemptHeaders
+              ? 'Free tier rate limit exceeded. Owner-proof uploads use the free tier and its rate limit: wait for Retry-After, or (in x402 mode) upload without ownerSigner to pay instead.'
+              : x402 && !options.unpaid
+                ? 'Free tier rate limit exceeded for reads. Set payment.payForReads to pay for reads in x402 mode.'
+                : 'Free tier rate limit exceeded. Consider using x402 payment mode for higher limits.',
             retryAfterSeconds(retryAfter),
             rateLimit ? parseInt(rateLimit, 10) : undefined,
             rateRemaining ? parseInt(rateRemaining, 10) : undefined
@@ -1167,4 +1285,109 @@ function paymentAttempt(response: Response, paid: PaidAttempt, decimals: number 
 function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceError): E {
   if (source.payment) target.payment = source.payment;
   return target;
+}
+
+/** A gateway price quote in the SDK's field names */
+function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
+  return {
+    method: quote.method,
+    path: quote.path,
+    priceUsd: quote.price_usd,
+    maxAmountRequired: quote.max_amount_required,
+    description: quote.description,
+  };
+}
+
+/**
+ * How far an owner-proof timestamp may run ahead of the clock before the
+ * client waits. The gateway refuses more than 300 s; 30 s leaves room for
+ * clock skew.
+ */
+const OWNER_PROOF_MAX_LEAD_S = 30;
+
+/** A signature as signMessage returns it: 0x-prefixed hex */
+const SIGNATURE_HEX = /^0x[0-9a-fA-F]+$/;
+
+/** Stamp id the gateway accepts: 64 hex characters, no 0x */
+const STAMP_ID = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * An owner proof needs the stamp it proves ownership of, and takes no
+ * Idempotency-Key: the upload is unpaid, so the gateway would not use it.
+ * Checked before anything is signed or sent.
+ */
+function assertOwnerProofOptions(options: UploadOptions): void {
+  if (options.ownerSigner === undefined) return;
+  if (options.stampId === undefined || !STAMP_ID.test(options.stampId)) {
+    throw new ProvenanceError(
+      `ownerSigner requires stampId: 64 hex characters without 0x, got ${JSON.stringify(options.stampId)}`,
+      'INVALID_INPUT'
+    );
+  }
+  if (options.idempotencyKey !== undefined) {
+    throw new ProvenanceError(
+      'ownerSigner cannot be combined with idempotencyKey: an owner-proof upload is not paid, so the gateway does not use the key',
+      'INVALID_INPUT'
+    );
+  }
+}
+
+/**
+ * Headers made anew for each request attempt (owner proofs are single use),
+ * and the message for a timeout while they are being made.
+ */
+interface AttemptHeaders {
+  make(signal: AbortSignal): Promise<Record<string, string>>;
+  timeoutMessage(): string;
+}
+
+/** The signer's address, when it exposes one (viem LocalAccount or WalletClient) */
+function signerAddress(signer: OwnerSigner): string | undefined {
+  const s = signer as { address?: unknown; account?: { address?: unknown } };
+  const address = typeof s.address === 'string' ? s.address : s.account?.address;
+  return typeof address === 'string' ? address.toLowerCase() : undefined;
+}
+
+/**
+ * Makes the owner-proof headers for one attempt (#124). The gateway accepts a
+ * proof once, keyed on the signed message and signer, and signing is
+ * deterministic, so each attempt signs a timestamp the client has not used
+ * for this stamp and signer (see reserveOwnerProofTimestamp). The signature is a bearer credential for one upload: it is
+ * never put in an error message.
+ */
+function ownerProofHeaders(
+  signer: OwnerSigner,
+  stampId: string,
+  reserve: (key: string, signal: AbortSignal) => Promise<number>
+): AttemptHeaders {
+  const key = `${stampId.toLowerCase()}|${signerAddress(signer) ?? ''}`;
+  // What the current attempt is waiting for; attempts of one upload run one at a time
+  let waitingFor: 'clock' | 'signature' = 'clock';
+  const timeoutMessage = () =>
+    waitingFor === 'clock'
+      ? `Request timed out waiting for the clock: too many owner-proof uploads to this stamp are in flight (one client signs at most one proof per second per stamp, up to ${OWNER_PROOF_MAX_LEAD_S} s ahead)`
+      : 'Request timed out waiting for the owner-proof signature';
+  const make = async (signal: AbortSignal): Promise<Record<string, string>> => {
+    waitingFor = 'clock';
+    const timestamp = await reserve(key, signal);
+    waitingFor = 'signature';
+    let signature: unknown;
+    try {
+      signature = await signer.signMessage({ message: ownerProofMessage(stampId, timestamp) });
+    } catch (error) {
+      throw new ProvenanceError(
+        `Owner proof could not be signed: ${error instanceof Error ? error.message : String(error)}`,
+        'OWNER_PROOF_FAILED'
+      );
+    }
+    // The value is not quoted: it may be a usable proof in some other encoding
+    if (typeof signature !== 'string' || !SIGNATURE_HEX.test(signature)) {
+      throw new ProvenanceError(
+        'Owner proof could not be signed: signMessage did not return a 0x-prefixed hex string',
+        'OWNER_PROOF_FAILED'
+      );
+    }
+    return { 'X-Owner-Timestamp': String(timestamp), 'X-Owner-Signature': signature };
+  };
+  return { make, timeoutMessage };
 }

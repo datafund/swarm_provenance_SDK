@@ -998,6 +998,8 @@ describe('ProvenanceClient', () => {
               signTypedData: vi.fn(),
               readContract: vi.fn(),
             },
+            // A paid pool acquisition (the x402 transport) needs payForPool since #109
+            payForPool: true,
           },
         });
 
