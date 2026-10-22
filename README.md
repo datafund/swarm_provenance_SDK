@@ -993,8 +993,9 @@ issue numbers and lists the open release-gate items.
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry
   `payment.idempotencyKey` (and `payment.stampId` for uploads). The three idempotency answers
   that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
-  (not `StampError` / `NotaryError`). Gateway error messages use the top-level `message` of
-  the error envelope first, whatever `detail` holds (see "Error handling (#112)" below).
+  (not `StampError` / `NotaryError`). Gateway error messages use the envelope's top-level
+  `message`, except for validation errors (a `detail` list), which still list the fields; a
+  `detail` text the message lacks is appended (see "Error handling (#112)" below).
 - Paid results carry the payment receipt (#111): `payment` on `UploadResult`,
   `DocumentUploadResult` and `AcquiredStamp`, and `stampPayment` on upload results when
   `upload()` paid for its pool stamp. Errors from `upload()` after a pool acquisition carry
@@ -1006,8 +1007,9 @@ issue numbers and lists the open release-gate items.
   a payment. An owner-proof upload uses the free tier and never pays, in any payment mode.
   New exports: `Pricing`, `PricingOptions`, `PriceQuote`, `OwnerSigner`, `ownerProofMessage`.
   Uploads without `ownerSigner` are unchanged.
-- Error handling (#112): gateway errors show the envelope's top-level `message` first, and
-  `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
+- Error handling (#112): gateway errors show the envelope's top-level `message` first, except
+  for validation errors (a `detail` list), which list the fields; a `detail` string the message
+  lacks is appended, and `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
   4096 characters; a JSON body over 16384 characters is kept as text cut to 4096
   characters), and gateway messages are cut to 4096 characters. A 402 message names the price. A 429 whose code is not a rate limit
   (`DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`,

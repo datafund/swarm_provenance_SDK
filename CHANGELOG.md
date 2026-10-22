@@ -13,8 +13,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - In x402 mode, `payment.maxAmount` is required on any network other than Base Sepolia test
   USDC. On Base Sepolia it defaults to `'1'`. (#106)
-- `PaymentWallet` changed from an interface to a union type. It still accepts a wallet with
-  `address`, and now also one with `account.address`, such as a viem `WalletClient`. Code that
+- `PaymentWallet` changed from an interface to a type: the wallet methods
+  (`PaymentWalletMethods`) combined with either `address` or `account.address`. It still accepts
+  a wallet with `address`, and now also one with `account.address`, such as a viem
+  `WalletClient`. Code that
   has `interface X extends PaymentWallet` must use an intersection type. (#122, PR #136)
 - `download()` and `downloadDocument()` report `verified: false` for documents that 0.6.1
   reported as verified. This covers signature entries whose signature value is empty, missing
@@ -44,8 +46,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   hand-typed mocks without it no longer typecheck. (#115, PR #139)
 - A config with only `payment.network: 'eip155:8453'` now pays in mainnet USDC on the
   gateway's x402 v1 path too. Before, it paired with Base Sepolia for v1. (#108)
-- A config with only a known `payment.v1Network` now also sets `network`. In 0.6.1, only
-  `v1Network: 'base'` paid x402 v2 on Base Sepolia and v1 on mainnet. In 0.7.0 it pays on
+- A config with only a known `payment.v1Network` now also sets `network`. In 0.6.1, a config with
+  only `v1Network: 'base'` paid x402 v2 on Base Sepolia and v1 on mainnet. In 0.7.0 it pays on
   mainnet on both paths, and so requires `maxAmount`. A lone unknown `v1Network` is a
   configuration error. (#108, PR #140)
 - An unknown CAIP-2 `payment.network` without `payment.v1Network` is a configuration error.
@@ -139,8 +141,6 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `DownloadOptions` gains `notaryAddress`. (#113)
 - A malformed `notaryAddress` throws `INVALID_INPUT`. (#113)
 - `verifyAllSignatures()` also returns `anyValid`. (#113)
-- `verifySignature()` refuses any `signed_message_format` other than
-  `'{data_hash}|{timestamp}'`. (#113, PR #135)
 - `recoverSigner()` works and is exported. In 0.6.1 it threw `NOT_IMPLEMENTED`. (#113, PR #135)
 - New runtime dependency: `@noble/curves` `^1.9.1`, used for signature recovery.
   (#113, PR #135)
@@ -204,9 +204,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - Gateway errors show the gateway's message, keep the response in `error.body`, and a 402
   message names the price. PR #170 merged this and the other #112 changes. (#112)
-- Gateway error messages use the top-level `message` of the error envelope first, whatever
-  `detail` holds. A `detail.detail` text is added when the message lacks it. 0.6.1 read only
-  `detail`. (#102, #112)
+- Gateway error messages use the envelope's top-level `message`, except for validation errors
+  (a `detail` list), which still list the fields. A `detail` text, or `detail.detail`, that the
+  message lacks is appended. 0.6.1 never read the top-level `message`: it used the `detail`
+  string, the `detail` list or `detail.message`, and otherwise the HTTP status. (#102, #112)
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body". (#112)
 - `error.body` holds parsed JSON up to 16384 characters. A larger or non-JSON body is kept as
@@ -223,9 +224,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - New error codes from the SDK: `PAYMENT_REFUSED` (`PaymentRefusedError`), `PAYMENT_FAILED`,
   `PAYMENT_UNCONFIRMED`, `PAYMENT_REQUIRED` (pool `StampError` without a gateway code),
   `INVALID_RESPONSE`, `FILE_TOO_LARGE` (also before any request), `OWNER_PROOF_FAILED`, and
-  `INVALID_SIGNATURE` (`recoverSigner()`). `UNSUPPORTED_SIGNATURE` is used for an unsupported
-  message format; `verifySignature()` reports it as an invalid signature with an error text.
-  (#102, #106, #107, #109, #112, #113, #124)
+  `INVALID_SIGNATURE` (`recoverSigner()`). (#102, #106, #107, #109, #112, #113, #124)
 - Gateway codes the SDK now handles: `IDEMPOTENCY_KEY_IN_PROGRESS` and
   `IDEMPOTENCY_UNAVAILABLE` (retried), `IDEMPOTENCY_KEY_REUSED` and `IDEMPOTENCY_KEY_INVALID`
   (thrown with the gateway's code), and the three stop codes above. (#102)
