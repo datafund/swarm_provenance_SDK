@@ -231,8 +231,9 @@ Publishing is automated via `.github/workflows/publish.yml`:
 To release a new version:
 1. On `development`, bump version: edit `package.json` `"version"` field
 2. Commit: `chore: bump version to X.Y.Z`
-3. Create PR `development` → `main`
-4. After merge, npm publish happens automatically
+3. Add the version's entry to `CHANGELOG.md`: what changed for users, with issue numbers, and any open release-gate items
+4. Create PR `development` → `main`
+5. After merge, npm publish happens automatically
 
 ### CI
 

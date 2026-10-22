@@ -870,6 +870,9 @@ message comes from Node itself.
 
 ### Behavior changes since v0.6.1
 
+Version 0.7.0 contains these changes. [CHANGELOG.md](CHANGELOG.md) groups them by area with
+issue numbers and lists the open release-gate items.
+
 - `download()` and `downloadDocument()` validate `reference` before the request (#123). It must
   be 64 or 128 hex characters with an optional `0x` prefix, which is removed. Other values
   (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
