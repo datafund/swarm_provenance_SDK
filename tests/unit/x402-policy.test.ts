@@ -3,6 +3,7 @@ import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
+import { UserRejectedRequestError } from 'viem';
 import {
   GatewayConnectionError,
   PaymentConfigurationError,
@@ -60,8 +61,10 @@ let accepts: Array<Record<string, unknown>>;
 /** x402 protocol of the stub's 402: v1 in the body (the gateway today), v2 in the PAYMENT-REQUIRED header */
 let protocol: 1 | 2;
 let afterPayment: { status: number; headers?: Record<string, string>; body?: unknown; hang?: boolean };
-/** Statuses to answer unpaid requests with before the 402 (e.g. a transient 503) */
-let beforePayment: number[];
+/** Answers to unpaid requests before the 402 (e.g. a transient 503): a status, or a status and body */
+let beforePayment: Array<number | { status: number; body: unknown }>;
+/** When set, the v1 402 has the payment request at the top level and this deprecated copy under `detail` */
+let detailAccepts: Array<Record<string, unknown>> | undefined;
 
 const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const request = new Request(input, init);
@@ -75,11 +78,23 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
   if (request.headers.has('x-provenance-sdk-attempt')) throw new Error('internal attempt header leaked to the gateway');
 
   if (!paid && beforePayment.length > 0) {
-    return Promise.resolve(new Response('{"detail":"busy"}', { status: beforePayment.shift()! }));
+    const next = beforePayment.shift()!;
+    const { status, body } = typeof next === 'number' ? { status: next, body: { detail: 'busy' } } : next;
+    return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
   }
   if (!paid && protocol === 2) {
     const header = Buffer.from(JSON.stringify({ x402Version: 2, error: 'Payment required', resource: { url: request.url }, accepts })).toString('base64');
     return Promise.resolve(new Response('{}', { status: 402, headers: { 'PAYMENT-REQUIRED': header } }));
+  }
+  if (!paid && detailAccepts) {
+    // The gateway's current 402: x402 body at the top level, deprecated copy under `detail`
+    const error = 'Payment required';
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({ x402Version: 1, error, accepts, code: 'HTTP_402', message: error, detail: { x402Version: 1, error, accepts: detailAccepts } }),
+        { status: 402, headers: { 'content-type': 'application/json' } },
+      ),
+    );
   }
   if (!paid) {
     // The gateway wraps the x402 payload in FastAPI's `detail`. A pool acquisition
@@ -121,6 +136,7 @@ beforeEach(() => {
   accepts = [requirement()];
   afterPayment = { status: 200 };
   beforePayment = [];
+  detailAccepts = undefined;
   protocol = 1;
 });
 afterAll(() => {
@@ -650,5 +666,64 @@ describe('final review (#140)', () => {
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PaymentRefusedError);
     expect((error as Error).message).toMatch(/no known USDC/);
+  });
+});
+
+describe('error handling (#112)', () => {
+  it('prefers the top-level x402 body over the deprecated detail copy', async () => {
+    detailAccepts = [requirement({ maxAmountRequired: '99000000' })];
+    await client().upload('hello', { stampId: STAMP });
+    expect(payments()).toBe(1);
+  });
+
+  it('a pool allowance 429 is not retried in x402 mode and keeps its code', async () => {
+    const code = 'DAILY_STAMP_ALLOWANCE_EXHAUSTED';
+    const message = 'The daily free allowance of 10 small stamps for this application has been used up.';
+    const answer = { status: 429, body: { detail: { code, message }, code, message } };
+    beforePayment = [answer, answer, answer];
+    const error = await client().acquireStamp().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as StampError).code).toBe(code);
+    expect((error as Error).message).toContain('daily free allowance');
+    expect(seen).toHaveLength(1);
+  });
+
+  it('a paid attempt answered 402 keeps its message and body', async () => {
+    const error402 = 'Payment verification failed: invalid_exact_evm_payload_signature';
+    const body = { x402Version: 1, error: error402, accepts, code: 'HTTP_402', message: error402 };
+    afterPayment = { status: 402, body };
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as Error).message).toContain(error402);
+    expect((error as Error).message).not.toMatch(/maxAmountRequired|"accepts"/);
+    expect((error as GatewayConnectionError).payment?.paymentSent).toBe(true);
+    expect((error as GatewayConnectionError).body).toEqual(body);
+    expect(payments()).toBe(1);
+  });
+
+  it('a signature the user rejects in the wallet is PAYMENT_REFUSED, not a failure', async () => {
+    const rejecting = {
+      ...wallet,
+      signTypedData: () => Promise.reject(new UserRejectedRequestError(new Error('User rejected the request.'))),
+    };
+    const error = await new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: rejecting } })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(/rejected in the wallet/);
+    // The amount as a price, like a 402's; the atomic value stays in `refusals`
+    expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
+    expect((error as Error).message).not.toContain('10000');
+    expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('10000');
+    expect(payments()).toBe(0);
+  });
+
+  it('a policy refusal names each option without dumping the accepts JSON', async () => {
+    accepts = [requirement({ maxAmountRequired: '1000001' })];
+    const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as Error).message).not.toMatch(/[{}]|maxAmountRequired|"accepts"|resource/);
+    expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('1000001');
   });
 });

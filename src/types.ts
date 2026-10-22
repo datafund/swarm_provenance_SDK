@@ -129,6 +129,13 @@ export interface ProvenanceClientConfig {
   payment?: PaymentMode;
   /** Retry config for transient gateway failures (default: 2 retries, 1s delay) */
   retry?: GatewayRetryConfig;
+  /**
+   * Largest upload the SDK sends, in bytes of the uploaded metadata JSON
+   * (default: 10485760, the gateway's default MAX_UPLOAD_SIZE_MB of 10). Base64
+   * makes that about 7.5 MiB of content; raw documents about 10 MiB of JSON.
+   * Larger uploads throw FILE_TOO_LARGE before a stamp is acquired.
+   */
+  maxUploadBytes?: number;
 }
 
 /**
@@ -328,6 +335,8 @@ export interface UploadResult {
   payment?: PaymentReceipt;
   /** The pool stamp's payment, when `upload()` acquired the stamp and paid for it */
   stampPayment?: PaymentReceipt;
+  /** When the stamp runs out (ISO 8601, UTC; the gateway's estimate), if known */
+  expiresAt?: string;
 }
 
 /**
@@ -342,6 +351,8 @@ export interface DocumentUploadResult {
   payment?: PaymentReceipt;
   /** The pool stamp's payment, when `upload()` acquired the stamp and paid for it */
   stampPayment?: PaymentReceipt;
+  /** When the stamp runs out (ISO 8601, UTC; the gateway's estimate), if known */
+  expiresAt?: string;
 }
 
 /**
@@ -432,6 +443,8 @@ export interface AcquiredStamp {
   fallbackUsed: boolean;
   /** The acquisition's payment, when it was paid (x402 mode) */
   payment?: PaymentReceipt;
+  /** When the stamp runs out (ISO 8601, UTC; the gateway's estimate), if known */
+  expiresAt?: string;
 }
 
 /**
@@ -510,6 +523,7 @@ export interface GatewayHealthResponse {
 
 export interface GatewayUploadResponse {
   reference: string;
+  expires_at?: string | null;
 }
 
 export interface GatewayDownloadResponse {
@@ -541,6 +555,7 @@ export interface GatewayAcquireStampResponse {
   depth: number;
   size_name: string;
   fallback_used: boolean;
+  expires_at?: string | null;
 }
 
 export interface GatewayPriceQuote {
@@ -572,5 +587,8 @@ export interface GatewayErrorResponse {
   /** Top-level message of the gateway's error envelope */
   message?: string;
   /** FastAPI detail — string, object with message, or validation error array */
-  detail: string | { message: string; suggestion?: string } | Array<{ msg: string; loc?: unknown[] }>;
+  detail?:
+    | string
+    | { message?: string; error?: string; detail?: unknown; suggestion?: string; code?: string }
+    | Array<{ msg: string; loc?: unknown[] }>;
 }
