@@ -100,8 +100,40 @@ says how to continue: pass a `stampId` you own, or set `payForPool`.
 
 A request that sent a payment is never retried automatically (unpaid attempts still retry
 on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
-(`{ paymentSent: true, transaction?, idempotencyKey?, stampId? }`). A timeout while the wallet
+(`{ paymentSent: true, transaction?, idempotencyKey?, stampId?, ... }`). A timeout while the wallet
 is still approving the payment is not reported as paid: nothing was sent.
+
+**Payment receipt (#111).** A paid result carries `payment`: `upload()` results (both
+`UploadResult` and `DocumentUploadResult`) and `acquireStamp()`. An `upload()` that also paid for
+its pool stamp made two payments: the upload's is `payment` and the stamp's is `stampPayment`.
+Unpaid results have neither field.
+
+```typescript
+const { reference, payment, stampPayment } = await client.upload(data);
+// payment: { transaction, network, payer, amount: '10000', amountDecimal: '0.01', asset }
+```
+
+| Field | Source |
+|-------|--------|
+| `transaction` | The gateway's `X-Payment-Transaction` header, else the `transaction` in its `X-PAYMENT-RESPONSE` (v1) or `PAYMENT-RESPONSE` (v2) receipt. Its placeholder `unknown` is never reported |
+| `network`, `payer` | The receipt. `network` falls back to the network the SDK signed for |
+| `amount` | What the SDK signed, in the token's smallest unit (integer string): v1 `maxAmountRequired`, v2 `amount`. The gateway's receipt has no amount |
+| `amountDecimal` | `amount` in tokens, using the policy's decimals (6 for USDC) |
+| `asset` | The token contract `amount` is in |
+| `replayed` | `true` when the gateway replayed the first result for the Idempotency-Key (see below) |
+
+A browser can read the receipt headers only if the gateway exposes them through CORS. Without
+them, `payment` has the signed amount but no `transaction`, `payer` or `replayed`. No `payment`
+is reported when the gateway says it answered on the free tier (`X-Payment-Mode: free-tier`) or
+its receipt reports `success: false`. Errors after a payment carry the same fields on
+`error.payment`. The transaction is set whenever the gateway sent one (header, or the body's
+`transaction`, at the top level or in `detail`). Network, payer and amount are set only when the
+gateway sent a receipt header: without one the SDK cannot tell whether the payment settled.
+
+When `upload()` took its stamp from the pool and then failed, the error also carries `stampId`
+(the stamp it acquired) and, if that stamp was paid for, `stampPayment` (its receipt). This holds
+even when the failed request paid nothing itself, such as a `PaymentRefusedError` for the upload:
+`error.payment` is then unset, and the message says to pass `stampId` to reuse the paid stamp.
 
 **Retrying without paying twice.** Paid writes carry an `Idempotency-Key`: one random key per
 `upload()` or `acquireStamp()` call, or yours (`idempotencyKey` option, 1-255 printable ASCII
@@ -133,7 +165,11 @@ try {
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
 (so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
-for its pool stamp, with `payForPool`, makes two paid requests). The gateway does not charge
+for its pool stamp, with `payForPool`, makes two paid requests). When the gateway returns the
+first result for a key, the response carries `Idempotent-Replayed: true` and `payment.replayed`
+is `true`. The charge is then the first attempt's, named by `payment.transaction`.
+`payment.amount` describes the retry's own signed authorization, which the gateway did not
+settle. Browsers cannot read this header, so `replayed` is set in Node only. The gateway does not charge
 those retries, nor `IDEMPOTENCY_KEY_REUSED` (the key was used for a different request: the
 upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers need a person and throw `PaymentOutcomeError` instead:
 
@@ -144,8 +180,7 @@ upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers n
 | `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | `delivered` | It worked and was paid once; the gateway kept no copy of the response. Do not pay again |
 
 An attempt that may pay is bounded by `paidTimeout` (default 120 s, or `timeout` if longer),
-not `timeout`: settlement happens on-chain. The receipt for a
-successful payment is not returned yet (#111). Tested with `@x402/*` 2.5.0 to 2.28.x.
+not `timeout`: settlement happens on-chain. Tested with `@x402/*` 2.5.0 to 2.28.x.
 x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
 **Server (Node.js):** load the key from the environment or a secret store, never from source code:
@@ -693,6 +728,12 @@ message comes from Node itself.
   that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
   (not `StampError` / `NotaryError`). Gateway error messages are read from the top-level
   `message` of the error envelope when `detail` has none.
+- Paid results carry the payment receipt (#111): `payment` on `UploadResult`,
+  `DocumentUploadResult` and `AcquiredStamp`, and `stampPayment` on upload results when
+  `upload()` paid for its pool stamp. Errors from `upload()` after a pool acquisition carry
+  `stampId` and, when the stamp was paid for, `stampPayment`. `error.payment` gains `network`, `payer`, `amount`,
+  `amountDecimal` and `asset` when the gateway sent a receipt header, and `replayed` on an
+  idempotent replay. All fields are new and optional. Unpaid results carry no `payment`.
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.

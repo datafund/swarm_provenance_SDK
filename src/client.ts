@@ -14,6 +14,8 @@ import type {
   NotaryInfo,
   PoolStatus,
   AcquiredStamp,
+  PaymentReceipt,
+  PaymentRequest,
   GatewayUploadResponse,
   GatewayNotaryInfoResponse,
   GatewayPoolStatusResponse,
@@ -38,6 +40,7 @@ import { canonicalizeJsonText } from './canonical-json.js';
 import { toBytes, isAddress } from './utils.js';
 import {
   base64Decode,
+  formatAtomic,
   untilAborted,
   createX402Transport,
   resolvePaymentPolicy,
@@ -74,8 +77,8 @@ export class ProvenanceClient {
   private notaryRecheckedAt = 0;
   private x402Transport: { fetchFor(state: PaymentAttemptState): typeof fetch } | undefined;
   private paymentPolicy: PaymentPolicy | undefined;
-  /** Responses to attempts that sent a payment, with their Idempotency-Key (see fetch, handleError) */
-  private readonly paidResponses = new WeakMap<Response, string | undefined>();
+  /** Responses to attempts that sent a payment, with their Idempotency-Key and signed requirement (see fetch, handleError) */
+  private readonly paidResponses = new WeakMap<Response, PaidAttempt>();
   private x402TransportPromise: Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> | undefined;
 
   constructor(config: ProvenanceClientConfig = {}) {
@@ -229,12 +232,15 @@ export class ProvenanceClient {
     }
 
     const data = await this.readJson<GatewayAcquireStampResponse>(response);
-    return {
+    const stamp: AcquiredStamp = {
       batchId: data.batch_id,
       depth: data.depth,
       sizeName: data.size_name,
       fallbackUsed: data.fallback_used,
     };
+    const payment = this.receiptOf(response);
+    if (payment) stamp.payment = payment;
+    return stamp;
   }
 
   /**
@@ -262,8 +268,9 @@ export class ProvenanceClient {
     const idempotencyKey = this.operationKey(options.idempotencyKey);
     // Get stamp - either from options or acquire from pool
     let stampId: string;
+    let stampPayment: PaymentReceipt | undefined;
     try {
-      stampId = await this.resolveStampId(options, idempotencyKey);
+      ({ stampId, payment: stampPayment } = await this.resolveStampId(options, idempotencyKey));
     } catch (error) {
       // Nothing uploaded yet. The hint is only added after a payment, so the
       // acquisition was paid (payForPool): the same key gets the same stamp again
@@ -273,11 +280,20 @@ export class ProvenanceClient {
     try {
       const withKey: UploadOptions = { ...options };
       if (idempotencyKey !== undefined) withKey.idempotencyKey = idempotencyKey;
-      return await this.uploadWithStamp(content, stampId, withKey);
+      const result = await this.uploadWithStamp(content, stampId, withKey);
+      // Two requests, two payments: the upload's is `payment`, the stamp's this
+      if (stampPayment) result.stampPayment = stampPayment;
+      return result;
     } catch (error) {
       // The gateway hashes the query, stamp_id included: a retry with the same key
       // must reuse the stamp, or it is a different request (IDEMPOTENCY_KEY_REUSED)
-      if (error instanceof ProvenanceError && error.payment) error.payment.stampId = stampId;
+      if (error instanceof ProvenanceError) {
+        if (error.payment) error.payment.stampId = stampId;
+        // A stamp taken from the pool (and maybe paid for) outlives the failed
+        // upload: say which, even when the upload itself paid nothing
+        if (options.stampId === undefined) error.stampId = stampId;
+        if (stampPayment) error.stampPayment = stampPayment;
+      }
       throw withRetryHint(error, 'upload()', idempotencyKey, stampId);
     }
   }
@@ -307,12 +323,14 @@ export class ProvenanceClient {
     }
     const metadata = buildMetadata(bytes, metadataOptions);
 
-    const data = await this.postMetadata(JSON.stringify(metadata), stampId, options);
+    const { data, payment } = await this.postMetadata(JSON.stringify(metadata), stampId, options);
 
-    return {
+    const result: UploadResult = {
       reference: data.reference,
       metadata,
     };
+    if (payment) result.payment = payment;
+    return result;
   }
 
   /**
@@ -462,9 +480,13 @@ export class ProvenanceClient {
     return this.notaryLookup;
   }
 
-  private async resolveStampId(options: UploadOptions, idempotencyKey: string | undefined): Promise<string> {
+  private async resolveStampId(
+    options: UploadOptions,
+    idempotencyKey: string | undefined
+  ): Promise<{ stampId: string; payment: PaymentReceipt | undefined }> {
+    const fromPool = (stamp: AcquiredStamp) => ({ stampId: stamp.batchId, payment: stamp.payment });
     if (options.stampId) {
-      return options.stampId;
+      return { stampId: options.stampId, payment: undefined };
     }
 
     // Pre-check pool availability to fail fast. Not on a caller's retry with a
@@ -474,7 +496,7 @@ export class ProvenanceClient {
     // is replayed and the pre-check runs as for any other call (#109).
     const paidAcquisition = typeof this.paymentMode === 'object' && this.paymentMode.payForPool === true;
     if (options.idempotencyKey !== undefined && paidAcquisition) {
-      return (await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey)).batchId;
+      return fromPool(await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey));
     }
     try {
       const status = await this.poolStatus();
@@ -489,8 +511,7 @@ export class ProvenanceClient {
       // Pool status check failed — proceed with acquire anyway
     }
 
-    const stamp = await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey);
-    return stamp.batchId;
+    return fromPool(await this.acquireWithKey(options.poolSize ?? 'small', idempotencyKey));
   }
 
   private async uploadRawDocument(
@@ -524,19 +545,21 @@ export class ProvenanceClient {
     }
     const metadata = buildDocumentMetadata(documentData, metadataOptions);
 
-    const data = await this.postMetadata(JSON.stringify(metadata), stampId, options);
+    const { data, payment } = await this.postMetadata(JSON.stringify(metadata), stampId, options);
 
-    return {
+    const result: DocumentUploadResult = {
       reference: data.reference,
       metadata,
     };
+    if (payment) result.payment = payment;
+    return result;
   }
 
   private async postMetadata(
     metadataJson: string,
     stampId: string,
     options: UploadOptions,
-  ): Promise<GatewayUploadResponse> {
+  ): Promise<{ data: GatewayUploadResponse; payment: PaymentReceipt | undefined }> {
     // Build query params
     const params = new URLSearchParams();
     params.set('stamp_id', stampId);
@@ -566,7 +589,8 @@ export class ProvenanceClient {
       throw error;
     }
 
-    return this.readJson<GatewayUploadResponse>(response);
+    const data = await this.readJson<GatewayUploadResponse>(response);
+    return { data, payment: this.receiptOf(response) };
   }
 
   /**
@@ -723,7 +747,12 @@ export class ProvenanceClient {
           controller.signal
         );
         const paid = state.paid;
-        if (paid) this.paidResponses.set(response, idempotencyKey);
+        if (paid) {
+          const record: PaidAttempt = {};
+          if (idempotencyKey !== undefined) record.idempotencyKey = idempotencyKey;
+          if (state.approved) record.approved = state.approved;
+          this.paidResponses.set(response, record);
+        }
 
         // Detect free-tier rate limiting
         if (response.status === 429 && freeTier) {
@@ -838,11 +867,26 @@ export class ProvenanceClient {
         'INVALID_RESPONSE'
       );
       if (this.paidResponses.has(response)) {
-        failure.payment = paymentAttempt(response, this.paidResponses.get(response));
+        failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
         failure.message += ' (a payment was sent with this request and may have been charged)';
       }
       throw failure;
     }
+  }
+
+  /**
+   * The payment receipt for a successful response (#111), or undefined if the
+   * request was not paid. Also undefined when the gateway says it used the free
+   * tier or its receipt reports a failed settlement: no charge is reported that
+   * did not happen.
+   */
+  private receiptOf(response: Response): PaymentReceipt | undefined {
+    const paid = this.paidResponses.get(response);
+    if (!paid) return undefined;
+    if (/^free/i.test(response.headers.get('X-Payment-Mode') ?? '')) return undefined;
+    const settle = settleResponse(response);
+    if (settle && settle['success'] === false) return undefined;
+    return receiptFields(response, settle, paid.approved, this.paymentPolicy?.decimals);
   }
 
   /**
@@ -853,6 +897,8 @@ export class ProvenanceClient {
     let code: string | undefined;
     let suggestion: string | undefined;
     let fields: Record<string, unknown> = {};
+    /** Transaction named in the body: in `detail`, or top level (the gateway's paid-request crash answer) */
+    let bodyTransaction: unknown;
 
     try {
       const data = (await response.json()) as GatewayErrorResponse;
@@ -874,16 +920,15 @@ export class ProvenanceClient {
       if (data.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)) {
         fields = data.detail as Record<string, unknown>;
       }
+      bodyTransaction = reported(fields['transaction']) ?? reported((data as { transaction?: unknown }).transaction);
     } catch {
       // Ignore JSON parse errors
     }
 
     const paid = this.paidResponses.has(response);
-    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)) : undefined;
+    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals) : undefined;
     if (payment && typeof fields['nonce'] === 'string' && fields['nonce']) payment.nonce = fields['nonce'];
-    if (payment && !payment.transaction && typeof fields['transaction'] === 'string' && fields['transaction'] !== 'unknown') {
-      payment.transaction = fields['transaction'];
-    }
+    if (payment && !payment.transaction && typeof bodyTransaction === 'string') payment.transaction = bodyTransaction;
 
     const outcome = code === undefined ? undefined : PAYMENT_OUTCOMES[code];
     if (payment && outcome) {
@@ -972,7 +1017,14 @@ const NOT_CHARGED = new Set([
  * a person (PaymentOutcomeError) or a key the gateway refused.
  */
 function withRetryHint(error: unknown, operation: string, idempotencyKey: string | undefined, stampId?: string): unknown {
-  if (!(error instanceof ProvenanceError) || !error.payment || idempotencyKey === undefined) return error;
+  if (!(error instanceof ProvenanceError)) return error;
+  if (!error.payment && error.stampPayment && stampId !== undefined) {
+    // The upload paid nothing, but its pool stamp was paid for: reuse it
+    const tx = error.stampPayment.transaction ? ` (transaction ${error.stampPayment.transaction})` : '';
+    error.message += `${/[.!?]$/.test(error.message) ? '' : '.'} The pool stamp was paid for${tx}: to use it instead of paying for another, call ${operation} again with stampId "${stampId}"`;
+    return error;
+  }
+  if (!error.payment || idempotencyKey === undefined) return error;
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;
@@ -1007,23 +1059,79 @@ function assertNotaryAddress(options: DownloadOptions): void {
   }
 }
 
-/** Payment details the gateway attached to a response for a paid request */
-function paymentAttempt(response: Response, idempotencyKey?: string): PaymentAttempt {
-  const attempt: PaymentAttempt = { paymentSent: true };
-  if (idempotencyKey !== undefined) attempt.idempotencyKey = idempotencyKey;
-  // The gateway sends "unknown" when it has no transaction to name
-  const header = response.headers.get('X-Payment-Transaction');
-  let transaction = header && header !== 'unknown' ? header : undefined;
+/** A response to an attempt that sent a payment: its key and what was signed */
+interface PaidAttempt {
+  idempotencyKey?: string;
+  /** The requirement the library was cleared to sign */
+  approved?: PaymentRequest;
+}
+
+/** The decoded PAYMENT-RESPONSE (v2) or X-PAYMENT-RESPONSE (v1): the facilitator's SettleResponse */
+function settleResponse(response: Response): Record<string, unknown> | undefined {
   const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
-  if (!transaction && encoded) {
-    try {
-      const decoded = JSON.parse(base64Decode(encoded)) as { transaction?: unknown };
-      if (typeof decoded.transaction === 'string' && decoded.transaction) transaction = decoded.transaction;
-    } catch {
-      // not decodable: leave the transaction unknown
-    }
+  if (!encoded) return undefined;
+  try {
+    const decoded = JSON.parse(base64Decode(encoded)) as unknown;
+    return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? (decoded as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined; // not decodable: as if absent
   }
-  if (transaction) attempt.transaction = transaction;
+}
+
+/** A non-empty string that is not the gateway's "unknown" placeholder */
+function reported(value: unknown): string | undefined {
+  return typeof value === 'string' && value && value !== 'unknown' ? value : undefined;
+}
+
+/**
+ * What a paid response says about its payment: the transaction (header, else
+ * receipt), network and payer (receipt; network falls back to the signed
+ * requirement), and the amount the SDK signed. The amount is never taken from
+ * the gateway: its receipt has none.
+ */
+function receiptFields(
+  response: Response,
+  settle: Record<string, unknown> | undefined,
+  approved: PaymentRequest | undefined,
+  decimals: number | undefined
+): PaymentReceipt {
+  const receipt: PaymentReceipt = {};
+  // The gateway sends "unknown" when it has no transaction to name
+  const transaction = reported(response.headers.get('X-Payment-Transaction')) ?? reported(settle?.['transaction']);
+  if (transaction) receipt.transaction = transaction;
+  const network = reported(settle?.['network']) ?? reported(approved?.network);
+  if (network) receipt.network = network;
+  const payer = reported(settle?.['payer']);
+  if (payer) receipt.payer = payer;
+  if (approved && /^\d+$/.test(approved.amount)) {
+    receipt.amount = approved.amount;
+    if (decimals !== undefined) receipt.amountDecimal = formatAtomic(BigInt(approved.amount), decimals);
+    if (approved.asset) receipt.asset = approved.asset;
+  }
+  if (response.headers.get('Idempotent-Replayed')?.toLowerCase() === 'true') receipt.replayed = true;
+  return receipt;
+}
+
+/**
+ * Payment details for an error response to a paid request. The transaction is
+ * reported whenever the gateway sent one. Network, payer and the signed amount
+ * are added only with a decodable receipt header: without one the SDK cannot
+ * tell whether, or on what terms, the payment settled.
+ */
+function paymentAttempt(response: Response, paid: PaidAttempt, decimals: number | undefined): PaymentAttempt {
+  const attempt: PaymentAttempt = { paymentSent: true };
+  if (paid.idempotencyKey !== undefined) attempt.idempotencyKey = paid.idempotencyKey;
+  const settle = settleResponse(response);
+  const fields = receiptFields(response, settle, settle ? paid.approved : undefined, decimals);
+  if (fields.transaction) attempt.transaction = fields.transaction;
+  if (settle) {
+    if (fields.network) attempt.network = fields.network;
+    if (fields.payer) attempt.payer = fields.payer;
+    if (fields.amount) attempt.amount = fields.amount;
+    if (fields.amountDecimal) attempt.amountDecimal = fields.amountDecimal;
+    if (fields.asset) attempt.asset = fields.asset;
+  }
+  if (fields.replayed) attempt.replayed = true;
   const status = response.headers.get('X-Payment-Status');
   if (status) attempt.status = status;
   return attempt;

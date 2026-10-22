@@ -6,6 +6,26 @@ export interface PaymentAttempt {
   transaction?: string;
   /** Gateway-reported payment status, if any */
   status?: string;
+  /** Network the payment was made on: the receipt's, else the one signed for */
+  network?: string;
+  /** Paying address, from the gateway's receipt, if it sent one */
+  payer?: string;
+  /**
+   * Amount the SDK signed, in the token's smallest unit (integer string): the
+   * approved requirement's v1 `maxAmountRequired` or v2 `amount`. Not proof of
+   * a charge: see `transaction`.
+   */
+  amount?: string;
+  /** `amount` in tokens, with the policy's decimals */
+  amountDecimal?: string;
+  /** Token contract the amount is in */
+  asset?: string;
+  /**
+   * The gateway replayed a stored answer for this Idempotency-Key
+   * (`Idempotent-Replayed: true`, Node only). `transaction` is the first
+   * attempt's; `amount` is this retry's authorization, which was not settled.
+   */
+  replayed?: true;
   /**
    * Idempotency-Key the request was sent with. Retrying the same operation with
    * it (`idempotencyKey` option) is never charged twice: the gateway returns the
@@ -30,6 +50,18 @@ export class ProvenanceError extends Error {
    * have settled it even though the request failed. Never retried automatically.
    */
   public payment?: PaymentAttempt;
+
+  /**
+   * `upload()` only: the stamp it acquired from the pool before this error.
+   * Set whether or not the failed request paid; pass it back as `stampId`.
+   */
+  public stampId?: string;
+
+  /**
+   * `upload()` only: the receipt for the pool stamp it paid for before this
+   * error. That payment succeeded; `payment` (if set) is the failed request's own.
+   */
+  public stampPayment?: import('./types.js').PaymentReceipt;
 
   constructor(
     message: string,
