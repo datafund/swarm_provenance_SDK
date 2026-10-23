@@ -870,6 +870,9 @@ message comes from Node itself.
 
 ### Behavior changes since v0.6.1
 
+Version 0.7.0 contains these changes. [CHANGELOG.md](CHANGELOG.md) groups them by area with
+issue numbers and lists the open release-gate items.
+
 - `download()` and `downloadDocument()` validate `reference` before the request (#123). It must
   be 64 or 128 hex characters with an optional `0x` prefix, which is removed. Other values
   (paths, queries, whitespace, wrong lengths) throw `ProvenanceError` (`INVALID_INPUT`)
@@ -896,10 +899,11 @@ message comes from Node itself.
   registered owner is the signer's address, `false` if another address owns the record,
   `undefined` if the owner could not be read. For `anchorFor()`, compare `error.owner` with the
   owner you passed.
-- `getProvenanceChain()` fails closed: an RPC error on any node rejects the call with
-  `ChainConnectionError` naming the node, and a linked hash that reads as unregistered
-  rejects with `DataNotRegisteredError`. Before, either case silently dropped the branch
-  and returned the partial graph as if complete.
+- `getProvenanceChain()` fails closed: an RPC error in a node's child or parent lookup rejects
+  the call with `ChainConnectionError` naming the node, and a linked hash that reads as
+  unregistered rejects with `DataNotRegisteredError`. 0.6.1 already threw an RPC error from a
+  node's own record read, but it ignored errors from the child and parent lookups and skipped
+  unregistered linked hashes, then returned the partial graph as if complete.
 - `getProvenanceChain()` rejects a `NaN` `maxDepth` (`ChainValidationError`); before, NaN
   disabled the depth limit. Fractional depths are floored.
 - Records from `getProvenanceChain()` carry `parents` (new, optional; additive).
@@ -939,16 +943,24 @@ message comes from Node itself.
   presets and `CHAIN_PRESETS` are frozen and typed `Readonly`.
 - The CommonJS `/chain` entry throws a `CHAIN_CONFIGURATION` error naming `viem` when it is missing.
 - `download()` / `downloadDocument()` verify notary signatures cryptographically (#113).
-  `verified` is now `false` for documents 0.6.1 reported as verified: empty, missing or
-  invalid signatures, signatures by other keys, and any document when no notary address is
-  available. Results gain `verification`; `DownloadOptions` gains `notaryAddress`
+  `verified` is now `false` for documents 0.6.1 reported as verified: signature entries whose
+  signature value is empty, missing or invalid, signatures by other keys, and any document when
+  no notary address is available. A document with no signatures still gets `verified: undefined`. Results gain `verification`; `DownloadOptions` gains `notaryAddress`
   (a malformed one throws `INVALID_INPUT`).
+- `verified` is now `true` when at least one signature by the expected notary is valid
+  (`anyValid`, #113); 0.6.1 required every signature to pass (`allValid`), but checked only the
+  data hash and the signer field, never the signature bytes. A document with one valid notary
+  signature and one with a wrong data hash or a different signer changed from
+  `verified: false` to `true`.
+  `verification.results` shows each signature.
 - `verifySignature` / `verifyAllSignatures` are invalid without an expected signer;
   `verifyAllSignatures([])` gives `allValid: false` (was `true`) and now also returns
   `anyValid`. `verifyDataHash` accepts only `hashed_fields: ['data']`.
 - Raw documents (`raw: true`): `content_hash` is SHA-256 of canonical JSON (the gateway and
   Python tools' convention) instead of `JSON.stringify(data)` (#114). This version still
-  accepts the old form; SDK 0.6.x rejects documents uploaded with this version.
+  accepts the old form. SDK 0.6.x rejects a document uploaded with this version unless its keys
+  are sorted, its strings are plain ASCII (the canonical form escapes the rest as `\uXXXX`), and
+  its numbers print the same in both forms (floats follow Python's `repr`).
 - x402 network (#108): `payment.network: 'base' | 'base-sepolia'` selects both x402 identifiers;
   a known CAIP-2 ID implies its v1 name, and a lone known `v1Network` implies `network`.
   **A config with only `network: 'eip155:8453'` now pays in mainnet USDC on the gateway's v1
@@ -957,7 +969,8 @@ message comes from Node itself.
   default stays Base Sepolia.
 - x402 mode enforces a payment policy (#106): `maxAmount` (default `'1'` on Base Sepolia test
   USDC, required elsewhere), USDC only (or `asset` + `assetDecimals`), `exact`/EIP-3009 only,
-  validity ≤ 600 s, optional `payTo` and `onBeforePayment`. Refusals throw
+  validity up to `maxTimeoutSeconds` (default 600 s, configurable), optional `payTo` and
+  `onBeforePayment`. Refusals throw
   `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
   back in), and attempts that sent a payment are not retried (#107); a failure after payment
   carries `error.payment`. On `@x402/*` 2.23+ the library's $1 default cap is
@@ -980,8 +993,9 @@ message comes from Node itself.
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry
   `payment.idempotencyKey` (and `payment.stampId` for uploads). The three idempotency answers
   that need a person throw `PaymentOutcomeError`, also from `acquireStamp()` and notary uploads
-  (not `StampError` / `NotaryError`). Gateway error messages are read from the top-level
-  `message` of the error envelope when `detail` has none.
+  (not `StampError` / `NotaryError`). Gateway error messages use the envelope's top-level
+  `message`, except for validation errors (a `detail` list), which still list the fields; a
+  `detail` text the message lacks is appended (see "Error handling (#112)" below).
 - Paid results carry the payment receipt (#111): `payment` on `UploadResult`,
   `DocumentUploadResult` and `AcquiredStamp`, and `stampPayment` on upload results when
   `upload()` paid for its pool stamp. Errors from `upload()` after a pool acquisition carry
@@ -993,8 +1007,9 @@ message comes from Node itself.
   a payment. An owner-proof upload uses the free tier and never pays, in any payment mode.
   New exports: `Pricing`, `PricingOptions`, `PriceQuote`, `OwnerSigner`, `ownerProofMessage`.
   Uploads without `ownerSigner` are unchanged.
-- Error handling (#112): gateway errors show the envelope's top-level `message` first, and
-  `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
+- Error handling (#112): gateway errors show the envelope's top-level `message` first, except
+  for validation errors (a `detail` list), which list the fields; a `detail` string the message
+  lacks is appended, and `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
   4096 characters; a JSON body over 16384 characters is kept as text cut to 4096
   characters), and gateway messages are cut to 4096 characters. A 402 message names the price. A 429 whose code is not a rate limit
   (`DAILY_STAMP_ALLOWANCE_EXHAUSTED`, `DAILY_STAMP_ALLOWANCE_PER_CLIENT_EXHAUSTED`,
@@ -1005,7 +1020,16 @@ message comes from Node itself.
   `FILE_TOO_LARGE` before acquiring a stamp, and also refuses invalid raw input before that.
   In x402 mode the policy reads the 402's top-level payment request before the deprecated
   `detail` copy, and a signature declined in the wallet is `PaymentRefusedError` instead of
-  `PAYMENT_FAILED`.
+  `GatewayConnectionError` (`CONNECTION_FAILED`).
+- x402 payment-library failures are no longer `GatewayConnectionError` (`CONNECTION_FAILED`)
+  (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
+  sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:
+  `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
+  catches these. In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()`
+  that is not valid JSON throws `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw
+  `SyntaxError` (the other read methods still throw `SyntaxError`; #173).
+- A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
+  "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
   A viem `WalletClient` typechecks without casts; `interface X extends PaymentWallet` needs
   to become an intersection type.
