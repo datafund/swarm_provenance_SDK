@@ -1758,3 +1758,86 @@ describe('ProvenanceClient', () => {
     });
   });
 });
+
+describe('success bodies that are not the expected shape (#179)', () => {
+  const REF = 'abcd1234'.repeat(8);
+  const methods = {
+    download: (c: ProvenanceClient) => c.download(REF),
+    downloadDocument: (c: ProvenanceClient) => c.downloadDocument(REF),
+    notaryInfo: (c: ProvenanceClient) => c.notaryInfo(),
+    poolStatus: (c: ProvenanceClient) => c.poolStatus(),
+  } as const;
+  type Method = keyof typeof methods;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  async function expectInvalid(method: Method, body: string | ReadableStream<Uint8Array>) {
+    mockFetch.mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const error = await methods[method](new ProvenanceClient()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+    expect((error as GatewayConnectionError).statusCode).toBe(200);
+    return error as GatewayConnectionError;
+  }
+
+  const bodies = ['null', '"str"', '42', '[]', '{}'];
+  const cases = (Object.keys(methods) as Method[]).flatMap((m) => bodies.map((b) => [m, b] as const));
+
+  it.each(cases)('%s() with the 200 body %s throws INVALID_RESPONSE', async (method, body) => {
+    const error = await expectInvalid(method, body);
+    expect(error.message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+  });
+
+  it.each([
+    ['download', 'direct body without content_hash', { data: 'aGVsbG8=', stamp_id: 's' }],
+    ['download', 'direct body whose data is not a string', { data: 42, content_hash: '0'.repeat(64) }],
+    ['download', 'wrapped body whose metadata.data is not a string', { metadata: { data: 42, content_hash: '0'.repeat(64) } }],
+    ['downloadDocument', 'direct body whose data is a string', { data: 'aGVsbG8=', content_hash: '0'.repeat(64) }],
+    ['downloadDocument', 'direct body whose data is an array', { data: [1], content_hash: '0'.repeat(64) }],
+    ['downloadDocument', 'direct body whose data is null', { data: null, content_hash: '0'.repeat(64) }],
+    ['downloadDocument', 'wrapped body without metadata.content_hash', { metadata: { data: { a: 1 } } }],
+    ['notaryInfo', 'body without available', { enabled: true }],
+    ['notaryInfo', 'body whose enabled is not a boolean', { enabled: 'yes', available: true }],
+    ['poolStatus', 'body whose current_levels is null', { enabled: true, current_levels: null, reserve_config: {}, total_stamps: 1 }],
+    ['poolStatus', 'body without total_stamps', { enabled: true, current_levels: {}, reserve_config: {} }],
+    ['poolStatus', 'body without reserve_config', { enabled: true, current_levels: {}, total_stamps: 1 }],
+  ] as const)('%s() with a %s throws INVALID_RESPONSE', async (method, _label, body) => {
+    await expectInvalid(method, JSON.stringify(body));
+  });
+
+  it.each([['download'], ['downloadDocument']] as const)('%s() turns a body read failure into INVALID_RESPONSE', async (method) => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('connection reset'));
+      },
+    });
+    const error = await expectInvalid(method, stream);
+    expect(error.message).toMatch(/connection reset/);
+  });
+
+  it('notaryInfo() still accepts a disabled notary with a null or absent address', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: false, available: false, address: null, message: 'off' }), { status: 200 }));
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: false, available: false }), { status: 200 }));
+    const client = new ProvenanceClient();
+    expect(await client.notaryInfo()).toEqual({ enabled: false, available: false, address: null, message: 'off' });
+    expect(await client.notaryInfo()).toEqual({ enabled: false, available: false });
+  });
+
+  it('poolStatus() does not require low_reserve_warning or the fields it does not read', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, current_levels: { '17': 2 }, reserve_config: { '17': 1 }, total_stamps: 2 }), { status: 200 }));
+    const status = await new ProvenanceClient().poolStatus();
+    expect(status).toMatchObject({ enabled: true, available: { '17': 2 }, reserve: { '17': 1 }, totalStamps: 2 });
+  });
+
+  it('downloadDocument() still reports a well-formed record with a wrong hash as CONTENT_HASH_MISMATCH', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ data: { a: 1 }, content_hash: '0'.repeat(64), stamp_id: 's' }), { status: 200 }));
+    await expect(new ProvenanceClient().downloadDocument(REF)).rejects.toMatchObject({ name: 'ProvenanceError', code: 'CONTENT_HASH_MISMATCH' });
+  });
+
+  it('download() still reports a well-formed record with a wrong hash as CONTENT_HASH_MISMATCH', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ data: 'aGVsbG8=', content_hash: '0'.repeat(64), stamp_id: 's' }), { status: 200 }));
+    await expect(new ProvenanceClient().download(REF)).rejects.toMatchObject({ name: 'ProvenanceError', code: 'CONTENT_HASH_MISMATCH' });
+  });
+});

@@ -92,8 +92,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - In any mode, a success response whose body is not valid JSON throws `GatewayConnectionError`
   with code `INVALID_RESPONSE` and the HTTP status. This applies to `pricing()`, `acquireStamp()`,
   `upload()`, `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`. Before, a
-  raw `SyntaxError` escaped. If the request was paid, the error carries `error.payment`.
-  (#107, PR #138; #173)
+  raw `SyntaxError` escaped. `download()`, `downloadDocument()`, `notaryInfo()` and
+  `poolStatus()` also throw it for a success body that cannot be read, is not a JSON object, or
+  lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
+  empty values. `downloadDocument()` reports a record with no `data` object or no `content_hash`
+  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH`. If the request was paid, the error carries
+  `error.payment`. (#107, PR #138; #173, #179)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)
