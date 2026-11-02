@@ -297,10 +297,14 @@ The release gate in #129 is not fully met. These items are open:
   checks or its push starts no run (a skip marker such as `[skip ci]`, or a push made with
   `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, and branch
   protection rejects a direct push to `main`. So the recovery is a new commit that a user merges
-  to `main` through a pull request, without a skip marker: for example, an empty commit on
-  `development`, then a `development` → `main` pull request. If a failure was flaky, re-run the
-  failed run instead. (#188)
+  to `main` through a pull request, without a skip marker: for example, an empty commit on a
+  branch cut from `main`, merged to `main` by pull request. A `development` → `main` pull
+  request also works, but it also releases what is on `development`. If a failure was flaky,
+  re-run the failed run instead. (#188)
 - A publish run from before this change has no tip check. Do not re-run it. (#188)
+- If a version is on npm but its tag push failed, a later run tags the tip of `main` only if the
+  tip has the same version, so the tag can land on a later commit than the one that published.
+  If the tip has a different version, push the tag by hand. (#188)
 - `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
   version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
   and moves `latest` back. The same happens if `main` is force-moved back to an older commit
