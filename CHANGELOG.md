@@ -289,4 +289,9 @@ The release gate in #129 is not fully met. These items are open:
   the publish job while one runs and one waits, GitHub cancels the waiting one. Its version is
   published only if the newer push has the same version in `package.json`, and then from the
   newer commit's code, not the cancelled commit's. `queue: max` is not used yet: it is not
-  checked on a real run, and actionlint does not accept the key. (#176, #187)
+  checked on a real run, and actionlint does not accept the key. Do not re-run a cancelled
+  publish run later: `npm publish` without `--tag` moves `latest` back. (#176, #187)
+- The `npm-publish` group runs one publish job at a time, but not in push order. A publish job
+  joins it only after its own matrix and scan finish, so an older push whose checks finish later
+  can publish after a newer one and move npm `latest` back. This has not been seen on a run,
+  and it was possible before the group was added. (#188)
