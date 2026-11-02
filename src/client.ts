@@ -440,9 +440,10 @@ export class ProvenanceClient {
     const text = await this.readText(response);
     const raw = this.parseJson<unknown>(text, response);
     const record = isRecord(raw) ? (isRecord(raw['metadata']) ? raw['metadata'] : raw) : undefined;
-    // A record without a data object or a content_hash is malformed, not tampered with (#179)
-    if (!isRecord(raw) || !isRecord(record?.['data']) || typeof record['content_hash'] !== 'string') {
-      throw this.shapeError('a JSON object with an object "data" and a string "content_hash" (directly or under "metadata")', response);
+    // A record without a data field or a content_hash is malformed, not tampered with (#179).
+    // data may be any JSON value: raw uploads accept arrays, null, numbers and strings.
+    if (!isRecord(raw) || !record || !('data' in record) || typeof record['content_hash'] !== 'string') {
+      throw this.shapeError('a JSON object with a "data" field and a string "content_hash" (directly or under "metadata")', response);
     }
     const wrapped = record !== raw;
     const canonicalData = canonicalDataOf(text, wrapped);
@@ -460,7 +461,10 @@ export class ProvenanceClient {
       contentHash = meta['content_hash'] as string;
       stampId = meta['stamp_id'] as string;
       provenanceStandard = meta['provenance_standard'] as string | undefined;
-      signatures = raw['signatures'] as NotarySignature[] | undefined;
+      // As in the direct format, a signatures value that is not an array is ignored
+      if (Array.isArray(raw['signatures'])) {
+        signatures = raw['signatures'] as NotarySignature[];
+      }
     } else {
       // Direct format: {data: {...}, content_hash: "...", stamp_id: "...", ...}
       documentData = raw['data'] as Record<string, unknown>;
@@ -791,7 +795,10 @@ export class ProvenanceClient {
     if ('metadata' in data && wrapped) {
       // Wrapped format
       metadata = data.metadata;
-      signatures = data.signatures;
+      // As in the direct format, a signatures value that is not an array is ignored
+      if (Array.isArray(data.signatures)) {
+        signatures = data.signatures;
+      }
     } else {
       // Direct format - signatures at same level as metadata fields
       const directData = data as ProvenanceMetadata & { signatures?: NotarySignature[] };

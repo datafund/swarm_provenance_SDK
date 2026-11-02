@@ -95,7 +95,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   raw `SyntaxError` escaped. `download()`, `downloadDocument()`, `notaryInfo()` and
   `poolStatus()` also throw it for a success body that cannot be read, is not a JSON object, or
   lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
-  empty values. `downloadDocument()` reports a record with no `data` object or no `content_hash`
+  empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
   as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH`. If the request was paid, the error carries
   `error.payment`. (#107, PR #138; #173, #179)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write

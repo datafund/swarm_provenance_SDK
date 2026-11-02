@@ -1794,9 +1794,8 @@ describe('success bodies that are not the expected shape (#179)', () => {
     ['download', 'direct body without content_hash', { data: 'aGVsbG8=', stamp_id: 's' }],
     ['download', 'direct body whose data is not a string', { data: 42, content_hash: '0'.repeat(64) }],
     ['download', 'wrapped body whose metadata.data is not a string', { metadata: { data: 42, content_hash: '0'.repeat(64) } }],
-    ['downloadDocument', 'direct body whose data is a string', { data: 'aGVsbG8=', content_hash: '0'.repeat(64) }],
-    ['downloadDocument', 'direct body whose data is an array', { data: [1], content_hash: '0'.repeat(64) }],
-    ['downloadDocument', 'direct body whose data is null', { data: null, content_hash: '0'.repeat(64) }],
+    ['downloadDocument', 'direct body without a data field', { content_hash: '0'.repeat(64), stamp_id: 's' }],
+    ['downloadDocument', 'direct body whose content_hash is not a string', { data: { a: 1 }, content_hash: 42 }],
     ['downloadDocument', 'wrapped body without metadata.content_hash', { metadata: { data: { a: 1 } } }],
     ['notaryInfo', 'body without available', { enabled: true }],
     ['notaryInfo', 'body whose enabled is not a boolean', { enabled: 'yes', available: true }],
@@ -1829,6 +1828,42 @@ describe('success bodies that are not the expected shape (#179)', () => {
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, current_levels: { '17': 2 }, reserve_config: { '17': 1 }, total_stamps: 2 }), { status: 200 }));
     const status = await new ProvenanceClient().poolStatus();
     expect(status).toMatchObject({ enabled: true, available: { '17': 2 }, reserve: { '17': 1 }, totalStamps: 2 });
+  });
+
+  it.each([
+    ['an array', '[1,2]', [1, 2]],
+    ['null', 'null', null],
+    ['a number', '5', 5],
+    ['a string', '"x"', 'x'],
+  ])('downloadDocument() returns a raw upload whose data is %s, with a matching hash', async (_label, content, value) => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+    const uploaded = await new ProvenanceClient().upload(content, { raw: true, stampId: 'a'.repeat(64) });
+    const call = mockFetch.mock.calls.at(0) as [string, RequestInit];
+    const stored = await ((call[1].body as FormData).get('file') as Blob).text();
+    mockFetch.mockResolvedValueOnce(new Response(stored, { status: 200 }));
+    const result = await new ProvenanceClient().downloadDocument(REF);
+    expect(result.document).toEqual(value);
+    expect(result.metadata.content_hash).toBe(uploaded.metadata.content_hash);
+  });
+
+  it('download() ignores a wrapped signatures value that is not an array', async () => {
+    const data = 'aGVsbG8=';
+    const metadata = { data, content_hash: sha256Hex(toBytes('hello')), stamp_id: 's' };
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ metadata, signatures: 'abc' }), { status: 200 }));
+    const result = await new ProvenanceClient().download(REF);
+    expect(new TextDecoder().decode(result.file)).toBe('hello');
+    expect(result.signatures).toBeUndefined();
+    expect(result.verified).toBeUndefined();
+  });
+
+  it('downloadDocument() ignores a wrapped signatures value that is not an array', async () => {
+    const doc = { a: 1 };
+    const metadata = { data: doc, content_hash: sha256Hex(toBytes(JSON.stringify(doc))), stamp_id: 's' };
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ metadata, signatures: 'abc' }), { status: 200 }));
+    const result = await new ProvenanceClient().downloadDocument(REF);
+    expect(result.document).toEqual(doc);
+    expect(result.signatures).toBeUndefined();
+    expect(result.verified).toBeUndefined();
   });
 
   it('downloadDocument() still reports a well-formed record with a wrong hash as CONTENT_HASH_MISMATCH', async () => {
