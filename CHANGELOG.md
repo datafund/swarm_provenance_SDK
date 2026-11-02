@@ -106,6 +106,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   (or `asset` with `assetDecimals`), scheme `exact` with EIP-3009 only, validity up to
   `payment.maxTimeoutSeconds` (default 600), and optional `payTo` and `onBeforePayment`. A
   refused payment throws `PaymentRefusedError`. (#106)
+- The SDK checks the EIP-712 domain the gateway sends (`extra.name` and `extra.version`)
+  before signing. It must be `'USD Coin'` / `'2'` for Base mainnet USDC and `'USDC'` / `'2'`
+  for Base Sepolia USDC, the values on chain. Another domain, or none, is refused with
+  `PaymentRefusedError`. A custom `payment.asset` now also requires
+  `payment.assetDomain: { name, version }`. (#143)
 - An attempt that sent a payment is not retried. Its error carries `error.payment`. (#107)
   The one exception is a paid write answered `IDEMPOTENCY_KEY_IN_PROGRESS` (409) or
   `IDEMPOTENCY_UNAVAILABLE` (503). It is retried with the same key and a new authorization, at

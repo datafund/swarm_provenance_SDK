@@ -25,6 +25,8 @@ const wallet = createWalletClient({
 const USDC_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const GATEWAY_PAYTO = '0x1111111111111111111111111111111111111111';
 const STAMP = 'a'.repeat(64);
+/** EIP-712 domain of Base mainnet USDC (name() and version() on chain) */
+const USD_COIN = { name: 'USD Coin', version: '2' };
 const POOL_STAMP = 'd'.repeat(64);
 const POOL_BODY = { batch_id: POOL_STAMP, depth: 17, size_name: 'small', fallback_used: false };
 /** Matches the generated Idempotency-Key (#102) */
@@ -244,7 +246,7 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
   it('a custom asset requires assetDecimals', () => {
     const asset = '0x2222222222222222222222222222222222222222';
     expect(() => client({ asset, maxAmount: '1' })).toThrow(/assetDecimals is required/);
-    expect(() => client({ asset, maxAmount: '1', assetDecimals: 18 })).not.toThrow();
+    expect(() => client({ asset, maxAmount: '1', assetDecimals: 18, assetDomain: { name: 'Token', version: '1' } })).not.toThrow();
   });
 
   it.each([['-1'], ['1e3'], ['0.1234567'], ['abc']])('rejects a malformed maxAmount %j at construction', (maxAmount) => {
@@ -527,7 +529,9 @@ describe('review round 4 (#138)', () => {
     expect(() =>
       client({ network: 'eip155:8453', v1Network: 'base-sepolia', asset, assetDecimals: 6, maxAmount: '1' }),
     ).toThrow(/drop v1Network|different chains/);
-    expect(() => client({ network: 'eip155:8453', asset, assetDecimals: 6, maxAmount: '1' })).not.toThrow();
+    expect(() =>
+      client({ network: 'eip155:8453', asset, assetDecimals: 6, assetDomain: { name: 'Token', version: '1' }, maxAmount: '1' }),
+    ).not.toThrow();
   });
 
   it('an undecodable PAYMENT-REQUIRED header falls back to the v1 body', async () => {
@@ -583,7 +587,7 @@ describe('one network setting (#108)', () => {
   const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
   it("network: 'base' pays the gateway's v1 'base' request in mainnet USDC", async () => {
-    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
     await client({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
   });
@@ -600,7 +604,7 @@ describe('one network setting (#108)', () => {
   });
 
   it('a known CAIP-2 network implies its v1 name', async () => {
-    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
     await client({ network: 'eip155:8453', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
   });
@@ -625,7 +629,7 @@ describe('review round 1 (#140)', () => {
   const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
   it("a config with only v1Network: 'base' (the old mainnet switch) still works", async () => {
-    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
     await client({ v1Network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
   });
@@ -725,5 +729,148 @@ describe('error handling (#112)', () => {
     expect(error).toBeInstanceOf(PaymentRefusedError);
     expect((error as Error).message).not.toMatch(/[{}]|maxAmountRequired|"accepts"|resource/);
     expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('1000001');
+  });
+});
+
+describe('EIP-712 domain of the asset (#143)', () => {
+  const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const TOKEN = '0x2222222222222222222222222222222222222222';
+  const TOKEN_DOMAIN = { name: 'Token', version: '1' };
+
+  /** The domains the wallet was asked to sign, in order */
+  let signed: Array<Record<string, unknown>>;
+  const recording = {
+    ...wallet,
+    signTypedData: (args: Parameters<typeof wallet.signTypedData>[0]) => {
+      signed.push({ ...(args.domain as Record<string, unknown>) });
+      return wallet.signTypedData(args);
+    },
+  };
+  const paying = (payment: Partial<X402PaymentConfig> = {}) =>
+    new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: recording, ...payment } });
+
+  beforeEach(() => {
+    signed = [];
+  });
+
+  async function expectRefusedUnsigned(promise: Promise<unknown>, reason: RegExp): Promise<void> {
+    const error = await promise.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(reason);
+    expect(signed).toEqual([]);
+    expect(payments()).toBe(0);
+  }
+
+  it("Base Sepolia signs with the domain 'USDC' version '2'", async () => {
+    await paying().upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([{ name: 'USDC', version: '2', chainId: 84532, verifyingContract: USDC_SEPOLIA }]);
+    expect(payments()).toBe(1);
+  });
+
+  it("Base mainnet signs with the domain 'USD Coin' version '2'", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
+    await paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([{ name: 'USD Coin', version: '2', chainId: 8453, verifyingContract: USDC_BASE }]);
+    expect(payments()).toBe(1);
+  });
+
+  it("refuses Base mainnet USDC offered with the name 'USDC' (the domain of Base Sepolia)", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: { name: 'USDC', version: '2' } })];
+    await expectRefusedUnsigned(
+      paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP }),
+      /EIP-712 domain "USDC" version "2" is not the expected "USD Coin" version "2"/,
+    );
+  });
+
+  it.each([
+    ['a wrong name', { name: 'USD Coin', version: '2' }],
+    ['a wrong version', { name: 'USDC', version: '1' }],
+    ['a name in another case', { name: 'usdc', version: '2' }],
+    ['a numeric version', { name: 'USDC', version: 2 }],
+  ])('refuses Base Sepolia USDC offered with %s', async (_label, extra) => {
+    accepts = [requirement({ extra })];
+    await expectRefusedUnsigned(paying().upload('hello', { stampId: STAMP }), /is not the expected "USDC" version "2"/);
+  });
+
+  it.each([
+    ['no extra', { extra: undefined }],
+    ['an empty extra', { extra: {} }],
+    ['no version', { extra: { name: 'USDC' } }],
+    ['no name', { extra: { version: '2' } }],
+  ])('refuses an option with %s before the library sees it', async (_label, overrides) => {
+    accepts = [requirement(overrides)];
+    await expectRefusedUnsigned(paying().upload('hello', { stampId: STAMP }), /no EIP-712 domain/);
+  });
+
+  it('skips an option with the wrong domain and pays the correct one after it', async () => {
+    accepts = [requirement({ extra: USD_COIN }), requirement()];
+    await paying().upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([expect.objectContaining({ name: 'USDC', version: '2' })]);
+    expect(payments()).toBe(1);
+  });
+
+  it('x402 v2: signs the right domain on both networks and refuses a wrong one', async () => {
+    protocol = 2;
+    const v2 = (overrides: Record<string, unknown>) => ({
+      scheme: 'exact',
+      amount: '10000',
+      payTo: GATEWAY_PAYTO,
+      maxTimeoutSeconds: 60,
+      ...overrides,
+    });
+
+    accepts = [v2({ network: 'eip155:84532', asset: USDC_SEPOLIA, extra: { name: 'USDC', version: '2' } })];
+    await paying().upload('hello', { stampId: STAMP });
+    accepts = [v2({ network: 'eip155:8453', asset: USDC_BASE, extra: USD_COIN })];
+    await paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([
+      expect.objectContaining({ name: 'USDC', version: '2', chainId: 84532 }),
+      expect.objectContaining({ name: 'USD Coin', version: '2', chainId: 8453 }),
+    ]);
+    expect(payments()).toBe(2);
+
+    signed = [];
+    seen = [];
+    accepts = [v2({ network: 'eip155:8453', asset: USDC_BASE, extra: { name: 'USDC', version: '2' } })];
+    await expectRefusedUnsigned(
+      paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP }),
+      /is not the expected "USD Coin" version "2"/,
+    );
+    accepts = [v2({ network: 'eip155:84532', asset: USDC_SEPOLIA })];
+    await expectRefusedUnsigned(paying().upload('hello', { stampId: STAMP }), /no EIP-712 domain/);
+  });
+
+  it('a custom asset requires assetDomain, and assetDomain requires a custom asset', () => {
+    expect(() => client({ asset: TOKEN, assetDecimals: 18, maxAmount: '1' })).toThrow(/assetDomain is required with payment.asset/);
+    expect(() => client({ assetDomain: TOKEN_DOMAIN, maxAmount: '1' })).toThrow(/assetDomain is only valid together with payment.asset/);
+    expect(() => client({ asset: TOKEN, assetDecimals: 18, assetDomain: TOKEN_DOMAIN, maxAmount: '1' })).not.toThrow();
+  });
+
+  it.each([
+    [null],
+    ['Token'],
+    [{ name: 'Token' }],
+    [{ version: '1' }],
+    [{ name: '', version: '1' }],
+    [{ name: 'Token', version: '' }],
+    [{ name: 'Token', version: 1 }],
+  ])('rejects assetDomain %j at construction', (assetDomain) => {
+    expect(() =>
+      client({ asset: TOKEN, assetDecimals: 18, assetDomain: assetDomain as never, maxAmount: '1' }),
+    ).toThrow(/payment.assetDomain must be/);
+  });
+
+  it('a custom asset signs with its assetDomain and refuses another domain', async () => {
+    const config = { asset: TOKEN, assetDecimals: 6, assetDomain: TOKEN_DOMAIN, maxAmount: '1' };
+    accepts = [requirement({ asset: TOKEN, extra: TOKEN_DOMAIN })];
+    await paying(config).upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([{ name: 'Token', version: '1', chainId: 84532, verifyingContract: TOKEN }]);
+    expect(payments()).toBe(1);
+
+    signed = [];
+    seen = [];
+    accepts = [requirement({ asset: TOKEN, extra: { name: 'USDC', version: '2' } })];
+    await expectRefusedUnsigned(paying(config).upload('hello', { stampId: STAMP }), /is not the expected "Token" version "1"/);
   });
 });

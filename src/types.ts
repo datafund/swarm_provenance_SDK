@@ -55,8 +55,16 @@ export interface X402PaymentConfig {
    * without a known USDC (payments are refused otherwise).
    */
   asset?: string;
-  /** Decimals of `asset` (default: 6, as USDC) */
+  /** Decimals of `asset` (default: 6, as USDC); required with `asset` */
   assetDecimals?: number;
+  /**
+   * EIP-712 domain of `asset`: its `name()` and `version()` on chain, e.g.
+   * `{ name: 'USD Coin', version: '2' }`. Required with `asset`. A payment
+   * whose `extra.name` or `extra.version` differs is refused before signing.
+   * For the network's USDC the SDK knows the domain (Base: 'USD Coin' / '2',
+   * Base Sepolia: 'USDC' / '2').
+   */
+  assetDomain?: { name: string; version: string };
   /**
    * Called before a payment is handed to the x402 library for signing, after the
    * checks above passed. Return false (or throw) to refuse it. A payment may
