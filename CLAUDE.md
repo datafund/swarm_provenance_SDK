@@ -208,7 +208,7 @@ pnpm format         # Prettier
 
 ### Branching
 
-- **`main`** — Protected. Requires 1 PR review, enforced for admins. No direct pushes.
+- **`main`** — Protected. Requires a pull request (0 approving reviews), enforced for admins. No direct pushes, no force pushes. No required status checks.
 - **`development`** — Integration branch. All feature work merges here first.
 - **Feature branches** — Created from `development`: `feature/<name>`, `fix/<name>`, `chore/<name>`.
 
@@ -218,7 +218,7 @@ pnpm format         # Prettier
 2. Do work, commit, push, create PR to `development`
 3. Merge to `development` after CI passes
 4. When ready to release: bump version in `package.json`, add the version's entry to `CHANGELOG.md`, create PR from `development` → `main`
-5. After merge to `main`, CI auto-publishes to npm and creates a git tag
+5. After merge to `main`, CI auto-publishes to npm and creates a git tag (if the commit is still the tip of `main`; see Releasing)
 
 ### Releasing to npm
 
@@ -229,7 +229,7 @@ Publishing is automated via `.github/workflows/publish.yml`:
 - Only one publish job runs at a time (job-level concurrency group `npm-publish`). The group does not keep push order: a publish job joins it only after its own matrix and scan finish.
 - Checks if `package.json` version is already published
 - If the version is new: runs tests on Node 24, builds, and then publishes to npm and tags `vX.Y.Z` only if the commit is still the tip of `main` (`git ls-remote origin refs/heads/main`, right before `npm publish`). If a different commit is on `main` (normally a newer one), the job skips publish and tag with a warning and a line in the run summary: that commit's own run should publish. So an older push that reaches the group late cannot move npm `latest` back (#188). If the tip cannot be read, the job fails; re-run that run, and it publishes if its commit is still the tip.
-- If the version is already published but its tag `vX.Y.Z` is missing on origin (for example, the tag push failed after `npm publish`), the job pushes the tag, but only if the commit is the tip of `main`. It never publishes again. The tag then points at the tip commit, which can be a later commit with the same version as the one that published. If origin cannot be read, the job fails.
+- If the version is already published but its tag `vX.Y.Z` is missing on origin (for example, the tag push failed after `npm publish`), the job pushes the tag, but only if the commit is the tip of `main`. It never publishes again. The tag then points at the tip commit, which can be a later commit with the same version as the one that published. If origin cannot be read, the job fails. The workflow cannot fix one case: a version published, its tag push failed, and then a commit with a different version became the tip. The workflow never creates that `vX.Y.Z` tag. Push it by hand: `git tag vX.Y.Z <publishing commit> && git push origin vX.Y.Z`. The repository has no tag rulesets today.
 - A version that already published is not affected by the tip check.
 - Re-running an old publish run skips publish and tag. Three points apply:
   - A re-run uses the workflow file of its own commit, so a run from before this change has no tip check. Do not re-run such a run: it could publish its version and move `latest` back.
@@ -248,7 +248,7 @@ To release a new version:
 2. Commit: `chore: bump version to X.Y.Z`
 3. Add the version's entry to `CHANGELOG.md`: what changed for users, with issue numbers, and any open release-gate items
 4. Create PR `development` → `main`
-5. After merge, npm publish happens automatically
+5. After merge, npm publish happens automatically (if the commit is still the tip of `main`; see Releasing)
 
 ### CI
 

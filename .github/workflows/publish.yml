@@ -168,6 +168,7 @@ jobs:
           else
             echo "missing=false" >> "$GITHUB_OUTPUT"
             echo "::warning::Tag v${VERSION} is missing on origin, but this commit is not the tip of main. Not tagging."
+            echo "Did not push tag v${VERSION}: it is missing on origin, but commit ${COMMIT_SHA} is not the tip of main (${TIP_SHA})." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Tag release
