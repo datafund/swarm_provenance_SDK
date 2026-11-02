@@ -291,10 +291,10 @@ The release gate in #129 is not fully met. These items are open:
   even when both commits pass, if the newer commit is pushed before the older commit's
   tip-check step runs: if commit A sets 0.7.0 and commit B sets 0.7.1, 0.7.0 then never reaches
   npm. A later commit with the same version publishes that version, from its own code. If the
-  newest commit fails its checks, or its push starts no run (`[skip ci]`, or a push made with
-  `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, so the recovery
-  is a new commit on `main` (an empty commit is enough), pushed with a user token and without
-  `[skip ci]`. (#188)
+  newest commit fails its checks, or its push starts no run (a skip marker such as `[skip ci]`,
+  or a push made with `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no
+  `workflow_dispatch`, so the recovery is a new commit on `main` (an empty commit is enough),
+  pushed with a user token and without a skip marker. (#188)
 - `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
   version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
   and moves `latest` back. The workflow cannot publish such a hotfix under another tag. (#188)
