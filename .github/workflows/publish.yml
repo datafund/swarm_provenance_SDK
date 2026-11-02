@@ -29,16 +29,14 @@ jobs:
 
     # Only one publish job runs at a time. The group is on this job, not on
     # the workflow, so the matrix and the scan still run for every push.
+    # The group does not keep push order: a job joins it only after its own
+    # matrix and scan finish. So the job publishes and tags only if its commit
+    # is still the tip of main (the tip-check step below). An older push that
+    # reaches the group late is skipped and cannot move npm `latest` back (#188).
     # By default, GitHub keeps at most one pending job per group: a newer
     # pending job cancels the older pending one, even with cancel-in-progress
-    # false. The cancelled push's version is then published only if the newer
-    # push has the same version in package.json, and then from the newer
-    # commit's code. `queue: max` is not used yet: it is not checked on a real
-    # run, and actionlint does not accept the key (#187).
-    # The group does not keep push order: a job joins it only after its own
-    # matrix and scan finish. An older push whose checks finish later can
-    # publish after a newer one and move npm `latest` back. This has not been
-    # seen on a run, and it was possible before the group was added (#188).
+    # false. The cancelled job belongs to an older commit, which the tip check
+    # would skip anyway, so `queue: max` is not used (#187).
     concurrency:
       group: npm-publish
       cancel-in-progress: false
@@ -90,12 +88,34 @@ jobs:
             echo "Version ${PACKAGE_VERSION} not yet published."
           fi
 
-      - name: Publish to npm
+      # Run as late as possible, right before publishing, so the answer is
+      # current. If a newer commit is on main, skip publish and tag: that
+      # commit's own run publishes. Fail if the tip cannot be read.
+      - name: Check that this commit is still the tip of main
+        id: tip-check
         if: steps.version-check.outputs.published == 'false'
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          TIP_SHA=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ -z "$TIP_SHA" ]; then
+            echo "::error::Could not read the tip of main from origin."
+            exit 1
+          fi
+          if [ "$TIP_SHA" = "$COMMIT_SHA" ]; then
+            echo "tip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit ${COMMIT_SHA} is the tip of main, publishing."
+          else
+            echo "tip=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping publish and tag: a newer commit (${TIP_SHA}) is on main; its own run publishes."
+          fi
+
+      - name: Publish to npm
+        if: steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true'
         run: npm publish --access public --provenance
 
       - name: Verify publish
-        if: steps.version-check.outputs.published == 'false'
+        if: steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true'
         run: |
           echo "Waiting for npm registry to propagate..."
           PACKAGE_NAME="${{ steps.version-check.outputs.name }}"
@@ -113,7 +133,7 @@ jobs:
           echo "::warning::Package published but not yet visible on npm registry after 60s. It may take a few more minutes to propagate."
 
       - name: Tag release
-        if: steps.version-check.outputs.published == 'false'
+        if: steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true'
         run: |
           git tag "v${{ steps.version-check.outputs.version }}"
           git push origin "v${{ steps.version-check.outputs.version }}"

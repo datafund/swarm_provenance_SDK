@@ -267,6 +267,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `publish.yml` publishes to npm only after the secret scan passes for the pushed commits, and
   runs only one publish job at a time. The secret scan runs with read-only repository access.
   (#176)
+- `publish.yml` publishes and tags only if the commit is still the tip of `main`, so an older
+  push whose checks finish later cannot move npm `latest` back. (#188, #187)
 
 ### Release gate gaps
 
@@ -285,13 +287,8 @@ The release gate in #129 is not fully met. These items are open:
     still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- By default, GitHub keeps at most one waiting publish job. When a third push to `main` reaches
-  the publish job while one runs and one waits, GitHub cancels the waiting one. Its version is
-  published only if the newer push has the same version in `package.json`, and then from the
-  newer commit's code, not the cancelled commit's. `queue: max` is not used yet: it is not
-  checked on a real run, and actionlint does not accept the key. Do not re-run a cancelled
-  publish run later: `npm publish` without `--tag` moves `latest` back. (#176, #187)
-- The `npm-publish` group runs one publish job at a time, but not in push order. A publish job
-  joins it only after its own matrix and scan finish, so an older push whose checks finish later
-  can publish after a newer one and move npm `latest` back. This has not been seen on a run,
-  and it was possible before the group was added. (#188)
+- `publish.yml` publishes only from the tip of `main`. If the newest commit fails its checks,
+  nothing publishes, and an older commit's version is never published. A fix pushed to `main`
+  then publishes the version in its `package.json`. `queue: max` is not used: a pending publish
+  job that GitHub cancels belongs to an older commit, which the tip check skips anyway.
+  (#187, #188)
