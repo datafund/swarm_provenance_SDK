@@ -225,6 +225,8 @@ pnpm format         # Prettier
 Publishing is automated via `.github/workflows/publish.yml`:
 - Triggers on push to `main`
 - Runs the full `ci.yml` matrix first (it calls `ci.yml` through `workflow_call`). The publish job needs it to pass for that commit.
+- Runs the secret scan (`secret-scan.yml`, also through `workflow_call`) on the pushed range. The publish job needs it to pass for that commit.
+- Only one publish job runs at a time (job-level concurrency group `npm-publish`). GitHub keeps at most one pending job per group, so a third push that reaches the publish job while one runs and one waits cancels the waiting one. That push's version is published only if the newer push has the same version. Do not re-run the cancelled run later: `npm publish` without `--tag` would move `latest` back to the older version.
 - Checks if `package.json` version is already published
 - If new version: runs tests on Node 24, builds, publishes to npm, tags `vX.Y.Z`
 - If version unchanged: skips publish (safe for non-release merges)
@@ -241,6 +243,7 @@ To release a new version:
 - `.github/workflows/ci.yml` — Runs on all PRs to `main`/`development` and on pushes to `development`. On a push to `main`, `publish.yml` calls it, so the matrix runs once and gates the publish.
 - Matrix: Node 18.x + 20.x
 - Steps: typecheck → lint → test → build → verify dist → verify viem guard (CJS chain entry with viem present, absent, and bundled by tsup's esbuild)
+- `.github/workflows/secret-scan.yml` — gitleaks scan of new commits. Runs on all PRs, on pushes to `development` and by hand. On a push to `main`, `publish.yml` calls it, so the scan runs once and gates the publish.
 
 ## Gateway URLs
 

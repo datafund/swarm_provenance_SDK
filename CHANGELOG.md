@@ -264,6 +264,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `publish.yml` publishes to npm only after the `ci.yml` matrix passes for the same commit:
   Node 18 and 20, and the payment tests against `@x402/*` 2.23.0 and 2.28.0. It installs with
   `--frozen-lockfile`. `ci.yml` runs with read-only repository access. (#174)
+- `publish.yml` publishes to npm only after the secret scan passes for the pushed commits, and
+  runs only one publish job at a time. The secret scan runs with read-only repository access.
+  (#176)
 
 ### Release gate gaps
 
@@ -282,3 +285,6 @@ The release gate in #129 is not fully met. These items are open:
     still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
+- `publish.yml` keeps at most one waiting publish job. When a third push to `main` reaches the
+  publish job while one runs and one waits, GitHub cancels the waiting one. Its version is
+  published only if the newer push has the same version in `package.json`. (#176)
