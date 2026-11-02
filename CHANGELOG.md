@@ -298,9 +298,9 @@ The release gate in #129 is not fully met. These items are open:
   `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, and branch
   protection rejects a direct push to `main`. So the recovery is a new commit that a user merges
   to `main` through a pull request, without a skip marker: for example, an empty commit on a
-  branch cut from `main`, merged to `main` by pull request. A `development` → `main` pull
-  request also works, but it also releases what is on `development`. If a failure was flaky,
-  re-run the failed run instead. (#188)
+  branch cut from `main`, merged to `main` by pull request with a merge commit (not squash or
+  rebase). A `development` → `main` pull request also works, but it also releases what is on
+  `development`. If a failure was flaky, re-run the failed run instead. (#188)
 - A publish run from before this change has no tip check. Do not re-run it. (#188)
 - If a version is on npm but its tag push failed, a later run tags the tip of `main` only if the
   tip has the same version, so the tag can land on a later commit than the one that published.
