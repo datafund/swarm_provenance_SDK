@@ -228,12 +228,17 @@ describe('ProvenanceClient', () => {
         expect((withCode as StampError).code).toBe('DAILY_STAMP_ALLOWANCE_EXHAUSTED');
         expect((withCode as Error).message).toMatch(/payForPool/);
         expect((withCode as Error).message).toMatch(/stampId/);
+        // The 402's price and quota details stay available (#163)
+        expect((withCode as StampError).body).toEqual({
+          detail: { code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED', message: 'Daily stamp allowance used up.', accepts: [] },
+        });
 
         mockFetch.mockResolvedValueOnce(answer402({ x402Version: 1, error: 'Payment required', accepts: [] }));
         const withoutCode = await client.acquireStamp().catch((e: unknown) => e);
         expect(withoutCode).toBeInstanceOf(StampError);
         expect((withoutCode as StampError).code).toBe('PAYMENT_REQUIRED');
         expect((withoutCode as Error).message).toMatch(/payForPool/);
+        expect((withoutCode as StampError).body).toEqual({ detail: { x402Version: 1, error: 'Payment required', accepts: [] } });
       }
     );
 
