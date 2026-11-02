@@ -76,7 +76,25 @@ describe('owner-proof uploads', () => {
     expect(Number.isInteger(timestamp)).toBe(true);
     expect(Math.abs(timestamp - before)).toBeLessThanOrEqual(300);
     expect(await recoveredSigner(0)).toBe(OWNER.address);
-    expect(new URL(String(mockFetch.mock.calls[0]![0])).searchParams.get('stamp_id')).toBe(STAMP);
+    // Bee batch ids, and so the gateway's ownership registry, are lowercase (#168)
+    expect(new URL(String(mockFetch.mock.calls[0]![0])).searchParams.get('stamp_id')).toBe(STAMP.toLowerCase());
+  });
+
+  it.each([false, true])('sends and stores a mixed-case stampId in lowercase (raw: %s, #168)', async (raw) => {
+    mockFetch.mockResolvedValueOnce(json(200, { reference: REFERENCE }));
+    expect(STAMP).not.toBe(STAMP.toLowerCase());
+
+    const result = raw
+      ? await client().upload({ a: 1 }, { raw: true, stampId: STAMP, ownerSigner: OWNER })
+      : await client().upload('hello', { stampId: STAMP, ownerSigner: OWNER });
+
+    const [input, init] = mockFetch.mock.calls[0]!;
+    expect(new URL(String(input)).searchParams.get('stamp_id')).toBe(STAMP.toLowerCase());
+    const file = (init?.body as FormData).get('file') as Blob;
+    expect((JSON.parse(await file.text()) as { stamp_id: string }).stamp_id).toBe(STAMP.toLowerCase());
+    expect(result.metadata.stamp_id).toBe(STAMP.toLowerCase());
+    // The proof is over the lowercase id, as the gateway checks it
+    expect(await recoveredSigner(0)).toBe(OWNER.address);
   });
 
   it('works for raw uploads too', async () => {
@@ -518,7 +536,7 @@ describe('owner-proof timestamps across uploads', () => {
     await c.upload('two', { stampId: OTHER_STAMP, ownerSigner: OWNER });
 
     expect(sent.map((s) => [s.stamp, s.timestamp])).toEqual([
-      [STAMP, NOW],
+      [STAMP.toLowerCase(), NOW],
       [OTHER_STAMP, NOW],
     ]);
   });

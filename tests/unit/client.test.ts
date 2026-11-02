@@ -383,6 +383,22 @@ describe('ProvenanceClient', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // No stamp acquisition
     });
 
+    it('sends a mixed-case stampId in lowercase, as Bee batch ids are (#168)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ reference: 'abcd1234'.repeat(8) }),
+      });
+      const mixed = 'ABCDEF'.padEnd(64, '0');
+
+      const result = await new ProvenanceClient().upload('Hello', { stampId: mixed });
+
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(new URL(url).searchParams.get('stamp_id')).toBe(mixed.toLowerCase());
+      const file = (init.body as FormData).get('file') as Blob;
+      expect((JSON.parse(await file.text()) as { stamp_id: string }).stamp_id).toBe(mixed.toLowerCase());
+      expect(result.metadata.stamp_id).toBe(mixed.toLowerCase());
+    });
+
     it('should upload with notary signing (signatures available on download)', async () => {
       // Mock pool status pre-check
       mockFetch.mockResolvedValueOnce({
