@@ -71,6 +71,13 @@ export class ProvenanceError extends Error {
    */
   public body?: unknown;
 
+  /**
+   * 429 responses only: the wait the gateway asked for in `Retry-After`, in
+   * seconds, when it sent one the SDK can read (delta-seconds or an HTTP date).
+   * Set also when the SDK did not retry because the wait was longer than 60 s.
+   */
+  public retryAfterSeconds?: number | undefined;
+
   constructor(
     message: string,
     public readonly code?: string

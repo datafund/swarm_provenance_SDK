@@ -68,6 +68,12 @@ const DEFAULT_PAID_TIMEOUT = 120000;
 const MAX_IDEMPOTENT_RETRIES = 2;
 /** Longest Retry-After honoured for IDEMPOTENCY_KEY_IN_PROGRESS, in seconds */
 const MAX_IN_PROGRESS_WAIT_S = 30;
+/**
+ * Longest Retry-After the SDK waits before retrying an unpaid 429, in seconds
+ * (#161). Asked to wait longer, it does not retry: the 429 error is thrown at
+ * once, with `retryAfterSeconds`, so the caller decides.
+ */
+const MAX_RETRY_AFTER_S = 60;
 
 /**
  * Main client for interacting with the Swarm Provenance Gateway
@@ -89,6 +95,8 @@ export class ProvenanceClient {
   private paymentPolicy: PaymentPolicy | undefined;
   /** Responses to attempts that sent a payment, with their Idempotency-Key and signed requirement (see fetch, handleError) */
   private readonly paidResponses = new WeakMap<Response, PaidAttempt>();
+  /** 429 responses not retried because Retry-After asked for more than MAX_RETRY_AFTER_S, with that wait (see fetch, handleError) */
+  private readonly overlongRetryAfter = new WeakMap<Response, number>();
   private x402TransportPromise: Promise<{ fetchFor(state: PaymentAttemptState): typeof fetch }> | undefined;
   /** Last owner-proof timestamp used, per stamp and signer (see reserveOwnerProofTimestamp) */
   private readonly ownerProofTimestamps = new Map<string, number>();
@@ -966,6 +974,14 @@ export class ProvenanceClient {
         // Retry transient errors, but never an attempt that sent a payment
         const retryable = response.status === 502 || response.status === 503 || response.status === 429;
         if (!paid && attempt < this.retryConfig.maxRetries && retryable) {
+          // Asked to wait longer than the SDK waits: do not retry (#161)
+          if (response.status === 429) {
+            const seconds = retryAfterSeconds(response.headers.get('Retry-After'));
+            if (seconds !== undefined && seconds > MAX_RETRY_AFTER_S) {
+              this.overlongRetryAfter.set(response, seconds);
+              return response;
+            }
+          }
           const delay = this.getRetryDelay(response, attempt);
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
@@ -1131,8 +1147,21 @@ export class ProvenanceClient {
       return error;
     }
 
+    // A 429's Retry-After, also when the SDK did not wait for it (#161)
+    const overlong = this.overlongRetryAfter.get(response);
+    const retryAfter =
+      overlong ?? (response.status === 429 ? retryAfterSeconds(response.headers?.get('Retry-After')) : undefined);
+    if (overlong !== undefined) {
+      // The gateway's message is cut to leave room, so this always shows
+      const suffix =
+        `. The SDK did not retry: the gateway asked to wait ${overlong} s ` +
+        `(Retry-After), more than the ${MAX_RETRY_AFTER_S} s it waits. See retryAfterSeconds.`;
+      message = `${capText(message.replace(/[.\s]*$/, ''), MAX_ERROR_TEXT - suffix.length)}${suffix}`;
+    }
+
     const error = new GatewayConnectionError(message, response.status, code, suggestion);
     if (body !== undefined) error.body = body;
+    if (retryAfter !== undefined) error.retryAfterSeconds = retryAfter;
     if (payment) {
       // The request carried a signed payment: say so, with whatever the gateway reported
       error.payment = payment;
@@ -1431,6 +1460,7 @@ function paymentAttempt(response: Response, paid: PaidAttempt, decimals: number 
 function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceError): E {
   if (source.payment) target.payment = source.payment;
   if (source.body !== undefined) target.body = source.body;
+  if (source.retryAfterSeconds !== undefined) target.retryAfterSeconds = source.retryAfterSeconds;
   return target;
 }
 

@@ -590,10 +590,19 @@ How a 429 is handled depends on its code and on the request:
 
 | 429 | `'free'` mode, and unpaid reads in x402 mode | `'none'` mode, and x402 writes |
 |---|---|---|
-| A rate limit: `RATE_LIMIT_EXCEEDED`, `HTTP_429` (the free tier), or no code | `PaymentRateLimitError` after one request, not retried | Retried up to `retry.maxRetries` times, waiting `Retry-After` when sent; then the gateway error with its code (`StampError` from `acquireStamp()` and `upload()`'s pool acquisition, else `GatewayConnectionError`) |
+| A rate limit: `RATE_LIMIT_EXCEEDED`, `HTTP_429` (the free tier), or no code | `PaymentRateLimitError` after one request, not retried | Retried up to `retry.maxRetries` times, waiting `Retry-After` when sent (at most 60 s, see below); then the gateway error with its code (`StampError` from `acquireStamp()` and `upload()`'s pool acquisition, else `GatewayConnectionError`) |
 | Any other code, such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED` (a quota) | The gateway error with its code, at once | The gateway error with its code, at once |
 
 A request that sent a payment is never retried for a 429.
+
+The SDK waits at most 60 seconds for a `Retry-After` before it retries a 429 (#161). If
+`Retry-After` asks for more than 60 seconds (delta-seconds or an HTTP date), the SDK does not wait
+and does not retry. It throws the same error it throws when the retries run out, at once, and the
+message says why. A wait of exactly 60 seconds is still honoured. The cap is fixed; it is not part
+of the `retry` options. The backoff without `Retry-After` (`retry.baseDelayMs`) is not capped.
+
+Every error from a 429 with a readable `Retry-After` has `retryAfterSeconds`: the wait the gateway
+asked for, in seconds. Use it to decide when to try again.
 
 ## Advanced Usage
 
@@ -885,6 +894,10 @@ issue numbers and lists the open release-gate items.
   `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
   date now falls back to the normal backoff. This includes a non-integer value such as `"1.5"`:
   RFC 9110 allows only whole delta-seconds. Before, `parseInt` read it as 1 second.
+- The 429 retry waits at most 60 seconds for `Retry-After` (#161). A longer wait is not taken:
+  the 429 error is thrown at once, with `retryAfterSeconds`. Before, the SDK waited as long as
+  the header said. Every SDK error from a 429 with a readable `Retry-After` now has
+  `retryAfterSeconds`, not only `PaymentRateLimitError`.
 - Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
   transaction with that nonce is already pending, and a resend could write twice. That error and
   "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
