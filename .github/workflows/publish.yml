@@ -33,6 +33,8 @@ jobs:
     # matrix and scan finish. So the job publishes and tags only if its commit
     # is still the tip of main (the tip-check step below). An older push that
     # reaches the group late is skipped and cannot move npm `latest` back (#188).
+    # A force-move of main back to an older commit makes that commit the tip,
+    # so its unpublished version publishes and moves `latest` back.
     # When a newer commit is pushed before an older commit's tip-check step
     # runs, the older commit's version is never published, even when its
     # checks pass.
@@ -41,7 +43,9 @@ jobs:
     # It cancels by queue order, not by commit. So the tip commit's pending job
     # can be cancelled by an older commit's job, which the tip check then
     # skips, and nothing publishes. If the tip commit's publish run was
-    # cancelled, re-run it; this is safe because of the tip check.
+    # cancelled, re-run it within GitHub's 30-day re-run window; this is safe
+    # because of the tip check. After that, push a new commit to main with a
+    # user token and without a skip marker.
     # `queue: max` would prevent this case. It is not used because GitHub
     # accepting the key is not checked on a real run, and an invalid
     # publish.yml would stop both publishing and the secret scan of pushes to
