@@ -229,6 +229,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `IDEMPOTENCY_UNAVAILABLE` (retried), `IDEMPOTENCY_KEY_REUSED` and `IDEMPOTENCY_KEY_INVALID`
   (thrown with the gateway's code), and the three stop codes above. (#102)
 - The code `NOT_IMPLEMENTED` is no longer used. (#113)
+- `upload()` sends a `stampId` of 64 hex characters in lowercase, as Bee batch ids are. The
+  gateway checks stamp ownership against the id without changing its case, so a mixed-case id
+  could be refused with 403 `STAMP_OWNERSHIP_DENIED`, on paid and owner-proof uploads alike.
+  The lowercase id is also in the stored metadata's `stamp_id`, in `result.metadata.stamp_id`
+  and in `error.payment.stampId`. A retry with the same `idempotencyKey` matches with either
+  spelling. Verification is not affected: `content_hash` covers `data` only. (#168)
 
 ### New
 
