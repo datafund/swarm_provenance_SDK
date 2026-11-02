@@ -1946,6 +1946,8 @@ describe('wrong download method for the record format (#190)', () => {
     ['an array', '[1,2]'],
     ['null', 'null'],
     ['a number', '5'],
+    ['true', 'true'],
+    ['false', 'false'],
   ])('download() on a raw upload whose data is %s names downloadDocument()', async (_label, content) => {
     const body = await stored(content, true);
     for (const record of [body, wrap(body)]) {
@@ -2002,17 +2004,38 @@ describe('wrong download method for the record format (#190)', () => {
     }
   });
 
-  it('a notary-signed raw record through download() names downloadDocument()', async () => {
+  /**
+   * A notary fixture (direct format) and the same record in the wrapped format.
+   * The wrapped text is built from the fixture text, not with JSON.stringify,
+   * so 2.0 and big integers in the raw fixture stay as they are.
+   */
+  function signedRecords(name: string): string[] {
+    const direct = readFileSync(new URL(`../fixtures/notary/${name}`, import.meta.url), 'utf8');
+    const at = direct.lastIndexOf('"signatures"');
+    const fields = direct.slice(0, at).trimEnd().replace(/,$/, '');
+    const wrapped = `{"metadata": ${fields}\n}, ${direct.slice(at)}`;
+    const parsed = JSON.parse(wrapped) as { metadata: Record<string, unknown>; signatures: unknown[] };
+    expect(Object.keys(parsed)).toEqual(['metadata', 'signatures']);
+    expect(parsed.metadata['content_hash']).toBe((JSON.parse(direct) as Record<string, unknown>)['content_hash']);
+    return [direct, wrapped];
+  }
+
+  it('a notary-signed raw record through download() names downloadDocument(), direct and wrapped', async () => {
     // The fixture holds 2.0 and a big integer: the raw hash check needs the lossless canonical text
-    const error = await failure('download', readFileSync(new URL('../fixtures/notary/raw-document.json', import.meta.url), 'utf8'));
-    expect(error.code).toBe('INVALID_RESPONSE');
-    expect(error.message).toMatch(TO_DOCUMENT);
+    for (const record of signedRecords('raw-document.json')) {
+      expect(record).toContain('2.0');
+      const error = await failure('download', record);
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect(error.message).toMatch(TO_DOCUMENT);
+    }
   });
 
-  it('a notary-signed base64 record through downloadDocument() names download()', async () => {
-    const error = await failure('downloadDocument', readFileSync(new URL('../fixtures/notary/base64-document.json', import.meta.url), 'utf8'));
-    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
-    expect(error.message).toMatch(TO_DOWNLOAD);
+  it('a notary-signed base64 record through downloadDocument() names download(), direct and wrapped', async () => {
+    for (const record of signedRecords('base64-document.json')) {
+      const error = await failure('downloadDocument', record);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOWNLOAD);
+    }
   });
 
   it('a record without a string content_hash through download() keeps the #179 shape message', async () => {
