@@ -261,6 +261,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - A local editor settings file is removed from the repository and ignored. (#121, PR #103)
 - CI runs the payment tests against `@x402/*` 2.23.0 and 2.28.0. (#110)
 - Integration tests use the dev gateway by default. (#119)
+- `publish.yml` publishes to npm only after the `ci.yml` matrix passes for the same commit:
+  Node 18 and 20, and the payment tests against `@x402/*` 2.23.0 and 2.28.0. It installs with
+  `--frozen-lockfile`. `ci.yml` runs with read-only repository access. (#174)
 
 ### Release gate gaps
 
@@ -274,11 +277,8 @@ The release gate in #129 is not fully met. These items are open:
 - #120 is open. These of its items are not done:
   - The `viem` peer range is still `^2.0.0`. The `@x402/*` range is narrowed.
   - `publish.yml` pins its actions by tag, not by SHA.
-  - `ci.yml` has no `permissions:` block.
   - CI checks are not required on `main`. Its protection has no required status checks, so a
-    merge to `main` can run `publish.yml` before the `ci.yml` matrix has passed.
+    pull request can be merged to `main` before its `ci.yml` checks have passed. `publish.yml`
+    still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- `publish.yml` runs its tests only on Node 24. It does not run the Node 18 and 20 matrix or
-  the `@x402` 2.23.0 and 2.28.0 tests before it publishes. The CI run of the `development` to
-  `main` pull request must cover them.

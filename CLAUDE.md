@@ -224,8 +224,9 @@ pnpm format         # Prettier
 
 Publishing is automated via `.github/workflows/publish.yml`:
 - Triggers on push to `main`
+- Runs the full `ci.yml` matrix first (it calls `ci.yml` through `workflow_call`). The publish job needs it to pass for that commit.
 - Checks if `package.json` version is already published
-- If new version: runs tests, builds, publishes to npm, tags `vX.Y.Z`
+- If new version: runs tests on Node 24, builds, publishes to npm, tags `vX.Y.Z`
 - If version unchanged: skips publish (safe for non-release merges)
 
 To release a new version:
@@ -237,7 +238,7 @@ To release a new version:
 
 ### CI
 
-- `.github/workflows/ci.yml` — Runs on all PRs and pushes to `main`/`development`
+- `.github/workflows/ci.yml` — Runs on all PRs to `main`/`development` and on pushes to `development`. On a push to `main`, `publish.yml` calls it, so the matrix runs once and gates the publish.
 - Matrix: Node 18.x + 20.x
 - Steps: typecheck → lint → test → build → verify dist → verify viem guard (CJS chain entry with viem present, absent, and bundled by tsup's esbuild)
 
