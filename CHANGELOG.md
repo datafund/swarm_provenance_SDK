@@ -89,10 +89,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `PAYMENT_UNCONFIRMED` and carries `error.payment`. A signature rejected in the wallet throws
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
   catches these. (#106, #107, PR #138; #112)
-- In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()` whose body is
-  not valid JSON throws `GatewayConnectionError` with code `INVALID_RESPONSE`. Before, a raw
-  `SyntaxError` escaped. The other read methods still throw `SyntaxError` (#173).
-  (#107, PR #138)
+- In any mode, a success response whose body is not valid JSON throws `GatewayConnectionError`
+  with code `INVALID_RESPONSE` and the HTTP status. This applies to `pricing()`, `acquireStamp()`,
+  `upload()`, `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`. Before, a
+  raw `SyntaxError` escaped. If the request was paid, the error carries `error.payment`.
+  (#107, PR #138; #173)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)

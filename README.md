@@ -1025,9 +1025,10 @@ issue numbers and lists the open release-gate items.
   (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
   sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
-  catches these. In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()`
-  that is not valid JSON throws `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw
-  `SyntaxError` (the other read methods still throw `SyntaxError`; #173).
+  catches these. In any mode, a success response that is not valid JSON throws
+  `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`. This applies to
+  `pricing()`, `acquireStamp()`, `upload()`, `download()`, `downloadDocument()`, `notaryInfo()`
+  and `poolStatus()` (#173).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
