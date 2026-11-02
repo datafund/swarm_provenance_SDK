@@ -295,20 +295,23 @@ The release gate in #129 is not fully met. These items are open:
   npm. A later commit with the same version publishes that version, from its own code. If the
   newest commit was pushed before the older commit's tip-check step ran, and it fails its
   checks or its push starts no run (a skip marker such as `[skip ci]`, or a push made with
-  `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, so the recovery
-  is a new commit on `main` (an empty commit is enough), pushed with a user token and without a
-  skip marker. If a failure was flaky, re-run the failed run instead. (#188)
+  `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, and branch
+  protection rejects a direct push to `main`. So the recovery is a new commit that a user merges
+  to `main` through a pull request, without a skip marker: for example, an empty commit on
+  `development`, then a `development` → `main` pull request. If a failure was flaky, re-run the
+  failed run instead. (#188)
 - A publish run from before this change has no tip check. Do not re-run it. (#188)
 - `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
   version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
   and moves `latest` back. The same happens if `main` is force-moved back to an older commit
-  with an unpublished version. The workflow cannot publish such a hotfix under another tag.
+  with an unpublished version; branch protection disables force pushes to `main` today, so this
+  needs a protection change first. The workflow cannot publish such a hotfix under another tag.
   (#188)
 - GitHub keeps at most one pending publish job and cancels it by queue order, not by commit. An
   older commit's job can cancel the tip commit's pending job, and then the tip check skips the
   older one, so nothing publishes. If the tip commit's publish run was cancelled, re-run it
-  within GitHub's 30-day re-run window; this is safe because of the tip check. After that, push
-  a new commit to `main` with a user token and without a skip marker. `queue: max` would prevent
-  this case. It is not used because GitHub accepting the key is not checked on a real run, and
-  an invalid `publish.yml` would stop both publishing and the secret scan of pushes to `main`.
-  (#187)
+  within GitHub's 30-day re-run window; this is safe because of the tip check. After that, merge
+  a new commit to `main` through a pull request, without a skip marker. `queue: max` would
+  prevent this case. It is not used because GitHub accepting the key is not checked on a real
+  run, and an invalid `publish.yml` would stop both publishing and the secret scan of pushes to
+  `main`. (#187)

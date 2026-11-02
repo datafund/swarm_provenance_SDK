@@ -91,8 +91,8 @@ jobs:
       # commit's own run should publish. A push that starts no run (a skip
       # marker such as `[skip ci]`, or a push made with GITHUB_TOKEN) publishes
       # nothing. This workflow has no workflow_dispatch, so the only recovery
-      # is a new commit on main (an empty commit is enough), pushed with a user
-      # token and without a skip marker.
+      # is a new commit merged to main through a pull request, without a skip
+      # marker (see CLAUDE.md, Releasing).
       # Fail if the tip cannot be read. `shell: bash` sets pipefail, so a
       # failing ls-remote stops the step.
       - name: Check that this commit is still the tip of main
