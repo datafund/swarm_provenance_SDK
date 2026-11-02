@@ -287,11 +287,17 @@ The release gate in #129 is not fully met. These items are open:
     still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- `publish.yml` publishes only from the tip of `main`. A superseded version is never published,
-  even when both commits pass: if commit A sets 0.7.0 and commit B sets 0.7.1, 0.7.0 never
-  reaches npm. A later commit with the same version publishes that version, from its own code.
-  If the newest commit fails its checks, or its push starts no run (`[skip ci]`, or a push made
-  with `GITHUB_TOKEN`), nothing publishes. Push a fix or push again, or re-run. (#188)
+- `publish.yml` publishes only from the tip of `main`. A superseded version is not published,
+  even when both commits pass, if the newer commit is pushed before the older commit's
+  tip-check step runs: if commit A sets 0.7.0 and commit B sets 0.7.1, 0.7.0 then never reaches
+  npm. A later commit with the same version publishes that version, from its own code. If the
+  newest commit fails its checks, or its push starts no run (`[skip ci]`, or a push made with
+  `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, so the recovery
+  is a new commit on `main` (an empty commit is enough), pushed with a user token and without
+  `[skip ci]`. (#188)
+- `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
+  version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
+  and moves `latest` back. The workflow cannot publish such a hotfix under another tag. (#188)
 - GitHub keeps at most one pending publish job and cancels it by queue order, not by commit. An
   older commit's job can cancel the tip commit's pending job, and then the tip check skips the
   older one, so nothing publishes. If the tip commit's publish run was cancelled, re-run it;

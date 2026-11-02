@@ -98,8 +98,11 @@ jobs:
 
       # Run as late as possible, right before publishing, so the answer is
       # current. If a newer commit is on main, skip publish and tag: that
-      # commit's own run publishes. A push that starts no run (`[skip ci]`, or
-      # a push made with GITHUB_TOKEN) publishes nothing: push again or re-run.
+      # commit's own run should publish. A push that starts no run (`[skip ci]`,
+      # or a push made with GITHUB_TOKEN) publishes nothing. This workflow has
+      # no workflow_dispatch, so the only recovery is a new commit on main (an
+      # empty commit is enough), pushed with a user token and without
+      # `[skip ci]`.
       # Fail if the tip cannot be read. `shell: bash` sets pipefail, so a
       # failing ls-remote stops the step.
       - name: Check that this commit is still the tip of main
@@ -119,7 +122,7 @@ jobs:
             echo "Commit ${COMMIT_SHA} is the tip of main, publishing."
           else
             echo "tip=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping publish and tag: a newer commit (${TIP_SHA}) is on main; its own run publishes."
+            echo "::warning::Skipped publish and tag: a newer commit (${TIP_SHA}) is on main. Its run should publish; if that run failed, was cancelled or did not start, see CLAUDE.md, Releasing."
           fi
 
       - name: Publish to npm
