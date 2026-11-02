@@ -287,8 +287,14 @@ The release gate in #129 is not fully met. These items are open:
     still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- `publish.yml` publishes only from the tip of `main`. If the newest commit fails its checks,
-  nothing publishes, and an older commit's version is never published. A fix pushed to `main`
-  then publishes the version in its `package.json`. `queue: max` is not used: a pending publish
-  job that GitHub cancels belongs to an older commit, which the tip check skips anyway.
-  (#187, #188)
+- `publish.yml` publishes only from the tip of `main`. A superseded version is never published,
+  even when both commits pass: if commit A sets 0.7.0 and commit B sets 0.7.1, 0.7.0 never
+  reaches npm. A later commit with the same version publishes that version, from its own code.
+  If the newest commit fails its checks, or its push starts no run (`[skip ci]`, or a push made
+  with `GITHUB_TOKEN`), nothing publishes. Push a fix or push again, or re-run. (#188)
+- GitHub keeps at most one pending publish job and cancels it by queue order, not by commit. An
+  older commit's job can cancel the tip commit's pending job, and then the tip check skips the
+  older one, so nothing publishes. If the tip commit's publish run was cancelled, re-run it;
+  this is safe because of the tip check. `queue: max` would prevent this case. It is not used
+  because GitHub accepting the key is not checked on a real run, and an invalid `publish.yml`
+  would stop both publishing and the secret scan of pushes to `main`. (#187)

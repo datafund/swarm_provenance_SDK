@@ -33,10 +33,18 @@ jobs:
     # matrix and scan finish. So the job publishes and tags only if its commit
     # is still the tip of main (the tip-check step below). An older push that
     # reaches the group late is skipped and cannot move npm `latest` back (#188).
-    # By default, GitHub keeps at most one pending job per group: a newer
-    # pending job cancels the older pending one, even with cancel-in-progress
-    # false. The cancelled job belongs to an older commit, which the tip check
-    # would skip anyway, so `queue: max` is not used (#187).
+    # A version from a commit that is no longer the tip is never published,
+    # even when its checks pass.
+    # By default, GitHub keeps at most one pending job per group: a job that
+    # joins later cancels the pending one, even with cancel-in-progress false.
+    # It cancels by queue order, not by commit. So the tip commit's pending job
+    # can be cancelled by an older commit's job, which the tip check then
+    # skips, and nothing publishes. If the tip commit's publish run was
+    # cancelled, re-run it; this is safe because of the tip check.
+    # `queue: max` would prevent this case. It is not used because GitHub
+    # accepting the key is not checked on a real run, and an invalid
+    # publish.yml would stop both publishing and the secret scan of pushes to
+    # main (#187).
     concurrency:
       group: npm-publish
       cancel-in-progress: false
@@ -90,14 +98,18 @@ jobs:
 
       # Run as late as possible, right before publishing, so the answer is
       # current. If a newer commit is on main, skip publish and tag: that
-      # commit's own run publishes. Fail if the tip cannot be read.
+      # commit's own run publishes. A push that starts no run (`[skip ci]`, or
+      # a push made with GITHUB_TOKEN) publishes nothing: push again or re-run.
+      # Fail if the tip cannot be read. `shell: bash` sets pipefail, so a
+      # failing ls-remote stops the step.
       - name: Check that this commit is still the tip of main
         id: tip-check
         if: steps.version-check.outputs.published == 'false'
+        shell: bash
         env:
           COMMIT_SHA: ${{ github.sha }}
         run: |
-          TIP_SHA=$(git ls-remote origin refs/heads/main | cut -f1)
+          TIP_SHA=$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" {print $1}')
           if [ -z "$TIP_SHA" ]; then
             echo "::error::Could not read the tip of main from origin."
             exit 1
