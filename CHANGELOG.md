@@ -237,9 +237,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - A record in the other download method's format names the right method in the error message:
   `download()` on a raw upload says to use `downloadDocument()`, and `downloadDocument()` on a
   base64 upload says to use `download()`. The hint is given only when the record's hash proves
-  its format. The codes stay `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`, and a record whose
-  hash matches neither format keeps the plain message. A `CONTENT_HASH_MISMATCH` after a paid
-  read now carries `error.payment`, as `INVALID_RESPONSE` does. (#190)
+  its format. The codes stay `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`. A record whose hash
+  matches neither format gets no hint: the #179 message for non-string `data` in `download()`,
+  else "Content hash verification failed". In browsers, `download()` reports `data` that is not
+  valid base64 as `CONTENT_HASH_MISMATCH`, as in Node.js; before, a raw `InvalidCharacterError`
+  escaped. A `CONTENT_HASH_MISMATCH` after a paid read now carries `error.payment`, as
+  `INVALID_RESPONSE` does. (#190)
 
 ### New
 

@@ -1034,10 +1034,13 @@ issue numbers and lists the open release-gate items.
   empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
   as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179). A record in the other method's
   format names the right method: `download()` on a raw upload says to use `downloadDocument()`,
-  and `downloadDocument()` on a base64 upload says to use `download()`. The codes stay
-  `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`, and a record whose hash matches neither format
-  keeps the plain message. A `CONTENT_HASH_MISMATCH` after a paid read also carries
-  `error.payment` (#190).
+  and `downloadDocument()` on a base64 upload says to use `download()`. The hint is given only
+  when the record's hash proves its format, and the codes stay `INVALID_RESPONSE` or
+  `CONTENT_HASH_MISMATCH`. A record whose hash matches neither format gets no hint: the
+  #179 message for non-string `data` in `download()`, else "Content hash verification failed".
+  In browsers, `download()` reports `data` that is not valid base64 as `CONTENT_HASH_MISMATCH`,
+  as in Node.js, not as a raw `InvalidCharacterError`. A `CONTENT_HASH_MISMATCH` after a paid
+  read also carries `error.payment` (#190).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.

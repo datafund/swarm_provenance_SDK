@@ -785,8 +785,15 @@ export class ProvenanceClient {
     const text = await this.readText(response);
     const parsed = this.parseJson<unknown>(text, response);
     const record = isRecord(parsed) ? (isRecord(parsed['metadata']) ? parsed['metadata'] : parsed) : undefined;
-    // Non-string data is never a base64 record: it is a raw upload (#190)
-    if (record && 'data' in record && typeof record['data'] !== 'string' && typeof record['content_hash'] === 'string') {
+    // Non-string data is never a base64 record. Name downloadDocument() only when
+    // the hash proves a raw upload, as downloadDocument() checks it (#190)
+    if (
+      record &&
+      'data' in record &&
+      typeof record['data'] !== 'string' &&
+      typeof record['content_hash'] === 'string' &&
+      verifyDocumentHash(record as unknown as DocumentMetadata, canonicalDataOf(text, record !== parsed))
+    ) {
       throw this.withPayment(new GatewayConnectionError(RAW_IN_DOWNLOAD, response.status, 'INVALID_RESPONSE'), response);
     }
     // data is base64-decoded and content_hash compared: both must be strings (#179)
@@ -826,11 +833,10 @@ export class ProvenanceClient {
 
     // Extract file content. atob (browsers) throws on invalid base64; Buffer does not
     let file: Uint8Array | undefined;
-    let decodeError: unknown;
     try {
       file = extractContent(metadata);
-    } catch (error) {
-      decodeError = error;
+    } catch {
+      // No bytes: the hash cannot match, as with a Buffer decode of invalid base64
     }
 
     // Verify content hash. A raw upload whose document is a JSON string fails
@@ -838,7 +844,6 @@ export class ProvenanceClient {
     if (file === undefined || sha256Hex(file) !== metadata.content_hash) {
       const asDocument = { ...metadata } as unknown as DocumentMetadata;
       if (verifyDocumentHash(asDocument)) throw this.hashMismatch(response, RAW_STRING_IN_DOWNLOAD);
-      if (file === undefined) throw decodeError;
       throw this.hashMismatch(response);
     }
 
@@ -1414,10 +1419,10 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
   }
 }
 
-/** download() on a record whose data is not a string: always a raw upload (#190) */
+/** download() on a record whose non-string data matches its hash as a JSON value (#190) */
 const RAW_IN_DOWNLOAD =
-  'Record format does not match download(): "data" is not a string, so this is a raw upload: ' +
-  'use downloadDocument() for raw uploads';
+  'Record format does not match download(): "data" is not a string and content_hash is its hash ' +
+  'as a JSON value, so this is a raw upload: use downloadDocument() for raw uploads';
 /** download() on a record whose hash is that of its string data as a JSON value (#190) */
 const RAW_STRING_IN_DOWNLOAD =
   'Record format does not match download(): content_hash is the hash of "data" as a JSON value, ' +
