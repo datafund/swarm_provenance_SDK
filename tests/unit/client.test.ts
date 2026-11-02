@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
@@ -1988,6 +1989,32 @@ describe('wrong download method for the record format (#190)', () => {
     }
   );
 
+  it('a tampered raw record with non-string data through download() keeps the #179 shape message, no hint', async () => {
+    for (const record of [
+      { data: { a: 2 }, content_hash: '0'.repeat(64), stamp_id: 's' },
+      { metadata: { data: [1, 2], content_hash: sha256Hex(toBytes('[1,3]')), stamp_id: 's' } },
+    ]) {
+      const error = await failure('download', JSON.stringify(record));
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect(error.message).toMatch(/^Invalid response from gateway: expected a JSON object with string "data"/);
+      expect(error.message).not.toMatch(TO_DOCUMENT);
+    }
+  });
+
+  it('a notary-signed raw record through download() names downloadDocument()', async () => {
+    // The fixture holds 2.0 and a big integer: the raw hash check needs the lossless canonical text
+    const error = await failure('download', readFileSync(new URL('../fixtures/notary/raw-document.json', import.meta.url), 'utf8'));
+    expect(error.code).toBe('INVALID_RESPONSE');
+    expect(error.message).toMatch(TO_DOCUMENT);
+  });
+
+  it('a notary-signed base64 record through downloadDocument() names download()', async () => {
+    const error = await failure('downloadDocument', readFileSync(new URL('../fixtures/notary/base64-document.json', import.meta.url), 'utf8'));
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(TO_DOWNLOAD);
+  });
+
   it('a record without a string content_hash through download() keeps the #179 shape message', async () => {
     const error = await failure('download', JSON.stringify({ data: { a: 1 }, stamp_id: 's' }));
     expect(error.code).toBe('INVALID_RESPONSE');
@@ -2004,12 +2031,10 @@ describe('wrong download method for the record format (#190)', () => {
       expect(error.message).toMatch(TO_DOCUMENT);
     });
 
-    it('download() on a record that atob cannot decode and that is not raw still throws the decode error', async () => {
-      mockFetch.mockResolvedValueOnce(ok(JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' })));
-      const client = new ProvenanceClient();
-      const error = await withoutBuffer(() => client.download(REF).catch((e: unknown) => e));
-      expect(error).not.toBeInstanceOf(ProvenanceError);
-      expect((error as Error).name).toBe('InvalidCharacterError');
+    it('download() on a record that atob cannot decode and that is not raw throws CONTENT_HASH_MISMATCH, as with Buffer', async () => {
+      const error = await failure('download', JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' }), true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toBe('Content hash verification failed');
     });
 
     it('downloadDocument() on a base64 record decoded with atob names download()', async () => {
