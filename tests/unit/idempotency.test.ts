@@ -397,6 +397,34 @@ describe('retry codes: same key, new authorization', () => {
     }
   });
 
+  it('a paid attempt answered 429 with a long Retry-After is not retried, and has no cap sentence (#161)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      paidAnswers = [
+        {
+          status: 429,
+          headers: { 'Retry-After': '3600' },
+          body: envelope({ code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.' }),
+        },
+        { status: 200 },
+      ];
+      const upload = client({ paidTimeout: 10 * 60_000 })
+        .upload('hello', { stampId: STAMP })
+        .catch((e: unknown) => e);
+      await vi.waitFor(() => expect(paid()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await upload;
+      expect(paid()).toHaveLength(1);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).statusCode).toBe(429);
+      expect((error as GatewayConnectionError).payment).toBeDefined();
+      expect((error as GatewayConnectionError).retryAfterSeconds).toBe(3600);
+      expect((error as Error).message).not.toContain('did not retry');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a 409 without an idempotency code after payment is not retried', async () => {
     paidAnswers = [{ status: 409, body: envelope({ code: 'HTTP_409', message: 'Pool exhausted' }) }];
     const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);

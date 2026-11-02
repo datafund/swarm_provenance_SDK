@@ -897,7 +897,8 @@ issue numbers and lists the open release-gate items.
 - The 429 retry waits at most 60 seconds for `Retry-After` (#161). A longer wait is not taken:
   the 429 error is thrown at once, with `retryAfterSeconds`. Before, the SDK waited as long as
   the header said. Every SDK error from a 429 with a readable `Retry-After` now has
-  `retryAfterSeconds`, not only `PaymentRateLimitError`.
+  `retryAfterSeconds`, not only `PaymentRateLimitError`. `health()` returns `false` at once
+  for such a 429. Before, it waited and retried, and could return `true`.
 - Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
   transaction with that nonce is already pending, and a resend could write twice. That error and
   "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may

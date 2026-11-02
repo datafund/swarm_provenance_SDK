@@ -1346,6 +1346,44 @@ describe('ProvenanceClient', () => {
         expect(error.message).not.toContain('did not retry');
       });
 
+      it("throws a NotaryError for a sign: 'notary' upload at once", async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('120', 'RATE_LIMIT_EXCEEDED'));
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.upload('Hello', { stampId: 'a'.repeat(64), sign: 'notary' }));
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as NotaryError;
+        expect(error).toBeInstanceOf(NotaryError);
+        expect(error.code).toBe('RATE_LIMIT_EXCEEDED');
+        expect(error.retryAfterSeconds).toBe(120);
+        expect(error.message).toContain('asked to wait 120 s');
+      });
+
+      it('keeps the cap sentence within the error text cap for a long gateway message', async () => {
+        /** src/client.ts MAX_ERROR_TEXT (not exported): the cap on error messages, in UTF-16 code units */
+        const MAX_ERROR_TEXT = 4096;
+        const longMessage = 'x'.repeat(MAX_ERROR_TEXT - 10);
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify({ code: 'RATE_LIMIT_EXCEEDED', message: longMessage }), {
+            status: 429,
+            headers: { 'Retry-After': '3600' },
+          })
+        );
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.message.length).toBeLessThanOrEqual(MAX_ERROR_TEXT);
+        expect(error.message).toMatch(/The SDK did not retry: the gateway asked to wait 3600 s .*See retryAfterSeconds\.$/);
+        expect(error.message.startsWith('xxxx')).toBe(true);
+      });
+
       it("leaves the free tier as it is: PaymentRateLimitError at once, with retryAfterSeconds", async () => {
         mockFetch.mockResolvedValueOnce(rateLimited('3600'));
         const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
