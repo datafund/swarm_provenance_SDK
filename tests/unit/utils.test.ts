@@ -251,6 +251,23 @@ describe('retryAfterSeconds (#123)', () => {
     expect(retryAfterSeconds('Wed, 32 Oct 2026 12:00:30 GMT', now)).toBeUndefined();
   });
 
+  it('gives undefined for delta-seconds above Number.MAX_SAFE_INTEGER (#185)', () => {
+    expect(retryAfterSeconds('9007199254740992', now)).toBeUndefined();
+    expect(retryAfterSeconds('99999999999999999999999', now)).toBeUndefined();
+    expect(retryAfterSeconds('9'.repeat(400), now)).toBeUndefined();
+  });
+
+  it('reads delta-seconds up to Number.MAX_SAFE_INTEGER, with leading zeros (#185)', () => {
+    expect(retryAfterSeconds('9007199254740991', now)).toBe(9007199254740991);
+    expect(retryAfterSeconds('0000060', now)).toBe(60);
+  });
+
+  it('gives a safe integer for the latest HTTP date (#185)', () => {
+    const seconds = retryAfterSeconds('Fri, 31 Dec 9999 23:59:59 GMT', now);
+    expect(Number.isSafeInteger(seconds)).toBe(true);
+    expect(String(seconds)).not.toContain('e');
+  });
+
   it('gives undefined for a missing or unreadable value', () => {
     expect(retryAfterSeconds(null, now)).toBeUndefined();
     expect(retryAfterSeconds('', now)).toBeUndefined();

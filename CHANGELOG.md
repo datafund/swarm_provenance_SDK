@@ -219,6 +219,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - A `Retry-After` header given as an HTTP date is honoured. (#123)
 - A `Retry-After` value that is neither whole seconds nor a date, such as `"1.5"`, falls back to
   the normal backoff. Before, `"1.5"` was read as 1 second. (#123)
+- A `Retry-After` delta-seconds value above `Number.MAX_SAFE_INTEGER` is treated as unreadable:
+  the normal backoff applies and `retryAfterSeconds` is undefined. Before, such a value was
+  reported as, for example, `1e+23`. (#185)
 - `isValidSwarmReference()` accepts 128-character encrypted references and the `0x` prefix.
   (#123)
 - New error codes from the SDK: `PAYMENT_REFUSED` (`PaymentRefusedError`), `PAYMENT_FAILED`,
