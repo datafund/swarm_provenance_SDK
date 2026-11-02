@@ -719,6 +719,39 @@ describe('error handling (#112)', () => {
     expect(payments()).toBe(0);
   });
 
+  it('an ethers v6 ACTION_REJECTED rejection in the wallet is PAYMENT_REFUSED, not a failure (#166)', async () => {
+    // Mirrors ethers v6: JsonRpcApiProvider.getRpcError calls
+    // makeError('user rejected action', 'ACTION_REJECTED', { action, reason, info }).
+    // makeError adds the details to the message, sets `code`, copies the info
+    // fields onto the error and sets `shortMessage`. It sets no `cause`; the
+    // provider's 4001 error is nested under `info.error`. ethers is not a
+    // dependency, so the error is built by hand.
+    const providerError = { code: 4001, message: 'MetaMask Tx Signature: User denied transaction signature.' };
+    const payload = { method: 'eth_signTypedData_v4', params: [], id: 1, jsonrpc: '2.0' };
+    const ethersRejection = Object.assign(
+      new Error(
+        'user rejected action (action="signTypedData", reason="rejected", ' +
+          `info={ "error": ${JSON.stringify(providerError)}, "payload": ${JSON.stringify(payload)} }, ` +
+          'code=ACTION_REJECTED, version=6.16.0)',
+      ),
+      {
+        code: 'ACTION_REJECTED',
+        action: 'signTypedData',
+        reason: 'rejected',
+        info: { payload, error: providerError },
+        shortMessage: 'user rejected action',
+      },
+    );
+    const rejecting = { ...wallet, signTypedData: () => Promise.reject(ethersRejection) };
+    const error = await new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: rejecting } })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(/rejected in the wallet/);
+    expect(payments()).toBe(0);
+  });
+
   it('a policy refusal names each option without dumping the accepts JSON', async () => {
     accepts = [requirement({ maxAmountRequired: '1000001' })];
     const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
