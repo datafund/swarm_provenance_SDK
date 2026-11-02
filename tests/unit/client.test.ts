@@ -1876,3 +1876,153 @@ describe('success bodies that are not the expected shape (#179)', () => {
     await expect(new ProvenanceClient().download(REF)).rejects.toMatchObject({ name: 'ProvenanceError', code: 'CONTENT_HASH_MISMATCH' });
   });
 });
+
+describe('wrong download method for the record format (#190)', () => {
+  const REF = 'abcd1234'.repeat(8);
+  const TO_DOCUMENT = /use downloadDocument\(\) for raw uploads/;
+  const TO_DOWNLOAD = /use download\(\) for base64 uploads/;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  /** Upload content and return the record body the gateway stored */
+  async function stored(content: unknown, raw: boolean): Promise<string> {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+    await new ProvenanceClient().upload(content as string, raw ? { raw: true, stampId: 'a'.repeat(64) } : { stampId: 'a'.repeat(64) });
+    const call = mockFetch.mock.calls.at(0) as [string, RequestInit];
+    const body = await ((call[1].body as FormData).get('file') as Blob).text();
+    mockFetch.mockReset();
+    return body;
+  }
+
+  /** A 200 response as a plain object: Response itself needs Buffer, which one block removes */
+  const ok = (body: string) => ({ ok: true, status: 200, headers: new Headers(), text: () => Promise.resolve(body) });
+
+  /**
+   * Run a download without Buffer, so that utils.base64ToBytes decodes with
+   * atob as in browsers. Buffer is back before any assertion runs.
+   */
+  async function withoutBuffer<T>(run: () => Promise<T>): Promise<T> {
+    const saved = globalThis.Buffer;
+    (globalThis as { Buffer?: unknown }).Buffer = undefined;
+    try {
+      return await run();
+    } finally {
+      globalThis.Buffer = saved;
+    }
+  }
+
+  async function failure(method: 'download' | 'downloadDocument', body: string, browser = false): Promise<ProvenanceError> {
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const client = new ProvenanceClient();
+    const run = () => (method === 'download' ? client.download(REF) : client.downloadDocument(REF)).catch((e: unknown) => e);
+    const error = await (browser ? withoutBuffer(run) : run());
+    expect(error).toBeInstanceOf(ProvenanceError);
+    return error as ProvenanceError;
+  }
+
+  const wrap = (body: string) => {
+    const { signatures, ...metadata } = JSON.parse(body) as Record<string, unknown>;
+    return JSON.stringify(signatures === undefined ? { metadata } : { metadata, signatures });
+  };
+
+  it.each([
+    ['a file', 'hello'],
+    ['a file that is JSON text', '{"a":1}'],
+  ])('downloadDocument() on a base64 upload of %s names download()', async (_label, content) => {
+    const body = await stored(content, false);
+    for (const record of [body, wrap(body)]) {
+      const error = await failure('downloadDocument', record);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOWNLOAD);
+      expect(error.message).not.toMatch(/^Content hash verification failed/);
+    }
+  });
+
+  it.each([
+    ['an object', { a: 1 }],
+    ['an array', '[1,2]'],
+    ['null', 'null'],
+    ['a number', '5'],
+  ])('download() on a raw upload whose data is %s names downloadDocument()', async (_label, content) => {
+    const body = await stored(content, true);
+    for (const record of [body, wrap(body)]) {
+      const error = await failure('download', record);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect(error.message).toMatch(TO_DOCUMENT);
+      expect(error.message).not.toMatch(/^Invalid response from gateway/);
+    }
+  });
+
+  it('download() on a raw upload whose data is a JSON string names downloadDocument()', async () => {
+    const body = await stored('"x"', true);
+    expect((JSON.parse(body) as { data: unknown }).data).toBe('x');
+    for (const record of [body, wrap(body)]) {
+      const error = await failure('download', record);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOCUMENT);
+    }
+  });
+
+  it('a tampered base64 record through download() keeps the plain CONTENT_HASH_MISMATCH', async () => {
+    const error = await failure('download', JSON.stringify({ data: 'aGVsbG8=', content_hash: '0'.repeat(64), stamp_id: 's' }));
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toBe('Content hash verification failed');
+  });
+
+  it('a tampered raw record through downloadDocument() keeps the plain CONTENT_HASH_MISMATCH', async () => {
+    const error = await failure('downloadDocument', JSON.stringify({ data: { a: 1 }, content_hash: '0'.repeat(64), stamp_id: 's' }));
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toBe('Content hash verification failed');
+  });
+
+  it.each([['download'], ['downloadDocument']] as const)(
+    'a string-data record that matches neither format through %s() keeps the plain CONTENT_HASH_MISMATCH',
+    async (method) => {
+      const error = await failure(method, JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' }));
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toBe('Content hash verification failed');
+    }
+  );
+
+  it('a record without a string content_hash through download() keeps the #179 shape message', async () => {
+    const error = await failure('download', JSON.stringify({ data: { a: 1 }, stamp_id: 's' }));
+    expect(error.code).toBe('INVALID_RESPONSE');
+    expect(error.message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+    expect(error.message).not.toMatch(TO_DOCUMENT);
+  });
+
+  describe('without Buffer (the browser atob decoder)', () => {
+    it('download() on a raw string record that atob cannot decode names downloadDocument()', async () => {
+      const body = JSON.stringify({ data: 'x', content_hash: sha256Hex(toBytes('"x"')), stamp_id: 's' });
+      expect(() => atob('x')).toThrow();
+      const error = await failure('download', body, true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOCUMENT);
+    });
+
+    it('download() on a record that atob cannot decode and that is not raw still throws the decode error', async () => {
+      mockFetch.mockResolvedValueOnce(ok(JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' })));
+      const client = new ProvenanceClient();
+      const error = await withoutBuffer(() => client.download(REF).catch((e: unknown) => e));
+      expect(error).not.toBeInstanceOf(ProvenanceError);
+      expect((error as Error).name).toBe('InvalidCharacterError');
+    });
+
+    it('downloadDocument() on a base64 record decoded with atob names download()', async () => {
+      const body = JSON.stringify({ data: 'aGVsbG8=', content_hash: sha256Hex(toBytes('hello')), stamp_id: 's' });
+      const error = await failure('downloadDocument', body, true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOWNLOAD);
+    });
+
+    it('downloadDocument() on a string record that atob cannot decode keeps the plain CONTENT_HASH_MISMATCH', async () => {
+      const error = await failure('downloadDocument', JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' }), true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toBe('Content hash verification failed');
+    });
+  });
+});

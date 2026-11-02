@@ -8,8 +8,10 @@ import {
   GatewayConnectionError,
   PaymentConfigurationError,
   PaymentRefusedError,
+  ProvenanceError,
   StampError,
 } from '../../src/errors.js';
+import { sha256Hex, toBytes } from '../../src/utils.js';
 import type { PaymentRequest, X402PaymentConfig } from '../../src/types.js';
 
 // Drives the REAL @x402/fetch + @x402/evm (whatever version is installed)
@@ -563,6 +565,56 @@ describe('paid reads with a body that is not the expected shape (#179)', () => {
     } finally {
       vi.stubGlobal('fetch', gateway);
     }
+  });
+});
+
+describe('paid reads of a record the method cannot verify (#190)', () => {
+  const HELLO = { data: 'aGVsbG8=', content_hash: sha256Hex(toBytes('hello')), stamp_id: STAMP };
+  const RAW = { data: { a: 1 }, content_hash: sha256Hex(toBytes('{"a":1}')), stamp_id: STAMP };
+
+  /** Answer the paid retry of the download with `body`; return the error */
+  async function paidFailure(method: 'download' | 'downloadDocument', body: unknown): Promise<GatewayConnectionError> {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForReads: true })[method]('c'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/ \(a payment was sent with this request and may have been charged\)$/);
+      expect(payments()).toBe(1);
+      return error as GatewayConnectionError;
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  }
+
+  it.each([
+    ['download', { ...HELLO, content_hash: '0'.repeat(64) }],
+    ['downloadDocument', { ...RAW, content_hash: '0'.repeat(64) }],
+  ] as const)('a paid 200 with a wrong hash to %s() keeps the payment flag', async (method, body) => {
+    const error = await paidFailure(method, body);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/^Content hash verification failed \(a payment/);
+  });
+
+  it('a paid 200 base64 record to downloadDocument() names download() and keeps the payment flag', async () => {
+    const error = await paidFailure('downloadDocument', HELLO);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/use download\(\) for base64 uploads/);
+  });
+
+  it('a paid 200 raw record to download() names downloadDocument() and keeps the payment flag', async () => {
+    const error = await paidFailure('download', RAW);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect(error.code).toBe('INVALID_RESPONSE');
+    expect(error.statusCode).toBe(200);
+    expect(error.message).toMatch(/use downloadDocument\(\) for raw uploads/);
   });
 });
 
