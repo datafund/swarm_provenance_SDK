@@ -268,7 +268,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   runs only one publish job at a time. The secret scan runs with read-only repository access.
   (#176)
 - `publish.yml` publishes and tags only if the commit is still the tip of `main`, so an older
-  push whose checks finish later cannot move npm `latest` back. (#188, #187)
+  push whose checks finish later cannot move npm `latest` back. If a version is on npm but its
+  tag is missing on origin, a later run from the tip of `main` pushes the tag without publishing
+  again. (#188, #187)
 
 ### Release gate gaps
 
@@ -299,11 +301,14 @@ The release gate in #129 is not fully met. These items are open:
 - A publish run from before this change has no tip check. Do not re-run it. (#188)
 - `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
   version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
-  and moves `latest` back. The workflow cannot publish such a hotfix under another tag. (#188)
+  and moves `latest` back. The same happens if `main` is force-moved back to an older commit
+  with an unpublished version. The workflow cannot publish such a hotfix under another tag.
+  (#188)
 - GitHub keeps at most one pending publish job and cancels it by queue order, not by commit. An
   older commit's job can cancel the tip commit's pending job, and then the tip check skips the
   older one, so nothing publishes. If the tip commit's publish run was cancelled, re-run it
   within GitHub's 30-day re-run window; this is safe because of the tip check. After that, push
-  a new commit to `main` with a user token and without a skip marker. `queue: max` would prevent this case. It is not used
-  because GitHub accepting the key is not checked on a real run, and an invalid `publish.yml`
-  would stop both publishing and the secret scan of pushes to `main`. (#187)
+  a new commit to `main` with a user token and without a skip marker. `queue: max` would prevent
+  this case. It is not used because GitHub accepting the key is not checked on a real run, and
+  an invalid `publish.yml` would stop both publishing and the secret scan of pushes to `main`.
+  (#187)

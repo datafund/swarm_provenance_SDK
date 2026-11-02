@@ -28,28 +28,13 @@ jobs:
     runs-on: ubuntu-latest
 
     # Only one publish job runs at a time. The group is on this job, not on
-    # the workflow, so the matrix and the scan still run for every push.
-    # The group does not keep push order: a job joins it only after its own
-    # matrix and scan finish. So the job publishes and tags only if its commit
-    # is still the tip of main (the tip-check step below). An older push that
-    # reaches the group late is skipped and cannot move npm `latest` back (#188).
-    # A force-move of main back to an older commit makes that commit the tip,
-    # so its unpublished version publishes and moves `latest` back.
-    # When a newer commit is pushed before an older commit's tip-check step
-    # runs, the older commit's version is never published, even when its
-    # checks pass.
-    # By default, GitHub keeps at most one pending job per group: a job that
-    # joins later cancels the pending one, even with cancel-in-progress false.
-    # It cancels by queue order, not by commit. So the tip commit's pending job
-    # can be cancelled by an older commit's job, which the tip check then
-    # skips, and nothing publishes. If the tip commit's publish run was
-    # cancelled, re-run it within GitHub's 30-day re-run window; this is safe
-    # because of the tip check. After that, push a new commit to main with a
-    # user token and without a skip marker.
-    # `queue: max` would prevent this case. It is not used because GitHub
-    # accepting the key is not checked on a real run, and an invalid
-    # publish.yml would stop both publishing and the secret scan of pushes to
-    # main (#187).
+    # the workflow, so the matrix and the scan still run for every push. The
+    # group does not keep push order, so the job publishes and tags only if its
+    # commit is still the tip of main (tip-check step, #188).
+    # No `queue: max`: GitHub accepting the key is not checked on a real run,
+    # and an invalid publish.yml would stop publishing and the main scan (#187).
+    # See CLAUDE.md, Releasing, for every case where nothing publishes and its
+    # recovery.
     concurrency:
       group: npm-publish
       cancel-in-progress: false
@@ -153,8 +138,42 @@ jobs:
 
           echo "::warning::Package published but not yet visible on npm registry after 60s. It may take a few more minutes to propagate."
 
-      - name: Tag release
-        if: steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true'
+      # If an earlier run published this version but its tag push failed, a
+      # re-run or a later push skips the publish steps. Push the missing tag
+      # then, but only from the tip of main. Never publish here. Fail if
+      # origin cannot be read.
+      - name: Check for a missing release tag
+        id: tag-check
+        if: steps.version-check.outputs.published == 'true'
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.version-check.outputs.version }}
         run: |
-          git tag "v${{ steps.version-check.outputs.version }}"
-          git push origin "v${{ steps.version-check.outputs.version }}"
+          TAG_REF="refs/tags/v${VERSION}"
+          TAG_SHA=$(git ls-remote origin "$TAG_REF" | awk -v ref="$TAG_REF" '$2 == ref {print $1}')
+          if [ -n "$TAG_SHA" ]; then
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            echo "Tag v${VERSION} is on origin."
+            exit 0
+          fi
+          TIP_SHA=$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" {print $1}')
+          if [ -z "$TIP_SHA" ]; then
+            echo "::error::Could not read the tip of main from origin."
+            exit 1
+          fi
+          if [ "$TIP_SHA" = "$COMMIT_SHA" ]; then
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Version ${VERSION} is on npm but tag v${VERSION} is missing on origin. Tagging this commit, the tip of main."
+          else
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Tag v${VERSION} is missing on origin, but this commit is not the tip of main. Not tagging."
+          fi
+
+      - name: Tag release
+        if: (steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true') || steps.tag-check.outputs.missing == 'true'
+        env:
+          VERSION: ${{ steps.version-check.outputs.version }}
+        run: |
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
