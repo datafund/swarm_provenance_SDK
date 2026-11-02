@@ -29,10 +29,12 @@ jobs:
 
     # Only one publish job runs at a time. The group is on this job, not on
     # the workflow, so the matrix and the scan still run for every push.
-    # GitHub keeps at most one pending job per group: a newer pending job
-    # cancels the older pending one, even with cancel-in-progress false.
-    # The cancelled push's version is then published only if the newer push
-    # has the same version in package.json.
+    # By default, GitHub keeps at most one pending job per group: a newer
+    # pending job cancels the older pending one, even with cancel-in-progress
+    # false. The cancelled push's version is then published only if the newer
+    # push has the same version in package.json, and then from the newer
+    # commit's code. `queue: max` is not used yet: it is not checked on a real
+    # run, and actionlint does not accept the key (#187).
     concurrency:
       group: npm-publish
       cancel-in-progress: false
