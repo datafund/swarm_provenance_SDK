@@ -234,6 +234,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `IDEMPOTENCY_UNAVAILABLE` (retried), `IDEMPOTENCY_KEY_REUSED` and `IDEMPOTENCY_KEY_INVALID`
   (thrown with the gateway's code), and the three stop codes above. (#102)
 - The code `NOT_IMPLEMENTED` is no longer used. (#113)
+- A record in the other download method's format names the right method in the error message:
+  `download()` on a raw upload says to use `downloadDocument()`, and `downloadDocument()` on a
+  base64 upload says to use `download()`. The hint is given only when the record's hash proves
+  its format. The codes stay `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`, and a record whose
+  hash matches neither format keeps the plain message. A `CONTENT_HASH_MISMATCH` after a paid
+  read now carries `error.payment`, as `INVALID_RESPONSE` does. (#190)
 
 ### New
 

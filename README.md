@@ -1032,7 +1032,12 @@ issue numbers and lists the open release-gate items.
   also throw `INVALID_RESPONSE` for a success body that cannot be read, is not a JSON object, or
   lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
   empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
-  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179).
+  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179). A record in the other method's
+  format names the right method: `download()` on a raw upload says to use `downloadDocument()`,
+  and `downloadDocument()` on a base64 upload says to use `download()`. The codes stay
+  `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`, and a record whose hash matches neither format
+  keeps the plain message. A `CONTENT_HASH_MISMATCH` after a paid read also carries
+  `error.payment` (#190).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.

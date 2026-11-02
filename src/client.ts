@@ -41,10 +41,10 @@ import {
   PaymentRefusedError,
   type PaymentAttempt,
 } from './errors.js';
-import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
+import { buildMetadata, buildDocumentMetadata, extractContent, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds } from './utils.js';
+import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds, sha256Hex, base64ToBytes } from './utils.js';
 import {
   base64Decode,
   formatAtomic,
@@ -485,9 +485,11 @@ export class ProvenanceClient {
       metadata.provenance_standard = provenanceStandard;
     }
 
-    // Verify content hash
+    // Verify content hash. A base64 record fails here; name download() only
+    // when its hash proves that format, so a tampered record stays plain (#190)
     if (!verifyDocumentHash(metadata, canonicalData)) {
-      throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
+      const base64 = typeof documentData === 'string' && matchesAsBase64(documentData, contentHash);
+      throw this.hashMismatch(response, base64 ? BASE64_IN_DOWNLOAD_DOCUMENT : undefined);
     }
 
     const result: DocumentDownloadResult = {
@@ -783,6 +785,10 @@ export class ProvenanceClient {
     const text = await this.readText(response);
     const parsed = this.parseJson<unknown>(text, response);
     const record = isRecord(parsed) ? (isRecord(parsed['metadata']) ? parsed['metadata'] : parsed) : undefined;
+    // Non-string data is never a base64 record: it is a raw upload (#190)
+    if (record && 'data' in record && typeof record['data'] !== 'string' && typeof record['content_hash'] === 'string') {
+      throw this.withPayment(new GatewayConnectionError(RAW_IN_DOWNLOAD, response.status, 'INVALID_RESPONSE'), response);
+    }
     // data is base64-decoded and content_hash compared: both must be strings (#179)
     if (!record || typeof record['data'] !== 'string' || typeof record['content_hash'] !== 'string') {
       throw this.shapeError('a JSON object with string "data" and "content_hash" (directly or under "metadata")', response);
@@ -818,13 +824,22 @@ export class ProvenanceClient {
       }
     }
 
-    // Extract file content
-    const file = extractContent(metadata);
+    // Extract file content. atob (browsers) throws on invalid base64; Buffer does not
+    let file: Uint8Array | undefined;
+    let decodeError: unknown;
+    try {
+      file = extractContent(metadata);
+    } catch (error) {
+      decodeError = error;
+    }
 
-    // Verify content hash
-    const contentHashValid = verifyContentHash(metadata);
-    if (!contentHashValid) {
-      throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
+    // Verify content hash. A raw upload whose document is a JSON string fails
+    // here; name downloadDocument() only when its hash proves that format (#190)
+    if (file === undefined || sha256Hex(file) !== metadata.content_hash) {
+      const asDocument = { ...metadata } as unknown as DocumentMetadata;
+      if (verifyDocumentHash(asDocument)) throw this.hashMismatch(response, RAW_STRING_IN_DOWNLOAD);
+      if (file === undefined) throw decodeError;
+      throw this.hashMismatch(response);
     }
 
     const result: DownloadResult = {
@@ -1124,6 +1139,20 @@ export class ProvenanceClient {
       response.status,
       'INVALID_RESPONSE'
     );
+    return this.withPayment(failure, response);
+  }
+
+  /**
+   * CONTENT_HASH_MISMATCH for a downloaded record, flagged if the request was
+   * paid. `message` names the right method when the hash proves the record is
+   * in the other method's format (#190).
+   */
+  private hashMismatch(response: Response, message = 'Content hash verification failed'): ProvenanceError {
+    return this.withPayment(new ProvenanceError(message, 'CONTENT_HASH_MISMATCH'), response);
+  }
+
+  /** Set error.payment and say so in the message if the request was paid */
+  private withPayment<E extends ProvenanceError>(failure: E, response: Response): E {
     if (this.paidResponses.has(response)) {
       failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
       failure.message += ' (a payment was sent with this request and may have been charged)';
@@ -1382,6 +1411,28 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
     return canonicalizeJsonText(text, wrapped ? ['metadata', 'data'] : ['data']);
   } catch {
     return undefined;
+  }
+}
+
+/** download() on a record whose data is not a string: always a raw upload (#190) */
+const RAW_IN_DOWNLOAD =
+  'Record format does not match download(): "data" is not a string, so this is a raw upload: ' +
+  'use downloadDocument() for raw uploads';
+/** download() on a record whose hash is that of its string data as a JSON value (#190) */
+const RAW_STRING_IN_DOWNLOAD =
+  'Record format does not match download(): content_hash is the hash of "data" as a JSON value, ' +
+  'so this is a raw upload: use downloadDocument() for raw uploads';
+/** downloadDocument() on a record whose hash is that of its base64-decoded data (#190) */
+const BASE64_IN_DOWNLOAD_DOCUMENT =
+  'Record format does not match downloadDocument(): content_hash is the hash of the base64-decoded ' +
+  '"data", so this is a base64 upload: use download() for base64 uploads';
+
+/** content_hash is SHA-256 of the base64-decoded data, as download() checks. Invalid base64 is no match */
+function matchesAsBase64(data: string, contentHash: string): boolean {
+  try {
+    return sha256Hex(base64ToBytes(data)) === contentHash;
+  } catch {
+    return false;
   }
 }
 
