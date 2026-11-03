@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { fromViemWalletClient } from '../../../src/chain/signer.js';
+import { inspect } from 'node:util';
+import { fromViemWalletClient, fromEip1193Provider } from '../../../src/chain/signer.js';
 import { ChainConfigurationError } from '../../../src/chain/errors.js';
 import type { Address, Hex } from '../../../src/chain/types.js';
 
@@ -85,5 +86,62 @@ describe('fromViemWalletClient', () => {
     expect(sendTransaction).toHaveBeenCalledTimes(1);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     expect(sendTransaction.mock.calls[0][0]).not.toHaveProperty('gas');
+  });
+});
+
+describe('fromEip1193Provider() account access errors (#202)', () => {
+  const ADDRESS: Address = '0x1234567890abcdef1234567890abcdef12345678';
+  const provider = (accounts: () => Promise<unknown>) => ({
+    request: (args: { method: string }) => (args.method === 'eth_requestAccounts' ? accounts() : Promise.resolve(null)),
+  });
+
+  it('wraps a refused eth_requestAccounts (EIP-1193 code 4001) in ChainConfigurationError without a cause', async () => {
+    // Wallets reject with a plain object, not an Error
+    const refusal = { code: 4001, message: 'User rejected the request.' };
+    const error = await fromEip1193Provider(provider(() => Promise.reject(refusal))).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as ChainConfigurationError).code).toBe('CHAIN_CONFIGURATION');
+    expect((error as Error).message).toBe('The wallet did not give access to an account: User rejected the request.');
+    // A raw wallet error is not kept as cause: it can carry an RPC URL (#118)
+    expect((error as Error).cause).toBeUndefined();
+  });
+
+  it('redacts a URL in the provider error message', async () => {
+    const error = await fromEip1193Provider(provider(() => Promise.reject(new Error('failed at https://rpc.example/key123'))))
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as Error).message).not.toContain('key123');
+  });
+
+  it('does not print a key from the URL in the wallet error when the error is inspected', async () => {
+    const walletError = new Error('request to https://u:SECRETKEY@rpc.x/ failed');
+    const error = await fromEip1193Provider(provider(() => Promise.reject(walletError))).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect(inspect(error)).not.toContain('SECRETKEY');
+  });
+
+  it.each([
+    ['null', null],
+    ['an object', {}],
+    ['an empty list', []],
+    ['a list without a string', [42]],
+  ])('refuses an eth_requestAccounts answer that is %s with ChainConfigurationError', async (_label, answer) => {
+    const error = await fromEip1193Provider(provider(() => Promise.resolve(answer))).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as Error).message).toBe('No accounts available from provider');
+  });
+
+  it.each([
+    ['a word', ['foo']],
+    ['a short hex string', ['0x1234']],
+  ])('refuses a first account that is %s with ChainConfigurationError', async (_label, answer) => {
+    const error = await fromEip1193Provider(provider(() => Promise.resolve(answer))).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as Error).message).toBe('The wallet returned an account that is not an address');
+  });
+
+  it('still returns the first account', async () => {
+    const signer = await fromEip1193Provider(provider(() => Promise.resolve([ADDRESS])));
+    expect(await signer.getAddress()).toBe(ADDRESS);
   });
 });

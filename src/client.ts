@@ -39,11 +39,12 @@ import {
   PaymentError,
   PaymentOutcomeError,
   PaymentRefusedError,
+  withCause,
   type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
-import { canonicalizeJsonText } from './canonical-json.js';
+import { canonicalizeJsonText, notJsonError, NOT_REPRESENTABLE } from './canonical-json.js';
 import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds, sha256Hex, base64ToBytes } from './utils.js';
 import {
   base64Decode,
@@ -689,19 +690,37 @@ export class ProvenanceClient {
     let metadata: ProvenanceMetadata | DocumentMetadata;
     /** A raw document's JSON: serialised once, then hashed, sent and returned as parsed from it */
     let dataJson: string | undefined;
+    /** Base64 uploads: the content's size in bytes, for the FILE_TOO_LARGE hint */
+    let contentLength = 0;
     if (options.raw) {
       // Accepts what earlier versions accepted: any JSON text, or a non-null object (arrays too)
       const document = rawDocument(content);
-      dataJson = JSON.stringify(document) as string | undefined;
-      // The caller's object may change while the stamp is acquired: the
-      // snapshot is what is hashed, sent and returned
-      const snapshot = dataJson === undefined ? document : (JSON.parse(dataJson) as Record<string, unknown>);
-      metadata = buildDocumentMetadata(snapshot, metadataOptions);
+      // Content JSON cannot represent is INVALID_INPUT here, before any request (#202).
+      // A caller's toJSON() or getter may throw anything, a ProvenanceError too: it is the cause
+      try {
+        dataJson = JSON.stringify(document) as string | undefined;
+      } catch (error) {
+        throw notJsonError('Raw mode content', error);
+      }
+      if (dataJson === undefined) throw notJsonError('Raw mode content', new TypeError(NOT_REPRESENTABLE));
+      try {
+        // The caller's object may change while the stamp is acquired: the
+        // snapshot is what is hashed, sent and returned
+        metadata = buildDocumentMetadata(JSON.parse(dataJson) as Record<string, unknown>, metadataOptions);
+      } catch (error) {
+        // The snapshot is plain JSON, so this is buildDocumentMetadata's own
+        // INVALID_INPUT (nesting deeper than 1000 levels): named for the upload
+        throw notJsonError(
+          'Raw mode content',
+          error instanceof ProvenanceError && error.code === 'INVALID_INPUT' ? error.cause : error
+        );
+      }
     } else {
       const bytes =
         content instanceof Blob
-          ? new Uint8Array(await content.arrayBuffer())
+          ? await readBlob(content)
           : toBytes(content as Uint8Array | ArrayBuffer | string);
+      contentLength = bytes.length;
       metadata = buildMetadata(bytes, metadataOptions);
     }
 
@@ -730,7 +749,7 @@ export class ProvenanceClient {
         options.raw
           ? `Upload too large: the document is ${size} bytes as uploaded (JSON metadata), over the limit of ${this.maxUploadBytes} bytes (maxUploadBytes)`
           : `Upload too large: ${size} bytes once base64-encoded into the metadata, over the limit of ${this.maxUploadBytes} bytes (maxUploadBytes). ` +
-              `Content up to about ${(((this.maxUploadBytes - 512) * 3) / 4 / 1048576).toFixed(1)} MiB fits`,
+              base64SizeHint(size - base64Length(contentLength), this.maxUploadBytes),
         'FILE_TOO_LARGE'
       );
     }
@@ -1357,6 +1376,39 @@ function utf8Length(text: string): number {
     } else bytes += 3; // other BMP characters; a lone surrogate encodes as U+FFFD
   }
   return bytes;
+}
+
+/**
+ * The bytes of a Blob or File to upload. A failed read (for example a
+ * NotReadableError DOMException when the file changed or was removed after it
+ * was picked) is INVALID_INPUT, before any request (#202). The read error is
+ * the cause: a local file read carries no URL.
+ */
+async function readBlob(content: Blob): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await content.arrayBuffer());
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    throw withCause(new ProvenanceError(`Could not read the Blob or File content: ${reason}`, 'INVALID_INPUT'), error);
+  }
+}
+
+/** Length of the base64 text for `bytes` bytes, with padding */
+function base64Length(bytes: number): number {
+  return 4 * Math.ceil(bytes / 3);
+}
+
+/**
+ * The largest content that fits in a base64 upload, exactly, from the size of
+ * the metadata without content (#202). Base64 text needs no JSON escaping, so
+ * the metadata is `overhead` plus the base64 length.
+ */
+function base64SizeHint(overhead: number, maxUploadBytes: number): string {
+  if (maxUploadBytes < overhead) return `No content fits: the metadata alone is ${overhead} bytes`;
+  const fits = Math.floor((maxUploadBytes - overhead) / 4) * 3;
+  if (fits === 0) return `Only empty content fits: the metadata alone is ${overhead} bytes`;
+  const mib = fits >= 1048576 ? ` (about ${(fits / 1048576).toFixed(1)} MiB)` : '';
+  return `Content up to ${fits} bytes${mib} fits`;
 }
 
 /** Stand-in stamp_id while the stamp is not known yet: as long as a batch ID (64 hex characters) */

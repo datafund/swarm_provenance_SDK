@@ -965,6 +965,14 @@ issue numbers and lists the open release-gate items.
   input address (`anchorFor().owner`, `transferOwnership().newOwner`, `setDelegate().delegate`)
   hold the address that was sent: an all-uppercase input comes back in lowercase, other
   spellings unchanged.
+- Signer errors are chain errors (#202). `fromPrivateKey()` throws `ChainConfigurationError`
+  for an invalid private key or an empty `rpcUrl`, instead of viem's plain `Error`.
+  `fromEip1193Provider()` throws `ChainConfigurationError` when the wallet refuses account
+  access, instead of the wallet's error, and when its first account is not an address.
+  `getBalance()`, `anchor()` and `recordAccess()` throw
+  `ChainConnectionError` when the signer's `getAddress()` fails. These errors have no
+  `error.cause`: the original error can carry the RPC URL and its key, or print the private
+  key. The message keeps the original message with URLs redacted.
 - `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
   now has a `browser` export condition, listed first, that resolves to a build without
   `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node
@@ -1071,6 +1079,17 @@ issue numbers and lists the open release-gate items.
   In x402 mode the policy reads the 402's top-level payment request before the deprecated
   `detail` copy, and a signature declined in the wallet is `PaymentRefusedError` instead of
   `GatewayConnectionError` (`CONNECTION_FAILED`).
+- Input that JSON cannot represent throws `ProvenanceError` (`INVALID_INPUT`), with the original
+  error as `error.cause` (#202). This covers a raw `upload()` (before any request),
+  `buildDocumentMetadata()` and `computeNotaryDataHash()`: a circular reference, a `BigInt`,
+  nesting deeper than 1000 levels, or a `toJSON()` or getter that throws. Before, a raw
+  `TypeError`, `RangeError`, `SyntaxError` or the caller's own error escaped. `parseMetadata()`
+  throws `ProvenanceError` (`INVALID_INPUT`) instead of `SyntaxError` or a plain `Error`. In
+  browsers, `base64ToBytes()` and `extractContent()` throw `INVALID_INPUT` for text that is not
+  valid base64, and `verifyContentHash()` returns `false`; before, a raw `InvalidCharacterError`
+  escaped. `canonicalizeJsonText()` and `canonicalizeJsonValue()` still throw standard errors.
+  `upload()` of a `Blob` or `File` that cannot be read throws `INVALID_INPUT` before any
+  request, with the read error as `error.cause`; before, the `DOMException` escaped.
 - An ethers v6 wallet rejection (code `ACTION_REJECTED`) is `PaymentRefusedError`
   (`PAYMENT_REFUSED`), as EIP-1193 code 4001 and viem's `UserRejectedRequestError` are (#166).
   Before, it was `PaymentError` (`PAYMENT_FAILED`).

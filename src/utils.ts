@@ -1,5 +1,6 @@
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex } from '@noble/hashes/utils';
+import { ProvenanceError, withCause } from './errors.js';
 
 /**
  * Convert various input types to Uint8Array
@@ -41,7 +42,11 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /**
- * Decode base64 string to bytes
+ * Decode base64 string to bytes.
+ *
+ * Without Buffer (browsers), text that atob cannot decode throws
+ * ProvenanceError with code INVALID_INPUT, the atob error as `cause` (#202).
+ * Node.js's Buffer skips characters that are not base64 and does not throw.
  */
 export function base64ToBytes(base64: string): Uint8Array {
   // Browser and Node.js compatible approach
@@ -49,7 +54,12 @@ export function base64ToBytes(base64: string): Uint8Array {
     return new Uint8Array(Buffer.from(base64, 'base64'));
   }
   // Browser fallback
-  const binary = atob(base64);
+  let binary: string;
+  try {
+    binary = atob(base64);
+  } catch (error) {
+    throw withCause(new ProvenanceError('Invalid base64 text', 'INVALID_INPUT'), error);
+  }
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);

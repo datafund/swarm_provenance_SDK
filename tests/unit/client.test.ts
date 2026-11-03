@@ -4,6 +4,7 @@ import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
 import { verifyDocumentHash } from '../../src/metadata.js';
+import { ChainValidationError } from '../../src/chain/errors.js';
 
 // Mock fetch globally. The mocks are plain objects with json(); the client
 // reads download bodies with text() (to canonicalise them losslessly), so
@@ -2532,5 +2533,203 @@ describe('wrong download method for the record format (#190)', () => {
       expect(error.code).toBe('CONTENT_HASH_MISMATCH');
       expect(error.message).toBe('Content hash verification failed');
     });
+  });
+});
+
+describe('raw content JSON cannot represent, and the FILE_TOO_LARGE size hint (#202)', () => {
+  const STAMP = 'a'.repeat(64);
+  const json = (body: unknown, status: number) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  /** Nested objects `levels` deep: { a: { a: ... {} } } */
+  function nested(levels: number): Record<string, unknown> {
+    const root: Record<string, unknown> = {};
+    let node = root;
+    for (let i = 0; i < levels; i++) {
+      const child: Record<string, unknown> = {};
+      node['a'] = child;
+      node = child;
+    }
+    return root;
+  }
+
+  const circular: Record<string, unknown> = {};
+  circular['self'] = circular;
+  const circularInArray: Record<string, unknown> = { list: [] };
+  (circularInArray['list'] as unknown[]).push({ back: circularInArray });
+
+  const UNSERIALIZABLE: Array<[string, unknown, RegExp]> = [
+    ['a circular object', circular, /circular/i],
+    ['a circular reference through an array', circularInArray, /circular/i],
+    ['a BigInt value', { n: 1n }, /BigInt/],
+    ['a BigInt in an array', [1n], /BigInt/],
+    ['a toJSON() that returns undefined', { toJSON: () => undefined }, /no JSON representation/],
+    ['a toJSON() that throws', { toJSON: () => { throw new Error('toJSON failed'); } }, /toJSON failed/],
+    ['a getter that throws', { get x() { throw new Error('getter failed'); } }, /getter failed/],
+    ['nesting of 1500 levels', nested(1500), /nested deeper than 1000 levels/],
+    ['nesting of 1000000 levels', nested(1_000_000), /nested too deeply/],
+    ['JSON text nested 1500 levels', `${'{"a":'.repeat(1500)}{}${'}'.repeat(1500)}`, /nested deeper than 1000 levels/],
+  ];
+
+  describe.each([
+    ['with a stampId', { stampId: STAMP }],
+    ['from the pool', {}],
+  ])('%s', (_label, options) => {
+    it.each(UNSERIALIZABLE)('refuses %s with INVALID_INPUT before any request', async (_name, content, message) => {
+      const error = await new ProvenanceClient()
+        .upload(content as Record<string, unknown>, { ...options, raw: true })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+      expect((error as Error).message).toMatch(/^Raw mode content /);
+      expect((error as Error).message).toMatch(message);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps the JSON.stringify error as the cause', async () => {
+    const error = (await new ProvenanceClient()
+      .upload({ n: 1n }, { stampId: STAMP, raw: true })
+      .catch((e: unknown) => e)) as Error;
+    expect(error.cause).toBeInstanceOf(TypeError);
+    expect((error.cause as Error).message).toMatch(/BigInt/);
+  });
+
+  it('does not call a RangeError from a toJSON() a nesting problem', async () => {
+    const thrown = new RangeError('bad range');
+    const error = (await new ProvenanceClient()
+      .upload({ x: { toJSON: () => { throw thrown; } } }, { stampId: STAMP, raw: true })
+      .catch((e: unknown) => e)) as ProvenanceError;
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toBe('Raw mode content cannot be serialized as JSON: bad range');
+    expect(error.cause).toBe(thrown);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a ProvenanceError', () => new ProvenanceError('caller refused', 'CALLER_CODE')],
+    ['a ChainError subclass', () => new ChainValidationError('caller refused')],
+  ])('keeps %s thrown by the caller\'s toJSON() as the cause', async (_label, make) => {
+    const callerError = make();
+    const error = (await new ProvenanceClient()
+      .upload({ toJSON: () => { throw callerError; } }, { stampId: STAMP, raw: true })
+      .catch((e: unknown) => e)) as ProvenanceError;
+    expect(error).not.toBe(callerError);
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toBe('Raw mode content cannot be serialized as JSON: caller refused');
+    expect(error.cause).toBe(callerError);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses before signing an owner proof', async () => {
+    const signMessage = vi.fn(() => Promise.resolve('0x' + '1'.repeat(130)));
+    const error = await new ProvenanceClient()
+      .upload(circular, { stampId: STAMP, raw: true, ownerSigner: { signMessage } as never })
+      .catch((e: unknown) => e);
+    expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  describe('FILE_TOO_LARGE size hint', () => {
+    /** The metadata JSON around empty content: data "", the SHA-256 hash, the 64-character stamp */
+    const OVERHEAD = `{"data":"","content_hash":"${'0'.repeat(64)}","stamp_id":"${STAMP}"}`.length;
+
+    const refusal = async (maxUploadBytes: number, content: Uint8Array) =>
+      (await new ProvenanceClient({ maxUploadBytes })
+        .upload(content, { stampId: STAMP })
+        .catch((e: unknown) => e)) as ProvenanceError;
+
+    it('the metadata without content is 171 bytes', () => {
+      expect(OVERHEAD).toBe(171);
+    });
+
+    it.each([1, 100, 170])('with maxUploadBytes %i says that no content fits', async (max) => {
+      const error = await refusal(max, new Uint8Array(1000));
+      expect(error.code).toBe('FILE_TOO_LARGE');
+      expect(error.message).toContain(`No content fits: the metadata alone is ${OVERHEAD} bytes`);
+      expect(error.message).not.toMatch(/-\d|\b0\.0\b|MiB/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it.each([171, 172, 174])('with maxUploadBytes %i says that only empty content fits, and empty content is sent', async (max) => {
+      const error = await refusal(max, new Uint8Array(1));
+      expect(error.code).toBe('FILE_TOO_LARGE');
+      expect(error.message).toContain(`Only empty content fits: the metadata alone is ${OVERHEAD} bytes`);
+      expect(error.message).not.toMatch(/-\d|\b0\.0\b|MiB/);
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+      await new ProvenanceClient({ maxUploadBytes: max }).upload(new Uint8Array(0), { stampId: STAMP });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [175, 3],
+      [511, 255],
+      [512, 255],
+      [513, 255],
+      [2000, 1371],
+    ])('with maxUploadBytes %i says that %i bytes fit, exactly', async (max, fits) => {
+      const error = await refusal(max, new Uint8Array(fits + 1));
+      expect(error.code).toBe('FILE_TOO_LARGE');
+      expect(error.message).toContain(`Content up to ${fits} bytes fits`);
+      expect(error.message).not.toMatch(/-\d|\b0\.0\b|MiB/);
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // The reported size is the exact largest one
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+      await new ProvenanceClient({ maxUploadBytes: max }).upload(new Uint8Array(fits), { stampId: STAMP });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('with the default limit gives the bytes and the MiB', async () => {
+      const error = await refusal(10 * 1024 * 1024, new Uint8Array(7_864_192));
+      expect(error.message).toContain('Content up to 7864191 bytes (about 7.5 MiB) fits');
+    });
+
+    it('the gateway accepts the reported size at the default limit', async () => {
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+      await new ProvenanceClient().upload(new Uint8Array(7_864_191), { stampId: STAMP });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('maxUploadBytes 0 is still refused in the constructor', () => {
+      expect(() => new ProvenanceClient({ maxUploadBytes: 0 })).toThrow(/maxUploadBytes must be a positive integer/);
+    });
+  });
+});
+
+describe('a Blob or File that cannot be read (#202)', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  /** A Blob whose read fails as a browser's does when the picked file changed or was removed */
+  function unreadable(kind: 'Blob' | 'File'): Blob {
+    const content = kind === 'File' ? new File(['x'], 'data.bin') : new Blob(['x']);
+    const readError = new DOMException('The requested file could not be read', 'NotReadableError');
+    Object.defineProperty(content, 'arrayBuffer', { value: () => Promise.reject(readError) });
+    return content;
+  }
+
+  it.each([
+    ['Blob', { stampId: 'a'.repeat(64) }],
+    ['File', { stampId: 'a'.repeat(64) }],
+    ['File', {}],
+  ] as const)('upload() of an unreadable %s is INVALID_INPUT with the read error as cause, before any request', async (kind, options) => {
+    const content = unreadable(kind);
+    const error = (await new ProvenanceClient().upload(content, options).catch((e: unknown) => e)) as ProvenanceError;
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toBe('Could not read the Blob or File content: NotReadableError: The requested file could not be read');
+    expect(error.cause).toBeInstanceOf(DOMException);
+    expect((error.cause as DOMException).name).toBe('NotReadableError');
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

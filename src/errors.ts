@@ -80,6 +80,13 @@ export class ProvenanceError extends Error {
    */
   public retryAfterSeconds?: number | undefined;
 
+  /**
+   * The error this one wraps, when the SDK wrapped one: for example the
+   * JSON.stringify error of raw content, or a wallet's refusal (#202).
+   * Declared here so that it can be read with a TypeScript lib older than ES2022.
+   */
+  declare public cause?: unknown;
+
   constructor(
     message: string,
     public readonly code?: string
@@ -88,6 +95,15 @@ export class ProvenanceError extends Error {
     this.name = 'ProvenanceError';
     Object.setPrototypeOf(this, ProvenanceError.prototype);
   }
+}
+
+/**
+ * Set `cause` on an error, as the ES2022 Error constructor option does
+ * (non-enumerable), and return the error.
+ */
+export function withCause<E extends Error>(error: E, cause: unknown): E {
+  Object.defineProperty(error, 'cause', { value: cause, enumerable: false, writable: true, configurable: true });
+  return error;
 }
 
 /**

@@ -4,7 +4,7 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 import type { NotarySignature, ProvenanceMetadata, DocumentMetadata, SignatureCheck } from './types.js';
 import { sha256Hex, isAddress } from './utils.js';
 import { VerificationError } from './errors.js';
-import { canonicalizeJsonValue } from './canonical-json.js';
+import { canonicalizeJsonValue, notJsonError } from './canonical-json.js';
 
 /**
  * Notary signature scheme, as produced by the gateway (swarm_connect
@@ -45,12 +45,23 @@ export function reconstructSignedMessage(signature: NotarySignature): string {
  * computes it. Pass `canonicalData` (from canonicalizeJsonText on the response
  * text) when available: it is exact for floats and large integers, which a
  * parsed value can no longer reproduce.
+ *
+ * Without `canonicalData`, `data` that JSON cannot represent (undefined, a
+ * circular reference, a BigInt, nesting over 1000 levels) throws
+ * ProvenanceError INVALID_INPUT with the original error as `cause` (#202).
  */
 export function computeNotaryDataHash(
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   canonicalData?: string
 ): string {
-  return sha256Hex(canonicalData ?? canonicalizeJsonValue(metadata.data));
+  if (canonicalData !== undefined) return sha256Hex(canonicalData);
+  let canonical: string;
+  try {
+    canonical = canonicalizeJsonValue(metadata.data);
+  } catch (error) {
+    throw notJsonError('Data', error);
+  }
+  return sha256Hex(canonical);
 }
 
 /** SHA-256 of the canonical data, or undefined (never throws) if `data` cannot be hashed. */

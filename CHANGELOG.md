@@ -122,6 +122,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - If the wallet does not know the chain, it is asked to add it. This happens only for the
   built-in presets, and with `fromViemWalletClient` only when the client has `addChain`. A
   custom preset's chain must be added to the wallet by hand. (#115, PR #139)
+- `parseMetadata()` throws `ProvenanceError` with code `INVALID_INPUT` instead of `SyntaxError`
+  or a plain `Error`. See Errors and retries. (#202)
+- `fromPrivateKey()` throws `ChainConfigurationError` instead of viem's plain `Error` for an
+  invalid private key or an empty `rpcUrl`. See Chain. (#202)
 
 ### Payments (x402 mode)
 
@@ -180,6 +184,21 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 ### Chain
 
+- `fromPrivateKey()` throws `ChainConfigurationError` for an invalid private key or an empty
+  `rpcUrl`. Before, viem's plain `Error` escaped. The message does not include the key. (#202)
+- `fromEip1193Provider()` throws `ChainConfigurationError` when the wallet refuses account
+  access (`eth_requestAccounts`, for example EIP-1193 code 4001), as for a declined chain
+  switch. It also throws it for an answer that is not a list starting with an address (`0x`
+  and 40 hex characters). Before, the wallet's error escaped as it was, and any string was
+  taken as the account. (#202)
+- `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the signer's
+  `getAddress()` fails, as writes already did when the signer's `getChainId()` fails. Unlike
+  that check, an SDK error from the signer passes through unchanged. Nothing is sent. Before,
+  the signer's error escaped as it was. (#202)
+- These errors have no `error.cause`: the original error can carry the RPC URL and its key, or
+  print the private key, and consoles print a cause even when it is not enumerable. Their
+  message is the original message with URLs redacted; for an invalid private key it is the
+  SDK's own message. (#202)
 - Writes refuse a wrong RPC or signer chain and a contract address without code. (#115)
 - `ChainSigner` may implement `switchChain()`. The built-in wallet signers do; see Breaking
   changes. (#115)
@@ -246,6 +265,33 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `upload()` refuses metadata over `maxUploadBytes` (default 10485760) with `FILE_TOO_LARGE`
   before it acquires a stamp. It also refuses invalid raw input before that. (#112)
 - A signature declined in the wallet throws `PaymentRefusedError`. (#112)
+- A raw upload (`raw: true`) whose content JSON cannot represent throws `ProvenanceError` with
+  code `INVALID_INPUT` before any request. This covers a circular reference, a `BigInt`, nesting
+  deeper than 1000 levels, a `toJSON()` that returns `undefined`, and a `toJSON()` or getter that
+  throws. `buildDocumentMetadata()` and `computeNotaryDataHash()` throw the same error. The
+  original error is `error.cause`. Before, a raw `TypeError`, `RangeError` or `SyntaxError`, or
+  the caller's own error, escaped. (#202)
+- `parseMetadata()` throws `ProvenanceError` with code `INVALID_INPUT`. Before, it threw
+  `SyntaxError` for text that is not JSON and a plain `Error` for JSON that is not metadata. The
+  messages for JSON that is not metadata are unchanged. Text that is not JSON gets a new
+  message, "Invalid metadata: not valid JSON", with the `SyntaxError` as `error.cause`. (#202)
+- Without `Buffer` (browsers), `base64ToBytes()` and `extractContent()` throw `ProvenanceError`
+  with code `INVALID_INPUT` for text that is not valid base64, and `verifyContentHash()` returns
+  `false`. Before, a raw `InvalidCharacterError` escaped. (#202)
+- The `FILE_TOO_LARGE` message of a base64 upload gives the exact largest content that fits, in
+  bytes, with MiB from 1 MiB up, for example "Content up to 7864191 bytes (about 7.5 MiB) fits".
+  When only empty content fits, or no content fits, it says so. Before, it estimated the size
+  from a fixed 512-byte overhead and showed "about -0.0 MiB" or "about 0.0 MiB" for small
+  `maxUploadBytes`. (#202)
+- `upload()` of a `Blob` or `File` that cannot be read (for example a `NotReadableError` when
+  the file changed after it was picked) throws `ProvenanceError` with code `INVALID_INPUT`
+  before any request, with the read error as `error.cause`. Before, the `DOMException` escaped.
+  (#202)
+- `ProvenanceError` declares `cause`, so `error.cause` can be read with a TypeScript lib older
+  than ES2022. The SDK sets it, not enumerable, when it wraps another error. (#202)
+- `canonicalizeJsonText()` and `canonicalizeJsonValue()` are the only functions that still throw
+  standard errors (`SyntaxError`, `TypeError`, `RangeError`) for arguments of the documented
+  types, as documented. (#202)
 - An ethers v6 wallet rejection (code `ACTION_REJECTED`) is also `PaymentRefusedError` with code
   `PAYMENT_REFUSED`. Before, it threw `PaymentError` with code `PAYMENT_FAILED`. (#166)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)

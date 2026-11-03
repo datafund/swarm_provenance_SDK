@@ -9,6 +9,7 @@ import {
   normalizeReference,
   retryAfterSeconds,
 } from '../../src/utils.js';
+import { ProvenanceError } from '../../src/errors.js';
 
 describe('toBytes', () => {
   it('should pass through Uint8Array unchanged', () => {
@@ -274,5 +275,38 @@ describe('retryAfterSeconds (#123)', () => {
     expect(retryAfterSeconds('soon', now)).toBeUndefined();
     expect(retryAfterSeconds('-5', now)).toBeUndefined();
     expect(retryAfterSeconds('1.5', now)).toBeUndefined();
+  });
+});
+
+describe('base64ToBytes without Buffer (the browser atob decoder) (#202)', () => {
+  /** Run without Buffer, so that base64ToBytes decodes with atob. Buffer is back before any assertion */
+  function withoutBuffer<T>(run: () => T): T {
+    const saved = globalThis.Buffer;
+    (globalThis as { Buffer?: unknown }).Buffer = undefined;
+    try {
+      return run();
+    } finally {
+      globalThis.Buffer = saved;
+    }
+  }
+
+  it.each(['!!!', 'abcde', 'a b c\u00e9'])('refuses %j with ProvenanceError INVALID_INPUT', (input) => {
+    expect(() => atob(input)).toThrow();
+    const error = withoutBuffer(() => {
+      try {
+        base64ToBytes(input);
+      } catch (e) {
+        return e;
+      }
+      return undefined;
+    });
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+    expect((error as Error).message).toBe('Invalid base64 text');
+    expect((error as Error).cause).toBeDefined();
+  });
+
+  it('decodes valid base64 as with Buffer', () => {
+    expect(withoutBuffer(() => base64ToBytes('AID/'))).toEqual(base64ToBytes('AID/'));
   });
 });

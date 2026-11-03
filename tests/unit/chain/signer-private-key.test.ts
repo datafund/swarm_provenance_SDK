@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import { keccak256, parseTransaction, type Hex } from 'viem';
 import { generatePrivateKey } from 'viem/accounts';
 import { fromPrivateKey } from '../../../src/chain/signer.js';
@@ -146,5 +147,40 @@ describe('fromPrivateKey (#123)', () => {
     expect(error).toBeInstanceOf(ChainConfigurationError);
     expect((error as Error).message).toContain('The signer is on chain 1');
     expect(calls.some((c) => c.method === 'eth_sendRawTransaction')).toBe(false);
+  });
+});
+
+describe('fromPrivateKey() input errors are ChainConfigurationError (#202)', () => {
+  it.each([
+    ['too short', '0x1234'],
+    ['not hex', '0x' + 'zz'.repeat(32)],
+    ['zero', '0x' + '00'.repeat(32)],
+    ['above the curve order', '0x' + 'ff'.repeat(32)],
+    ['without 0x', 'ab'.repeat(32)],
+  ])('refuses a private key that is %s without echoing the key or keeping viem\'s error as the cause', async (_label, key) => {
+    const error = await fromPrivateKey(key as Hex, 'https://rpc.test').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as ChainConfigurationError).code).toBe('CHAIN_CONFIGURATION');
+    expect((error as Error).message).toMatch(/^Invalid private key/);
+    expect((error as Error).message).not.toContain(key.replace(/^0x/, ''));
+    // viem's error prints the key's value for some keys (#118)
+    expect((error as Error).cause).toBeUndefined();
+  });
+
+  it('does not print an above-order private key when the error is inspected', async () => {
+    const key = ('0x' + 'ff'.repeat(32)) as Hex;
+    const error = await fromPrivateKey(key, 'https://rpc.test').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    const printed = inspect(error);
+    expect(printed).not.toContain(key.slice(2));
+    // viem prints the key as a decimal number too
+    expect(printed).not.toContain(BigInt(key).toString());
+  });
+
+  it('refuses an empty rpcUrl with ChainConfigurationError, without viem\'s error as the cause', async () => {
+    const error = await fromPrivateKey(generatePrivateKey(), '').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as Error).message).toMatch(/^Invalid rpcUrl/);
+    expect((error as Error).cause).toBeUndefined();
   });
 });
