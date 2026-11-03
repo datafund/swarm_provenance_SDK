@@ -1306,6 +1306,160 @@ describe('ProvenanceClient', () => {
       }
     });
 
+    describe('Retry-After cap (#161)', () => {
+      const NOW = Date.UTC(2026, 10, 2, 12, 0, 0);
+      const rateLimited = (retryAfter?: string, code?: string) =>
+        new Response(JSON.stringify(code ? { code, message: 'Too many requests.' } : { detail: 'Too many requests.' }), {
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: retryAfter === undefined ? {} : { 'Retry-After': retryAfter },
+        });
+      const ok = () => new Response(JSON.stringify({ enabled: true, available: true }), { status: 200 });
+
+      /** Settle state of a promise, without waiting for it */
+      function track<T>(promise: Promise<T>) {
+        const state: { settled: boolean; value?: T; error?: unknown } = { settled: false };
+        promise.then(
+          (value) => Object.assign(state, { settled: true, value }),
+          (error: unknown) => Object.assign(state, { settled: true, error })
+        );
+        return state;
+      }
+
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], now: NOW });
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it.each([
+        ['a large delta-seconds value', '3600', 3600],
+        ['an HTTP date one day ahead', new Date(NOW + 86_400_000).toUTCString(), 86_400],
+      ])('throws at once, without waiting, for %s', async (_label, retryAfter, seconds) => {
+        mockFetch.mockResolvedValueOnce(rateLimited(retryAfter));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.statusCode).toBe(429);
+        expect(error.retryAfterSeconds).toBe(seconds);
+        expect(error.message).toContain(`asked to wait ${seconds} s`);
+        expect(error.message).toContain('60 s');
+      });
+
+      it('throws a pool StampError with the gateway code at once', async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('120', 'RATE_LIMIT_EXCEEDED'));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.acquireStamp());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as StampError;
+        expect(error).toBeInstanceOf(StampError);
+        expect(error.code).toBe('RATE_LIMIT_EXCEEDED');
+        expect(error.retryAfterSeconds).toBe(120);
+        expect(error.message).toContain('asked to wait 120 s');
+      });
+
+      it('waits and retries at exactly 60 s', async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('60'));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(result.settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_100);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(result.error).toBeUndefined();
+        expect(result.value).toEqual({ enabled: true, available: true, address: undefined });
+      });
+
+      it.each([
+        ['0', '0'],
+        ['a past date', new Date(NOW - 60_000).toUTCString()],
+        ['a missing header (backoff)', undefined],
+        ['a negative number (backoff)', '-5'],
+        ['an unparsable value (backoff)', 'soon'],
+      ])('retries without the cap for %s', async (_label, retryAfter) => {
+        mockFetch.mockResolvedValueOnce(rateLimited(retryAfter));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(result.error).toBeUndefined();
+        expect(result.settled).toBe(true);
+      });
+
+      it('puts retryAfterSeconds on the error after retries run out, without the cap sentence', async () => {
+        mockFetch.mockResolvedValue(rateLimited('1'));
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_100);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.retryAfterSeconds).toBe(1);
+        expect(error.message).not.toContain('did not retry');
+      });
+
+      it("throws a NotaryError for a sign: 'notary' upload at once", async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('120', 'RATE_LIMIT_EXCEEDED'));
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.upload('Hello', { stampId: 'a'.repeat(64), sign: 'notary' }));
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as NotaryError;
+        expect(error).toBeInstanceOf(NotaryError);
+        expect(error.code).toBe('RATE_LIMIT_EXCEEDED');
+        expect(error.retryAfterSeconds).toBe(120);
+        expect(error.message).toContain('asked to wait 120 s');
+      });
+
+      it('keeps the cap sentence within the error text cap for a long gateway message', async () => {
+        /** src/client.ts MAX_ERROR_TEXT (not exported): the cap on error messages, in UTF-16 code units */
+        const MAX_ERROR_TEXT = 4096;
+        const longMessage = 'x'.repeat(MAX_ERROR_TEXT - 10);
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify({ code: 'RATE_LIMIT_EXCEEDED', message: longMessage }), {
+            status: 429,
+            headers: { 'Retry-After': '3600' },
+          })
+        );
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.message.length).toBeLessThanOrEqual(MAX_ERROR_TEXT);
+        expect(error.message).toMatch(/The SDK did not retry: the gateway asked to wait 3600 s .*See retryAfterSeconds\.$/);
+        expect(error.message.startsWith('xxxx')).toBe(true);
+      });
+
+      it("leaves the free tier as it is: PaymentRateLimitError at once, with retryAfterSeconds", async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('3600'));
+        const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const error = await client.notaryInfo().catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(PaymentRateLimitError);
+        expect((error as PaymentRateLimitError).retryAfterSeconds).toBe(3600);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('should return error response after exhausting retries', async () => {
       // All calls return 503
       mockFetch.mockResolvedValue({
