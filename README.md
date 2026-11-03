@@ -167,6 +167,14 @@ try {
 }
 ```
 
+One exception (#199): an `INVALID_RESPONSE` for a 200 body that is valid JSON of the wrong
+shape. That body is the gateway's own answer, and the gateway stores it for the key. A retry with
+the same key is not charged again, but it returns the same answer. The error message says so and
+does not advise the retry: contact the gateway operator with `payment.transaction`, or with the
+key when the transaction is not known. A 200 whose body could not be read or is not JSON (a reset
+connection, a proxy's error page) is not the stored answer, so the retry above can recover the
+result.
+
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
 (so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays

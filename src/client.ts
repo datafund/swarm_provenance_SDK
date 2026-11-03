@@ -1195,7 +1195,9 @@ export class ProvenanceClient {
 
   /** INVALID_RESPONSE for a success body that is JSON but not the shape the method needs (#179) */
   private shapeError(expected: string, response: Response): GatewayConnectionError {
-    return this.invalidResponse(new Error(`expected ${expected}`), response);
+    const failure = this.invalidResponse(new Error(`expected ${expected}`), response);
+    SHAPE_ERRORS.add(failure);
+    return failure;
   }
 
   /** INVALID_RESPONSE for a success body that is not JSON, flagged if the request was paid */
@@ -1478,9 +1480,11 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
   if (!error.payment || idempotencyKey === undefined) return error;
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
-  if (error instanceof GatewayConnectionError && error.code === 'INVALID_RESPONSE') {
-    // A 200 that cannot be read, is not JSON or is not the expected shape: the
-    // gateway keeps its answer for the key, so a keyed retry gets it again
+  if (error instanceof GatewayConnectionError && SHAPE_ERRORS.has(error)) {
+    // Valid JSON of the wrong shape is the answer the gateway's app produced, and
+    // the gateway stores that answer for the key: a keyed retry gets it again.
+    // A body that could not be read or is not JSON (a reset, a proxy page) is
+    // not the stored answer, so the advice below still applies to it.
     const tx = error.payment.transaction;
     error.message +=
       `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway stores its answer for idempotencyKey "${idempotencyKey}", ` +
@@ -1527,6 +1531,12 @@ function matchesAsBase64(data: string, contentHash: string): boolean {
     return false;
   }
 }
+
+/**
+ * INVALID_RESPONSE errors for a success body that is JSON of the wrong shape
+ * (shapeError), as opposed to one that could not be read or is not JSON (#199)
+ */
+const SHAPE_ERRORS = new WeakSet<GatewayConnectionError>();
 
 /** A JSON object: not null, not an array */
 function isRecord(value: unknown): value is Record<string, unknown> {
