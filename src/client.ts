@@ -257,6 +257,11 @@ export class ProvenanceClient {
         response
       );
     }
+    // Absent means false, as for a gateway without a pool (404); any other non-boolean is a broken answer (#199)
+    const lowReserveWarning = data.low_reserve_warning as unknown;
+    if (lowReserveWarning !== undefined && typeof lowReserveWarning !== 'boolean') {
+      throw this.shapeError('a JSON object whose "low_reserve_warning", if present, is a boolean', response);
+    }
     return {
       enabled: data.enabled,
       available: Object.fromEntries(
@@ -264,7 +269,7 @@ export class ProvenanceClient {
       ),
       reserve: data.reserve_config,
       totalStamps: data.total_stamps,
-      lowReserveWarning: data.low_reserve_warning,
+      lowReserveWarning: lowReserveWarning === true,
     };
   }
 
@@ -287,15 +292,24 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const data = await this.readJson<GatewayPricingResponse>(response);
-    const pricing: Pricing = { x402Enabled: data.x402_enabled === true, quotes: {} };
-    if (data.currency !== undefined) pricing.currency = data.currency;
-    if (data.network !== undefined) pricing.network = data.network;
-    if (data.asset !== undefined) pricing.asset = data.asset;
-    if (data.pay_to !== undefined) pricing.payTo = data.pay_to;
-    if (data.min_price_usd !== undefined) pricing.minPriceUsd = data.min_price_usd;
-    if (data.free_tier !== undefined) pricing.freeTier = { enabled: data.free_tier.enabled, header: data.free_tier.header };
-    const quotes = data.quotes ?? {};
+    const data = await this.readJson<unknown>(response);
+    // Optional fields may be absent (or null); present ones must have the type they are copied as (#199)
+    if (!isPricingResponse(data)) {
+      throw this.shapeError(
+        'a JSON object with boolean "x402_enabled", and optional fields of the expected types ' +
+          '(string "currency", "network", "asset" and "pay_to", number "min_price_usd", object "free_tier" ' +
+          'with boolean "enabled" and string "header", object "quotes" of price quotes)',
+        response
+      );
+    }
+    const pricing: Pricing = { x402Enabled: data.x402_enabled, quotes: {} };
+    if (data.currency != null) pricing.currency = data.currency;
+    if (data.network != null) pricing.network = data.network;
+    if (data.asset != null) pricing.asset = data.asset;
+    if (data.pay_to != null) pricing.payTo = data.pay_to;
+    if (data.min_price_usd != null) pricing.minPriceUsd = data.min_price_usd;
+    if (data.free_tier != null) pricing.freeTier = { enabled: data.free_tier.enabled, header: data.free_tier.header };
+    const quotes = data.quotes ?? {}; // absent or null: no quotes
     if (quotes.stamp_purchase) pricing.quotes.stampPurchase = toPriceQuote(quotes.stamp_purchase);
     if (quotes.pool_acquire) pricing.quotes.poolAcquire = toPriceQuote(quotes.pool_acquire);
     if (quotes.data_upload) pricing.quotes.dataUpload = toPriceQuote(quotes.data_upload);
@@ -362,11 +376,27 @@ export class ProvenanceClient {
     }
 
     const data = await this.readJson<GatewayAcquireStampResponse>(response);
+    // The gateway's only 200 sets all of these; fallback_used has a default there, so absent means false (#199)
+    if (
+      !isRecord(data) ||
+      typeof data.batch_id !== 'string' ||
+      !STAMP_ID.test(data.batch_id) ||
+      typeof data.depth !== 'number' ||
+      typeof data.size_name !== 'string' ||
+      (data.fallback_used !== undefined && typeof data.fallback_used !== 'boolean')
+    ) {
+      throw this.shapeError(
+        'a JSON object with a 64-hex-character "batch_id", number "depth", string "size_name" ' +
+          'and, if present, boolean "fallback_used"',
+        response
+      );
+    }
     const stamp: AcquiredStamp = {
-      batchId: data.batch_id,
+      // Lowercased as a caller's stampId is (#168): the gateway's ownership registry matches it exactly
+      batchId: data.batch_id.toLowerCase(),
       depth: data.depth,
       sizeName: data.size_name,
-      fallbackUsed: data.fallback_used,
+      fallbackUsed: data.fallback_used === true,
     };
     if (typeof data.expires_at === 'string') stamp.expiresAt = data.expires_at;
     const payment = this.receiptOf(response);
@@ -775,6 +805,10 @@ export class ProvenanceClient {
     }
 
     const data = await this.readJson<GatewayUploadResponse>(response);
+    // The same check download() applies to a reference, so the result can be downloaded (#199)
+    if (!isRecord(data) || typeof data.reference !== 'string' || referencePathSegment(data.reference) === undefined) {
+      throw this.shapeError('a JSON object with a "reference" of 64 or 128 hex characters', response);
+    }
     return { data, payment: this.receiptOf(response) };
   }
 
@@ -1161,7 +1195,9 @@ export class ProvenanceClient {
 
   /** INVALID_RESPONSE for a success body that is JSON but not the shape the method needs (#179) */
   private shapeError(expected: string, response: Response): GatewayConnectionError {
-    return this.invalidResponse(new Error(`expected ${expected}`), response);
+    const failure = this.invalidResponse(new Error(`expected ${expected}`), response);
+    SHAPE_ERRORS.add(failure);
+    return failure;
   }
 
   /** INVALID_RESPONSE for a success body that is not JSON, flagged if the request was paid */
@@ -1444,6 +1480,25 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
   if (!error.payment || idempotencyKey === undefined) return error;
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
+  if (error instanceof GatewayConnectionError && SHAPE_ERRORS.has(error)) {
+    // Valid JSON of the wrong shape is the answer the gateway's app produced. A
+    // keyed retry gets that answer again, or IDEMPOTENCY_KEY_DELIVERED_NOT_STORED
+    // when the gateway did not store it (too large, or not storable): never a
+    // valid one. A body that could not be read or is not JSON (a reset, a proxy
+    // page) is not the gateway's answer, so the advice below still applies to it.
+    const tx = error.payment.transaction;
+    error.message +=
+      `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway itself sent this answer, so calling ${operation} again ` +
+      `with idempotencyKey "${idempotencyKey}" does not return a valid answer. The payment may have been taken: ` +
+      `contact the gateway operator with ${tx ? `transaction ${tx}` : 'the idempotency key'}`;
+    // A stamp taken from the pool stays usable for another upload. A caller's
+    // own stamp is not named: the caller already has it
+    if (stampId !== undefined && error.stampId === stampId) {
+      const take = error.stampPayment ? 'buying' : 'taking';
+      error.message += `. The pool stamp can still be used: to upload without ${take} another, call ${operation} again with stampId "${stampId}" and a new idempotencyKey`;
+    }
+    return error;
+  }
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;
   error.message += `${/[.!?]$/.test(error.message) ? '' : '.'} To retry without paying twice, call ${operation} again with ${args}`;
   return error;
@@ -1484,9 +1539,59 @@ function matchesAsBase64(data: string, contentHash: string): boolean {
   }
 }
 
+/**
+ * INVALID_RESPONSE errors for a success body that is JSON of the wrong shape
+ * (shapeError), as opposed to one that could not be read or is not JSON (#199)
+ */
+const SHAPE_ERRORS = new WeakSet<GatewayConnectionError>();
+
 /** A JSON object: not null, not an array */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Absent, null, or of the given typeof */
+function optionalOf(value: unknown, type: 'string' | 'number'): boolean {
+  return value === undefined || value === null || typeof value === type;
+}
+
+/** A price quote with every field toPriceQuote() copies */
+function isPriceQuote(value: unknown): value is GatewayPriceQuote {
+  return (
+    isRecord(value) &&
+    typeof value['method'] === 'string' &&
+    typeof value['path'] === 'string' &&
+    typeof value['price_usd'] === 'number' &&
+    typeof value['max_amount_required'] === 'string' &&
+    typeof value['description'] === 'string'
+  );
+}
+
+/**
+ * A GET /api/v1/pricing body pricing() can read (#199): boolean x402_enabled,
+ * and optional fields that are absent, null, or of the type they are copied as.
+ */
+function isPricingResponse(value: unknown): value is GatewayPricingResponse {
+  if (!isRecord(value) || typeof value['x402_enabled'] !== 'boolean') return false;
+  if (!(['currency', 'network', 'asset', 'pay_to'] as const).every((k) => optionalOf(value[k], 'string'))) return false;
+  if (!optionalOf(value['min_price_usd'], 'number')) return false;
+  const freeTier = value['free_tier'];
+  if (
+    freeTier !== undefined &&
+    freeTier !== null &&
+    !(isRecord(freeTier) && typeof freeTier['enabled'] === 'boolean' && typeof freeTier['header'] === 'string')
+  ) {
+    return false;
+  }
+  const quotes = value['quotes'];
+  if (quotes === undefined || quotes === null) return true;
+  // Only the quotes pricing() reads; one that is absent or null is not listed, as before
+  return (
+    isRecord(quotes) &&
+    (['stamp_purchase', 'pool_acquire', 'data_upload', 'bandwidth_credit'] as const).every(
+      (k) => quotes[k] === undefined || quotes[k] === null || isPriceQuote(quotes[k])
+    )
+  );
 }
 
 /** Minimum interval between re-checks of a cached notary address (see verifySignatures) */

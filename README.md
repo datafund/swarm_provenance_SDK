@@ -167,6 +167,16 @@ try {
 }
 ```
 
+One exception (#199): an `INVALID_RESPONSE` for a 200 body that is valid JSON of the wrong
+shape. That body is the gateway's own answer. A retry with the same key is not charged again,
+but it does not return a valid answer: it gets the same answer again, or
+`IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The error message says
+so and does not advise the retry: contact the gateway operator with `payment.transaction`, or with
+the key when the transaction is not known. If `upload()` used a pool stamp, the message also
+says to pass its `stampId` back with a new key, so no other stamp is needed. A 200 whose body
+could not be read or is not JSON (a reset connection, a proxy's error page) is not the gateway's
+answer, so the retry above can recover the result.
+
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
 (so `onBeforePayment` runs again), at most 3 signatures per request (an upload that also pays
@@ -1072,9 +1082,11 @@ issue numbers and lists the open release-gate items.
   `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`. This applies to
   `pricing()`, `acquireStamp()`, `upload()`, `download()`, `downloadDocument()`, `notaryInfo()`
   and `poolStatus()` (#173). `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`
-  also throw `INVALID_RESPONSE` for a success body that cannot be read, is not a JSON object, or
-  lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
-  empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
+  (#179), and `pricing()`, `acquireStamp()` and `upload()` (#199), also throw `INVALID_RESPONSE`
+  for a success body that cannot be read, is not a JSON object, or lacks the fields the method
+  needs. Before, a raw `TypeError` escaped, `notaryInfo()` returned empty values, or
+  `acquireStamp()` and `upload()` returned results without a stamp id or reference.
+  `downloadDocument()` reports a record with no `data` field or no `content_hash`
   as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179). A record in the other method's
   format names the right method: `download()` on a raw upload says to use `downloadDocument()`,
   and `downloadDocument()` on a base64 upload says to use `download()`. The hint is given only
@@ -1084,6 +1096,16 @@ issue numbers and lists the open release-gate items.
   In browsers, `download()` reports `data` that is not valid base64 as `CONTENT_HASH_MISMATCH`,
   as in Node.js, not as a raw `InvalidCharacterError`. A `CONTENT_HASH_MISMATCH` after a paid
   read also carries `error.payment` (#190).
+- Success bodies of `pricing()`, `acquireStamp()`, `upload()` and `poolStatus()` are checked
+  more strictly (#199). `pricing()` without a boolean `x402_enabled` throws `INVALID_RESPONSE`;
+  before, it returned `x402Enabled: false`. `acquireStamp()` needs a `batch_id` of 64 hex
+  characters, and `upload()` a `reference` of 64 or 128 hex characters with an optional `0x`
+  prefix. A pool `batchId` is returned in lowercase, and `upload()` sends it in lowercase, as it
+  does a caller's `stampId` (#168). `AcquiredStamp.fallbackUsed` and
+  `PoolStatus.lowReserveWarning` are `false` when the gateway leaves them out, and
+  `INVALID_RESPONSE` when they are present but not a boolean, `null` included. After a paid
+  request whose 200 body is valid JSON of the wrong shape, the message no longer advises a retry
+  with the same idempotency key: it says to contact the gateway operator with the transaction.
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
