@@ -591,6 +591,93 @@ describe('paid reads with a body that is not the expected shape (#179)', () => {
   });
 });
 
+describe('paid requests with a success body that is not the expected shape (#199)', () => {
+  const NOTE = /a payment was sent with this request and may have been charged/;
+  const SHAPE = /^Invalid response from gateway: expected a JSON object/;
+
+  function expectPaidInvalid(error: unknown): GatewayConnectionError {
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    const failure = error as GatewayConnectionError;
+    expect(failure.code).toBe('INVALID_RESPONSE');
+    expect(failure.statusCode).toBe(200);
+    expect(failure.payment).toMatchObject({ paymentSent: true });
+    expect(failure.message).toMatch(SHAPE);
+    expect(failure.message).toMatch(NOTE);
+    return failure;
+  }
+
+  it.each([
+    ['{}', {}],
+    ['a body without x402_enabled', { quotes: {} }],
+    ['a quote without price_usd', { x402_enabled: true, quotes: { data_upload: { method: 'POST', path: '/api/v1/data/', max_amount_required: '1', description: 'x' } } }],
+  ])('a paid 200 to pricing() with %s keeps the payment flag', async (_label, body) => {
+    afterPayment = { status: 200, body };
+    const error = await client({ payForReads: true }).pricing().catch((e: unknown) => e);
+    expectPaidInvalid(error);
+    expect(payments()).toBe(1);
+  });
+
+  it.each([
+    ['{}', {}],
+    ['a body without batch_id', { ...POOL_BODY, batch_id: undefined }],
+    ['a body whose depth is a string', { ...POOL_BODY, depth: '17' }],
+  ])('a paid 200 to acquireStamp() with %s keeps the payment flag and the retry hint', async (_label, body) => {
+    afterPayment = { status: 200, body };
+    const error = await client({ payForPool: true }).acquireStamp('small', { idempotencyKey: 'pool-1' }).catch((e: unknown) => e);
+    const failure = expectPaidInvalid(error);
+    expect(failure).not.toBeInstanceOf(StampError);
+    expect(failure.payment).toMatchObject({ idempotencyKey: 'pool-1' });
+    expect(failure.message).toMatch(/To retry without paying twice, call acquireStamp\(\) again with idempotencyKey "pool-1"$/);
+    expect(payments()).toBe(1);
+  });
+
+  it.each([
+    ['{}', {}],
+    ['a reference that is not hex', { reference: 'not-a-reference' }],
+  ])('a paid 200 to upload() with %s keeps the payment flag, the stamp and the retry hint', async (_label, body) => {
+    afterPayment = { status: 200, body };
+    const error = await client().upload('hello', { stampId: STAMP, idempotencyKey: 'up-1' }).catch((e: unknown) => e);
+    const failure = expectPaidInvalid(error);
+    expect(failure.payment).toEqual({ paymentSent: true, idempotencyKey: 'up-1', stampId: STAMP });
+    expect(failure.message).toMatch(new RegExp(`To retry without paying twice, call upload\\(\\) again with idempotencyKey "up-1" and stampId "${STAMP}"$`));
+    expect(payments()).toBe(1);
+  });
+
+  it('a paid upload with a paid pool stamp and a malformed 200 keeps both payments', async () => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      // Read the headers and URL without consuming the body, which gateway() still needs
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      const url = input instanceof Request ? input.url : String(input);
+      if (headers.has('X-PAYMENT') && new URL(url).pathname === '/api/v1/data/') {
+        seen.push({ method: 'POST', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForPool: true }).upload('hello').catch((e: unknown) => e);
+      const failure = expectPaidInvalid(error);
+      expect(failure.payment).toMatchObject({ stampId: POOL_STAMP, idempotencyKey: ANY_KEY });
+      expect(failure.stampId).toBe(POOL_STAMP);
+      expect(failure.stampPayment).toBeDefined();
+      expect(failure.message).toMatch(new RegExp(`and stampId "${POOL_STAMP}"$`));
+      expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/data/']);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+
+  it('a payForPool upload whose paid acquisition answers {} keeps the payment flag and sends no data', async () => {
+    afterPayment = { status: 200, body: {} };
+    const error = await client({ payForPool: true }).upload('hello', { idempotencyKey: 'up-2' }).catch((e: unknown) => e);
+    const failure = expectPaidInvalid(error);
+    expect(failure.stampId).toBeUndefined();
+    expect(failure.message).toMatch(/To retry without paying twice, call upload\(\) again with idempotencyKey "up-2"$/);
+    expect(seen.some((s) => s.path === '/api/v1/data/')).toBe(false);
+    expect(payments()).toBe(1);
+  });
+});
+
 describe('paid reads of a record the method cannot verify (#190)', () => {
   const HELLO = { data: 'aGVsbG8=', content_hash: sha256Hex(toBytes('hello')), stamp_id: STAMP };
   const RAW = { data: { a: 1 }, content_hash: sha256Hex(toBytes('{"a":1}')), stamp_id: STAMP };

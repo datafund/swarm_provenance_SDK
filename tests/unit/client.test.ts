@@ -18,6 +18,9 @@ vi.stubGlobal('fetch', async (...args: unknown[]) => {
   return res;
 });
 
+/** A pool stamp's batch id as the gateway returns it: 64 hex characters, which acquireStamp() checks (#199) */
+const POOL_BATCH_ID = '5ca1ab1e'.repeat(8);
+
 describe('ProvenanceClient', () => {
   beforeEach(() => {
     mockFetch.mockReset();
@@ -203,7 +206,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'stamp123',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -213,7 +216,7 @@ describe('ProvenanceClient', () => {
       const client = new ProvenanceClient();
       const stamp = await client.acquireStamp('small');
 
-      expect(stamp.batchId).toBe('stamp123');
+      expect(stamp.batchId).toBe(POOL_BATCH_ID);
       expect(stamp.depth).toBe(17);
       expect(stamp.sizeName).toBe('small');
       expect(stamp.fallbackUsed).toBe(false);
@@ -373,7 +376,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'stamp123',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -392,7 +395,7 @@ describe('ProvenanceClient', () => {
       const result = await client.upload('Hello, World!');
 
       expect(result.reference).toBe('abcd1234'.repeat(8));
-      expect(result.metadata.stamp_id).toBe('stamp123');
+      expect(result.metadata.stamp_id).toBe(POOL_BATCH_ID);
       expect(mockFetch).toHaveBeenCalledTimes(3);
     });
 
@@ -447,7 +450,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'stamp123',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -465,7 +468,7 @@ describe('ProvenanceClient', () => {
       const result = await client.upload('Hello', { sign: 'notary' });
 
       expect(result.reference).toBe('abcd1234'.repeat(8));
-      expect(result.metadata.stamp_id).toBe('stamp123');
+      expect(result.metadata.stamp_id).toBe(POOL_BATCH_ID);
     });
 
     it('should throw NotaryError when notary signing fails', async () => {
@@ -488,7 +491,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'stamp123',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -719,7 +722,7 @@ describe('ProvenanceClient', () => {
     it('should include provenance standard in raw upload', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ reference: 'ref123'.padEnd(64, '0') }),
+        json: () => Promise.resolve({ reference: 'abc123'.padEnd(64, '0') }),
       });
 
       const client = new ProvenanceClient();
@@ -751,7 +754,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'poolStamp',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -766,7 +769,7 @@ describe('ProvenanceClient', () => {
       const client = new ProvenanceClient();
       const result = await client.upload({ test: true }, { raw: true });
 
-      expect(result.metadata.stamp_id).toBe('poolStamp');
+      expect(result.metadata.stamp_id).toBe(POOL_BATCH_ID);
       expect(mockFetch).toHaveBeenCalledTimes(3);
     });
 
@@ -788,7 +791,7 @@ describe('ProvenanceClient', () => {
     it('should support notary signing in raw mode', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ reference: 'ref'.padEnd(64, '0') }),
+        json: () => Promise.resolve({ reference: 'fe'.padEnd(64, '0') }),
       });
 
       const client = new ProvenanceClient();
@@ -797,7 +800,7 @@ describe('ProvenanceClient', () => {
         { raw: true, stampId: 'myStamp', sign: 'notary' }
       );
 
-      expect(result.reference).toBe('ref'.padEnd(64, '0'));
+      expect(result.reference).toBe('fe'.padEnd(64, '0'));
 
       // Verify the query string included sign=notary
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
@@ -1577,7 +1580,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'stamp123',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -1607,7 +1610,7 @@ describe('ProvenanceClient', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          batch_id: 'stamp123',
+          batch_id: POOL_BATCH_ID,
           depth: 17,
           size_name: 'small',
           fallback_used: false,
@@ -2086,6 +2089,238 @@ describe('success bodies that are not the expected shape (#179)', () => {
   it('download() still reports a well-formed record with a wrong hash as CONTENT_HASH_MISMATCH', async () => {
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ data: 'aGVsbG8=', content_hash: '0'.repeat(64), stamp_id: 's' }), { status: 200 }));
     await expect(new ProvenanceClient().download(REF)).rejects.toMatchObject({ name: 'ProvenanceError', code: 'CONTENT_HASH_MISMATCH' });
+  });
+});
+
+describe('pricing(), acquireStamp() and upload() success bodies that are not the expected shape (#199)', () => {
+  const STAMP_ID = 'a'.repeat(64);
+  const REFERENCE = 'b'.repeat(64);
+  const QUOTE = { method: 'POST', path: '/api/v1/data/', price_usd: 0.01, max_amount_required: '10000', description: 'Upload' };
+  /** GET /api/v1/pricing with x402 enabled, as the gateway sends it (app/api/endpoints/pricing.py) */
+  const PRICING = {
+    x402_enabled: true,
+    currency: 'USDC',
+    network: 'base-sepolia',
+    asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    pay_to: '0x1111111111111111111111111111111111111111',
+    min_price_usd: 0.01,
+    free_tier: { enabled: true, header: 'X-Payment-Mode: free' },
+    quotes: {
+      stamp_purchase: { ...QUOTE, path: '/api/v1/stamps/' },
+      pool_acquire: { ...QUOTE, path: '/api/v1/pool/acquire' },
+      data_upload: QUOTE,
+      bandwidth_credit: { ...QUOTE, path: '/api/v1/chunks/credit' },
+    },
+  };
+  /** POST /api/v1/pool/acquire, as the gateway sends it (AcquireStampResponse) */
+  const ACQUIRED = {
+    success: true,
+    batch_id: STAMP_ID,
+    depth: 17,
+    size_name: 'small',
+    message: 'Stamp acquired from pool (depth=17, size=small)',
+    fallback_used: false,
+    expires_at: '2026-12-01T10:00:00Z',
+  };
+  const POOL = { enabled: true, current_levels: { '17': 2 }, reserve_config: { '17': 1 }, total_stamps: 2, low_reserve_warning: false };
+
+  const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+  const methods = {
+    pricing: (c: ProvenanceClient) => c.pricing(),
+    acquireStamp: (c: ProvenanceClient) => c.acquireStamp(),
+    upload: (c: ProvenanceClient) => c.upload('hello', { stampId: STAMP_ID }),
+  } as const;
+  type Method = keyof typeof methods;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  async function expectInvalid(method: Method, body: string) {
+    mockFetch.mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const error = await methods[method](new ProvenanceClient()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+    expect((error as GatewayConnectionError).statusCode).toBe(200);
+    expect((error as Error).message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+    return error as GatewayConnectionError;
+  }
+
+  const bodies = ['null', '"str"', '42', '[]', '{}'];
+  const cases = (Object.keys(methods) as Method[]).flatMap((m) => bodies.map((b) => [m, b] as const));
+
+  it.each(cases)('%s() with the 200 body %s throws INVALID_RESPONSE', async (method, body) => {
+    await expectInvalid(method, body);
+  });
+
+  it.each([
+    ['pricing', 'x402_enabled that is not a boolean', { ...PRICING, x402_enabled: 'yes' }],
+    ['pricing', 'quotes that is null', { ...PRICING, quotes: null }],
+    ['pricing', 'quotes that is an array', { ...PRICING, quotes: [] }],
+    ['pricing', 'quote that is not an object', { ...PRICING, quotes: { data_upload: 'cheap' } }],
+    ['pricing', 'quote without price_usd', { ...PRICING, quotes: { data_upload: { ...QUOTE, price_usd: undefined } } }],
+    ['pricing', 'quote whose max_amount_required is a number', { ...PRICING, quotes: { data_upload: { ...QUOTE, max_amount_required: 10000 } } }],
+    ['pricing', 'quote without a description', { ...PRICING, quotes: { data_upload: { ...QUOTE, description: undefined } } }],
+    ['pricing', 'free_tier without a header', { ...PRICING, free_tier: { enabled: true } }],
+    ['pricing', 'free_tier that is a boolean', { ...PRICING, free_tier: true }],
+    ['pricing', 'pay_to that is a number', { ...PRICING, pay_to: 42 }],
+    ['pricing', 'min_price_usd that is a string', { ...PRICING, min_price_usd: '0.01' }],
+    ['pricing', 'currency that is an object', { ...PRICING, currency: {} }],
+    ['acquireStamp', 'body without batch_id', { ...ACQUIRED, batch_id: undefined }],
+    ['acquireStamp', 'batch_id that is null', { ...ACQUIRED, batch_id: null }],
+    ['acquireStamp', 'batch_id that is not hex', { ...ACQUIRED, batch_id: 'z'.repeat(64) }],
+    ['acquireStamp', 'batch_id of 63 characters', { ...ACQUIRED, batch_id: 'a'.repeat(63) }],
+    ['acquireStamp', 'depth that is a string', { ...ACQUIRED, depth: '17' }],
+    ['acquireStamp', 'body without size_name', { ...ACQUIRED, size_name: undefined }],
+    ['acquireStamp', 'fallback_used that is not a boolean', { ...ACQUIRED, fallback_used: 'no' }],
+    ['upload', 'reference that is a number', { reference: 42 }],
+    ['upload', 'reference that is not hex', { reference: 'xyz' }],
+    ['upload', 'reference of 96 hex characters', { reference: 'b'.repeat(96) }],
+    ['upload', 'reference that is null', { reference: null, message: 'ok' }],
+  ] as const)('%s() with a %s throws INVALID_RESPONSE', async (method, _label, body) => {
+    await expectInvalid(method, JSON.stringify(body));
+  });
+
+  it('upload() with sign: notary reports a malformed 200 as INVALID_RESPONSE, not a NotaryError', async () => {
+    mockFetch.mockResolvedValueOnce(json({ message: 'ok' }));
+    const error = await new ProvenanceClient().upload('hello', { stampId: STAMP_ID, sign: 'notary' }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect(error).not.toBeInstanceOf(NotaryError);
+    expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+  });
+
+  it('upload() with a pool stamp names the stamp when the upload body is malformed', async () => {
+    mockFetch.mockResolvedValueOnce(json(POOL));
+    mockFetch.mockResolvedValueOnce(json(ACQUIRED));
+    mockFetch.mockResolvedValueOnce(json({}));
+    const error = await new ProvenanceClient().upload('hello').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+    expect((error as GatewayConnectionError).stampId).toBe(STAMP_ID);
+  });
+
+  it.each([
+    ['{}', {}],
+    ['null', null],
+    ['a body without batch_id', { ...ACQUIRED, batch_id: undefined }],
+  ])('upload() does not send the data when the pool acquisition answers %s', async (_label, body) => {
+    mockFetch.mockResolvedValueOnce(json(POOL));
+    mockFetch.mockResolvedValueOnce(json(body));
+    mockFetch.mockResolvedValueOnce(json({ reference: REFERENCE }));
+    const error = await new ProvenanceClient().upload('hello').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/api/v1/data/'))).toBe(false);
+  });
+
+  it('poolStatus() returns lowReserveWarning false when the gateway leaves it out', async () => {
+    mockFetch.mockResolvedValueOnce(json({ ...POOL, low_reserve_warning: undefined }));
+    const status = await new ProvenanceClient().poolStatus();
+    expect(status.lowReserveWarning).toBe(false);
+  });
+
+  it.each([['the string "true"', 'true'], ['null', null], ['1', 1]])(
+    'poolStatus() throws INVALID_RESPONSE for low_reserve_warning %s',
+    async (_label, value) => {
+      mockFetch.mockResolvedValueOnce(json({ ...POOL, low_reserve_warning: value }));
+      const error = await new ProvenanceClient().poolStatus().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    }
+  );
+
+  it.each([true, false])('poolStatus() keeps low_reserve_warning %s and ignores the fields it does not read', async (value) => {
+    mockFetch.mockResolvedValueOnce(
+      json({
+        ...POOL,
+        low_reserve_warning: value,
+        available_stamps: { '17': [STAMP_ID] },
+        pending_stamps: { '20': 1 },
+        last_check: null,
+        next_check: '2026-11-03T10:15:00Z',
+        errors: [],
+      })
+    );
+    expect((await new ProvenanceClient().poolStatus()).lowReserveWarning).toBe(value);
+  });
+
+  it('pricing() accepts the gateway answer with x402 disabled', async () => {
+    mockFetch.mockResolvedValueOnce(json({ x402_enabled: false, quotes: {} }));
+    expect(await new ProvenanceClient().pricing()).toEqual({ x402Enabled: false, quotes: {} });
+  });
+
+  it('pricing() accepts the full gateway answer', async () => {
+    mockFetch.mockResolvedValueOnce(json(PRICING));
+    const pricing = await new ProvenanceClient().pricing();
+    expect(pricing).toMatchObject({
+      x402Enabled: true,
+      currency: 'USDC',
+      payTo: PRICING.pay_to,
+      minPriceUsd: 0.01,
+      freeTier: { enabled: true, header: 'X-Payment-Mode: free' },
+    });
+    expect(Object.keys(pricing.quotes).sort()).toEqual(['bandwidthCredit', 'dataUpload', 'poolAcquire', 'stampPurchase']);
+    expect(pricing.quotes.dataUpload).toEqual({ method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, maxAmountRequired: '10000', description: 'Upload' });
+  });
+
+  it('pricing() accepts an answer without the pool and bandwidth quotes, with the free tier off', async () => {
+    const quotes = { stamp_purchase: PRICING.quotes.stamp_purchase, data_upload: PRICING.quotes.data_upload };
+    mockFetch.mockResolvedValueOnce(json({ ...PRICING, free_tier: { enabled: false, header: 'X-Payment-Mode: free' }, quotes }));
+    const pricing = await new ProvenanceClient().pricing();
+    expect(Object.keys(pricing.quotes).sort()).toEqual(['dataUpload', 'stampPurchase']);
+    expect(pricing.freeTier).toEqual({ enabled: false, header: 'X-Payment-Mode: free' });
+  });
+
+  it('pricing() treats absent quotes and null optional fields as absent', async () => {
+    mockFetch.mockResolvedValueOnce(json({ x402_enabled: true, currency: null, pay_to: null, free_tier: null, quotes: { data_upload: null } }));
+    expect(await new ProvenanceClient().pricing()).toEqual({ x402Enabled: true, quotes: {} });
+    mockFetch.mockResolvedValueOnce(json({ x402_enabled: false }));
+    expect(await new ProvenanceClient().pricing()).toEqual({ x402Enabled: false, quotes: {} });
+  });
+
+  it.each([
+    ['expires_at as a string', { expires_at: '2026-12-01T10:00:00Z' }, { expiresAt: '2026-12-01T10:00:00Z' }],
+    ['expires_at null', { expires_at: null }, {}],
+    ['no expires_at', {}, {}],
+    ['fallback_used true', { fallback_used: true, depth: 20, size_name: 'medium' }, { fallbackUsed: true, depth: 20, sizeName: 'medium' }],
+    ['no fallback_used', { fallback_used: undefined }, { fallbackUsed: false }],
+    ['an uppercase batch_id', { batch_id: 'A'.repeat(64) }, { batchId: 'A'.repeat(64) }],
+  ])('acquireStamp() accepts a gateway answer with %s', async (_label, overrides, expected) => {
+    mockFetch.mockResolvedValueOnce(json({ ...ACQUIRED, expires_at: undefined, ...overrides }));
+    const stamp = await new ProvenanceClient().acquireStamp();
+    expect(stamp).toMatchObject({ batchId: STAMP_ID, depth: 17, sizeName: 'small', fallbackUsed: false, ...expected });
+    expect(typeof stamp.fallbackUsed).toBe('boolean');
+    if (!('expiresAt' in expected)) expect(stamp.expiresAt).toBeUndefined();
+  });
+
+  it.each([
+    ['expires_at as a string', { reference: REFERENCE, message: 'ok', expires_at: '2026-12-01T10:00:00Z' }, REFERENCE],
+    ['expires_at null', { reference: REFERENCE, expires_at: null }, REFERENCE],
+    ['timing', { reference: REFERENCE, message: 'ok', timing: { file_read_ms: 1, bee_upload_ms: 2, total_ms: 3 } }, REFERENCE],
+    ['a 128-hex reference', { reference: 'c'.repeat(128) }, 'c'.repeat(128)],
+  ])('upload() accepts a gateway answer with %s', async (_label, body, reference) => {
+    mockFetch.mockResolvedValueOnce(json(body));
+    const result = await new ProvenanceClient().upload('hello', { stampId: STAMP_ID });
+    expect(result.reference).toBe(reference);
+    if (typeof (body as { expires_at?: unknown }).expires_at === 'string') expect(result.expiresAt).toBe('2026-12-01T10:00:00Z');
+    else expect(result.expiresAt).toBeUndefined();
+  });
+
+  it('upload() with sign: notary accepts the gateway answer', async () => {
+    mockFetch.mockResolvedValueOnce(json({ reference: REFERENCE, message: 'ok', expires_at: null }));
+    const result = await new ProvenanceClient().upload('hello', { stampId: STAMP_ID, sign: 'notary' });
+    expect(result.reference).toBe(REFERENCE);
+  });
+
+  it('upload() from the pool accepts the gateway answers', async () => {
+    mockFetch.mockResolvedValueOnce(json(POOL));
+    mockFetch.mockResolvedValueOnce(json(ACQUIRED));
+    mockFetch.mockResolvedValueOnce(json({ reference: REFERENCE, message: 'ok' }));
+    const result = await new ProvenanceClient().upload('hello');
+    expect(result.reference).toBe(REFERENCE);
+    expect(result.metadata.stamp_id).toBe(STAMP_ID);
   });
 });
 

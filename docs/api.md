@@ -103,7 +103,9 @@ A 404 returns a disabled pool with no stamps. Another error status throws
 `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
 rate-limited free-tier request. A success body that cannot be read, is not JSON, or is not an
 object with boolean `enabled`, number `total_stamps` and objects `current_levels` and
-`reserve_config` throws `GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179). A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
+`reserve_config` throws `GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179). So
+does a `low_reserve_warning` that is present but not a boolean. When the gateway leaves it out,
+`lowReserveWarning` is `false` (#199). A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
 `TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
 apply.
 
@@ -152,8 +154,14 @@ interface PriceQuote {
 
 Quotes follow the current chain price: treat them as current, not guaranteed. An error status
 throws `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError`
-for a rate-limited free-tier request. A success body that is not JSON throws
-`GatewayConnectionError` with code `INVALID_RESPONSE`. A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
+for a rate-limited free-tier request. A success body that cannot be read, is not JSON, or is
+not an object with boolean `x402_enabled` throws `GatewayConnectionError` with code
+`INVALID_RESPONSE` (#173, #199). Optional fields can be absent or `null`. When present, they
+must have the type they are copied as, or the call throws `INVALID_RESPONSE`: string
+`currency`, `network`, `asset` and `pay_to`, number `min_price_usd`, `free_tier` with boolean
+`enabled` and string `header`, and `quotes` as an object. Each of the four quotes, when
+present, must have string `method`, `path`, `max_amount_required` and `description` and
+number `price_usd`. After a paid request (`payForReads`), the error has `error.payment`. A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
 `TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
 apply.
 
@@ -178,8 +186,11 @@ only on a paid acquisition. An error status from the pool throws `StampError` (s
 except a rate-limited free-tier request, which throws `PaymentRateLimitError` (`'free'`
 mode), and the three idempotency stop codes after a paid acquisition, which throw
 `PaymentOutcomeError`. A connection failure or timeout throws `GatewayConnectionError`
-(`CONNECTION_FAILED` or `TIMEOUT`), and a success body that is not JSON throws
-`GatewayConnectionError` with code `INVALID_RESPONSE`. In x402 mode with `payForPool`, the
+(`CONNECTION_FAILED` or `TIMEOUT`). A success body that cannot be read, is not JSON, or is not
+an object with a `batch_id` of 64 hex characters, number `depth` and string `size_name` throws
+`GatewayConnectionError` with code `INVALID_RESPONSE`, not `StampError` (#173, #199). So does
+a `fallback_used` that is present but not a boolean; when it is absent, `fallbackUsed` is
+`false`. After a paid acquisition, the error has `error.payment`. In x402 mode with `payForPool`, the
 payment errors listed under `upload()` also apply.
 
 #### `upload(content, options?): Promise<UploadResult>`
@@ -259,7 +270,7 @@ A receipt is present only when the request carried a payment the gateway accepte
 | `NotaryError` | the gateway's code | With `sign: 'notary'`: the upload request got an error status (see NotaryError) |
 | `GatewayConnectionError` | the gateway's code | Without `sign: 'notary'`: the upload request got an error status. `body` holds the response |
 | `GatewayConnectionError` | `CONNECTION_FAILED`, `TIMEOUT` | A request could not be sent, got no response, or timed out. With `ownerSigner`, also a timeout while waiting for the signature or the clock |
-| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body is not JSON |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body cannot be read or is not JSON (#173). Or the upload's body is not an object with a `reference` of 64 or 128 hex characters, or the pool acquisition's body lacks the fields `acquireStamp()` needs (#199). Also with `sign: 'notary'`. Nothing is uploaded after a malformed pool answer |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | A free-tier request (`'free'` mode, or an owner-proof upload) was rate limited |
 | `PaymentConfigurationError` | `PAYMENT_CONFIGURATION` | x402 mode: the `@x402` packages, Web Crypto or the wallet address are missing. Checked on the first request that may pay |
 | `PaymentRefusedError` | `PAYMENT_REFUSED` | x402 mode: the payment was refused before signing |
@@ -489,7 +500,7 @@ interface PoolStatus {
   available: Record<string, number>;  // stamps per depth
   reserve: Record<string, number>;    // reserve configuration per depth
   totalStamps: number;
-  lowReserveWarning: boolean;         // a depth is below its reserve
+  lowReserveWarning: boolean;         // a depth is below its reserve (false when the gateway leaves it out)
 }
 ```
 
@@ -500,7 +511,7 @@ interface AcquiredStamp {
   batchId: string;
   depth: number;
   sizeName: string;
-  fallbackUsed: boolean;       // a larger stamp was used as fallback
+  fallbackUsed: boolean;       // a larger stamp was used as fallback (false when the gateway leaves it out)
   payment?: PaymentReceipt;    // the acquisition's payment, when it was paid (x402 mode)
   expiresAt?: string;          // when the stamp runs out (ISO 8601, UTC; gateway estimate)
 }
@@ -586,7 +597,7 @@ class GatewayConnectionError extends ProvenanceError {
 | `FILE_TOO_LARGE` | The gateway's proxy answered 413 with a body that is not JSON |
 | `CONNECTION_FAILED` | The request could not be sent or got no response |
 | `TIMEOUT` | The request took longer than `timeout`, or `paidTimeout` for an attempt that may pay or signs an owner proof |
-| `INVALID_RESPONSE` | A success response whose body cannot be read or is not JSON (#173, #179). `notaryInfo()`, `poolStatus()`, `download()` and `downloadDocument()` also throw it for a body that does not have the fields they need (#179). `statusCode` is the HTTP status |
+| `INVALID_RESPONSE` | A success response whose body cannot be read or is not JSON (#173, #179). `notaryInfo()`, `poolStatus()`, `download()` and `downloadDocument()` (#179), and `pricing()`, `acquireStamp()` and `upload()` (#199), also throw it for a body that does not have the fields they need. Each method's section lists those fields. `statusCode` is the HTTP status. After a paid request, the error has `payment` |
 
 ### PaymentRateLimitError
 
