@@ -1,5 +1,7 @@
 import type { Address, Hex, ChainSigner } from './types.js';
 import { ChainConfigurationError, isAlreadyKnown, rpcErrorMessage } from './errors.js';
+import { withCause } from '../errors.js';
+import { isAddress } from '../utils.js';
 
 /**
  * EIP-1193 provider interface (window.ethereum / MetaMask)
@@ -111,11 +113,10 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
   } catch (error) {
     // Once the chain entry has loaded, viem resolves, so this mostly catches a
     // broken install: keep the original error for diagnosis.
-    const configError = new ChainConfigurationError(
-      'viem is required for private key signing. Install it: npm install viem (or pnpm add viem)'
+    throw withCause(
+      new ChainConfigurationError('viem is required for private key signing. Install it: npm install viem (or pnpm add viem)'),
+      error
     );
-    configError.cause = error;
-    throw configError;
   }
 
   let account: ReturnType<typeof viemAccounts.privateKeyToAccount>;
@@ -192,6 +193,9 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
 
   if (!Array.isArray(accounts) || typeof accounts[0] !== 'string') {
     throw new ChainConfigurationError('No accounts available from provider');
+  }
+  if (!isAddress(accounts[0])) {
+    throw new ChainConfigurationError('The wallet returned an account that is not an address');
   }
 
   const address = accounts[0] as Address;
