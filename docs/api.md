@@ -198,8 +198,8 @@ not have the expected shape throws `GatewayConnectionError` with code `INVALID_R
 characters, number `depth` and string `size_name`, and a boolean `fallback_used` if present.
 When `fallback_used` is absent, `fallbackUsed` is `false`. `batchId` is returned in lowercase,
 as `upload()` sends a caller's `stampId` (#168). After a paid acquisition, the error has
-`error.payment`, and the message says that a retry with the same `idempotencyKey` returns the
-same answer (see `upload()`). In x402 mode with `payForPool`, the
+`error.payment`. When the body was valid JSON of the wrong shape, the message says that a retry
+with the same `idempotencyKey` returns the same answer (see `upload()`). In x402 mode with `payForPool`, the
 payment errors listed under `upload()` also apply.
 
 #### `upload(content, options?): Promise<UploadResult>`
@@ -293,11 +293,13 @@ An error from the upload request, after `upload()` took a stamp from the pool, h
 has `payment`, with `payment.idempotencyKey`. `payment.stampId` is set only when the upload
 request itself failed; a failed paid pool acquisition inside `upload()` has no
 `payment.stampId`. Pass those back as `idempotencyKey` and `stampId` to retry without paying
-twice; the error message says how. The exception is `INVALID_RESPONSE` after a paid request:
-the gateway stores its answer for the key, so a retry with the same `idempotencyKey` returns
-the same malformed answer. The payment may have been taken. The message says to contact the
-gateway operator with `payment.transaction`, or with the idempotency key when the transaction
-is not known (#199).
+twice; the error message says how. The exception is `INVALID_RESPONSE` after a paid request
+whose 200 body is valid JSON of the wrong shape. That body is the gateway's own answer, and the
+gateway stores it for the key, so a retry with the same `idempotencyKey` returns the same
+answer. The payment may have been taken. The message says to contact the gateway operator with
+`payment.transaction`, or with the idempotency key when the transaction is not known (#199). A
+200 body that could not be read or is not JSON is not the stored answer: the message advises
+the keyed retry, which can recover the result.
 
 **Raw mode example:**
 

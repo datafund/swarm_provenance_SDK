@@ -107,9 +107,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   leaves them out, and `INVALID_RESPONSE` when they are not booleans. A pool `batch_id` is
   lowercased, as a caller's `stampId` is (#168). If the request was paid, the error carries
   `error.payment`. After a paid `upload()` or `acquireStamp()` with an `idempotencyKey`, an
-  `INVALID_RESPONSE` no longer advises a keyed retry. The gateway stores its answer for the key,
-  so that retry returns the same answer. The message says to contact the gateway operator with
-  the transaction instead. (#107, PR #138; #173, #179, #199)
+  `INVALID_RESPONSE` for a 200 body that is valid JSON of the wrong shape no longer advises a
+  keyed retry. That body is the gateway's own answer, which it stores for the key, so the retry
+  returns the same answer. The message says to contact the gateway operator with the
+  transaction instead. A body that could not be read or is not JSON keeps the keyed-retry
+  advice: it is not the stored answer. (#107, PR #138; #173, #179, #199)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)
