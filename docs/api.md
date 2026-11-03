@@ -71,6 +71,12 @@ const info = await client.notaryInfo();
 // { enabled: true, available: true, address: '0x...' }
 ```
 
+A 404 returns `{ enabled: false, available: false }`. Another error status throws
+`GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
+rate-limited free-tier request. A success body that cannot be
+read, is not JSON, or is not an object with boolean `enabled` and `available` throws
+`GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179).
+
 #### `poolStatus(): Promise<PoolStatus>`
 
 Get stamp pool status.
@@ -79,6 +85,13 @@ Get stamp pool status.
 const status = await client.poolStatus();
 // { enabled: true, available: { '17': 5 }, reserve: { '17': 10 } }
 ```
+
+A 404 returns a disabled pool with no stamps. Another error status throws
+`GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
+rate-limited free-tier request. A success body that cannot be
+read, is not JSON, or is not an object with boolean `enabled`, number `total_stamps` and
+objects `current_levels` and `reserve_config` throws `GatewayConnectionError` with code
+`INVALID_RESPONSE` (#173, #179).
 
 #### `acquireStamp(size?: 'small' | 'medium' | 'large'): Promise<AcquiredStamp>`
 
@@ -193,8 +206,25 @@ result is in `verification.results`. If none is, `verified` is `false`: that cov
 signature entries with an empty, missing or malformed `signature` value, other signers,
 changed data, and no expected address. `verified` is `undefined` when the document carries
 no signatures at all (missing or empty `signatures` list) or with `verify: false`, so
-check `verified === true`, never `verified !== false`. A malformed `notaryAddress` throws
-`ProvenanceError` with code `INVALID_INPUT`.
+check `verified === true`, never `verified !== false`.
+
+**Errors:**
+
+| Error | Code | When |
+|-------|------|------|
+| `ProvenanceError` | `INVALID_INPUT` | `reference` is not 64 or 128 hex characters (optional `0x`), or `notaryAddress` is malformed (checked unless `verify: false`). Nothing is sent |
+| `GatewayConnectionError` | the gateway's code | The gateway answered with an error status, such as 404. `body` holds the response |
+| `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | The free-tier read was rate limited |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | The success body cannot be read or is not JSON (#173, #179) |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | The body is not an object with string `data` and `content_hash`, directly or under `metadata` (#179) |
+| `ProvenanceError` | `CONTENT_HASH_MISMATCH` | `content_hash` is not the SHA-256 of the base64-decoded `data`. In browsers, `data` that is not valid base64 is also this error |
+
+When the record's hash proves that it is a raw upload (`raw: true`), the error message says
+to use `downloadDocument()` (#190). The code depends on `data`: `INVALID_RESPONSE` when
+`data` is not a string, and `CONTENT_HASH_MISMATCH` when it is a string. A record whose hash
+proves neither format gets no hint. After a paid read (`payForReads`), an `INVALID_RESPONSE`
+or `CONTENT_HASH_MISMATCH` error carries `error.payment`, and its message says that a
+payment was sent (#190).
 
 #### `downloadDocument(reference, options?): Promise<DocumentDownloadResult>`
 
@@ -218,6 +248,24 @@ interface DocumentDownloadResult {
   signatures?: NotarySignature[];
 }
 ```
+
+`verified` works as for `download()`.
+
+**Errors:**
+
+| Error | Code | When |
+|-------|------|------|
+| `ProvenanceError` | `INVALID_INPUT` | `reference` is not 64 or 128 hex characters (optional `0x`), or `notaryAddress` is malformed (checked unless `verify: false`). Nothing is sent |
+| `GatewayConnectionError` | the gateway's code | The gateway answered with an error status, such as 404. `body` holds the response |
+| `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | The free-tier read was rate limited |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | The success body cannot be read or is not JSON (#173, #179) |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | The body is not an object with a `data` field and a string `content_hash`, directly or under `metadata` (#179) |
+| `ProvenanceError` | `CONTENT_HASH_MISMATCH` | `content_hash` is not the SHA-256 of the canonical JSON of `data`, nor of `JSON.stringify(data)` (SDK 0.6.x) |
+
+When the record's hash proves that it is a base64 upload, the `CONTENT_HASH_MISMATCH`
+message says to use `download()` (#190). A record whose hash proves neither format gets no
+hint. After a paid read (`payForReads`), an `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`
+error carries `error.payment`, and its message says that a payment was sent (#190).
 
 ---
 
@@ -311,7 +359,8 @@ interface AcquiredStamp {
 
 ## Errors
 
-All errors extend `ProvenanceError`.
+All errors extend `ProvenanceError`. Errors the SDK raises itself, such as `INVALID_INPUT`
+and `CONTENT_HASH_MISMATCH`, are plain `ProvenanceError` instances.
 
 ### ProvenanceError
 
@@ -321,9 +370,48 @@ Base error class.
 class ProvenanceError extends Error {
   code?: string;
   // Set when the failed request carried an x402 payment: it may have been charged
-  payment?: { paymentSent: true; transaction?: string; status?: string };
+  payment?: PaymentAttempt;
+  // Gateway error responses only: the response body (see below)
+  body?: unknown;
+  // 429 responses only: the wait the gateway asked for in Retry-After, in seconds
+  retryAfterSeconds?: number;
+  // upload() only: the stamp it acquired from the pool before this error
+  stampId?: string;
+  // upload() only: the receipt for the pool stamp it paid for before this error
+  stampPayment?: PaymentReceipt;
 }
 ```
+
+- `body` is set on errors from a gateway error response (#112). It is the parsed JSON if the
+  body is JSON of at most 16384 characters. A larger JSON body, or one that is not JSON, is
+  kept as text, cut to 4096 characters with an ellipsis. Codes and fields that the SDK does
+  not map are here, such as the price options of a 402.
+- `retryAfterSeconds` is set on errors from a 429 response when the gateway sent a
+  `Retry-After` the SDK can read: whole seconds or an HTTP date (#161). It is also set when
+  the SDK did not retry because the wait was longer than 60 seconds. A value above
+  `Number.MAX_SAFE_INTEGER` is not readable, so `retryAfterSeconds` is not set (#185).
+- `stampId` is set on errors from `upload()` after it acquired a stamp from the pool, whether
+  or not the failed request paid. Pass it back as `stampId`. `stampPayment` is set when that
+  stamp was paid for: that payment succeeded.
+
+```typescript
+interface PaymentAttempt {
+  paymentSent: true;
+  transaction?: string;      // settlement transaction, if the gateway reported one
+  status?: string;           // gateway-reported payment status
+  network?: string;          // network the payment was made on
+  payer?: string;            // paying address, from the gateway's receipt
+  amount?: string;           // amount signed, in the token's smallest unit (not proof of a charge)
+  amountDecimal?: string;    // amount in tokens
+  asset?: string;            // token contract
+  replayed?: true;           // the gateway replayed a stored answer for this Idempotency-Key
+  idempotencyKey?: string;   // pass it back as idempotencyKey to retry without paying twice
+  nonce?: string;            // authorization nonce, when the gateway cannot tell if it settled
+  stampId?: string;          // upload() only: pass it back as stampId with idempotencyKey
+}
+```
+
+A failed request that carried a payment is never retried automatically.
 
 ### GatewayConnectionError
 
@@ -331,15 +419,44 @@ Error connecting to or communicating with the gateway.
 
 ```typescript
 class GatewayConnectionError extends ProvenanceError {
-  statusCode?: number;
+  statusCode?: number;   // HTTP status, when there was a response
+  suggestion?: string;   // the gateway's detail.suggestion, if it sent one
+}
+```
+
+| Code | When |
+|------|------|
+| The gateway's code | The gateway answered with an error status. `body` holds the response |
+| `CONNECTION_FAILED` | The request could not be sent or got no response |
+| `TIMEOUT` | The request took longer than `timeout`, or `paidTimeout` for an attempt that may pay or signs an owner proof |
+| `INVALID_RESPONSE` | A success response whose body cannot be read, is not JSON, or does not have the fields the method needs (#173, #179). `statusCode` is the HTTP status |
+
+### PaymentRateLimitError
+
+`code: 'PAYMENT_RATE_LIMIT'`. A request that used the free tier got a 429 rate limit. It is
+not retried. A 429 with a code that is not a rate limit, such as
+`DAILY_STAMP_ALLOWANCE_EXHAUSTED`, is thrown with that code instead, and is not retried
+either.
+
+```typescript
+class PaymentRateLimitError extends PaymentError {
+  retryAfterSeconds?: number;   // from Retry-After, if readable
+  requestsLimit?: number;       // from X-RateLimit-Limit
+  requestsRemaining?: number;   // from X-RateLimit-Remaining
 }
 ```
 
 ### PaymentRefusedError
 
-`code: 'PAYMENT_REFUSED'`. A payment the gateway asked for broke the payment policy or was
-vetoed by `onBeforePayment`; nothing was signed. `refusals` lists each offered option with
-its reasons.
+`code: 'PAYMENT_REFUSED'`. A payment the gateway asked for was refused before it was signed;
+nothing was signed or paid. `refusals` lists each refused option with its reasons. The
+causes are:
+
+- The payment broke the payment policy, or `onBeforePayment` vetoed it.
+- The signature was declined in the wallet (#112). This covers EIP-1193 code `4001`, viem's
+  `UserRejectedRequestError`, and an ethers v6 error with code `ACTION_REJECTED` (#166),
+  anywhere in the error's `cause` chain. Its reason in `refusals` is `'rejected in the wallet'`.
+  `refusals` is empty if the SDK did not record which request was being signed.
 
 ### PaymentConfigurationError
 
@@ -351,13 +468,41 @@ its reasons.
 sent); `code: 'PAYMENT_UNCONFIRMED'` when the payment was sent but the response could not be
 processed (`payment` is set).
 
+### PaymentOutcomeError
+
+A retry of a paid request with the same Idempotency-Key found that the first attempt's
+payment needs a person to follow up (#102). It is never retried automatically. `payment` is
+set.
+
+```typescript
+class PaymentOutcomeError extends PaymentError {
+  outcome: 'unknown' | 'settled_not_delivered' | 'delivered';
+}
+```
+
+| Code | `outcome` | Meaning |
+|------|-----------|---------|
+| `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | `'unknown'` | The payment may or may not have been collected. Check `payment.nonce` on chain before paying again |
+| `IDEMPOTENCY_KEY_SETTLED_PENDING` | `'settled_not_delivered'` | The first attempt was paid (`payment.transaction`) and its result is not available. Ask the gateway operator for the result or a refund |
+| `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | `'delivered'` | The first attempt succeeded and was paid once, but the gateway kept no copy of its response. Do not pay again |
+
 ### StampError
 
-Error related to postage stamps.
+Error related to postage stamps. `acquireStamp()`, and `upload()` without `stampId`, throw it
+for a gateway error from the pool. It keeps the gateway's code, `body`, `payment` and
+`retryAfterSeconds`. The three idempotency stop codes throw `PaymentOutcomeError` instead.
+
+| Code | When |
+|------|------|
+| The gateway's code, else `PAYMENT_REQUIRED` | The pool answered 402 and the SDK did not pay it (no x402 mode, or no `payForPool`). `body` holds the 402 response (#163) |
+| `POOL_EXHAUSTED` | `upload()` found the pool enabled and empty before acquiring |
+| The gateway's code | Any other pool error |
 
 ### NotaryError
 
-Error related to notary signing service.
+Error related to notary signing service. `upload()` with `sign: 'notary'` throws it for a
+gateway error, with the gateway's code, `body`, `payment` and `retryAfterSeconds`. The three
+idempotency stop codes throw `PaymentOutcomeError` instead.
 
 ### VerificationError
 
