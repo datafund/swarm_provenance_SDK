@@ -111,8 +111,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   idempotency key, whether the caller passed the key or the SDK generated it in x402 mode. That
   body is the gateway's own answer, so the retry does not return a valid answer: it gets the same
   answer again, or `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The
-  message says to contact the gateway operator with the transaction instead. A body that could
-  not be read or is not JSON keeps the keyed-retry advice: it is not the gateway's answer. (#107, PR #138; #173, #179, #199)
+  message says to contact the gateway operator with the transaction instead. When `upload()`
+  used a pool stamp, it also says to pass `stampId` back with a new idempotency key, so the
+  stamp is not bought again. A body that could not be read or is not JSON keeps the keyed-retry
+  advice: it is not the gateway's answer. (#107, PR #138; #173, #179, #199)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)

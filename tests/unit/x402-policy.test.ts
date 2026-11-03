@@ -741,6 +741,7 @@ describe('paid requests with a success body that is not the expected shape (#199
       expect(failure.stampId).toBe(POOL_STAMP);
       expect(failure.stampPayment).toBeDefined();
       expect(failure.message).toMatch(/does not return a valid answer\. The payment may have been taken: contact the gateway operator with /);
+      expect(failure.message).toMatch(new RegExp(escape(`. The pool stamp can still be used: to upload without buying another, call upload() again with stampId "${POOL_STAMP}" and a new idempotencyKey`) + '$'));
       expect(failure.message).not.toMatch(OLD_HINT);
       expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/data/']);
     } finally {
