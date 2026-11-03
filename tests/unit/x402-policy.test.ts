@@ -537,6 +537,30 @@ describe('review round 3 (#138)', () => {
   });
 });
 
+describe('paid reads with an unreadable body (#173)', () => {
+  it.each([['download'], ['downloadDocument']] as const)('a paid 200 to %s() that is not JSON keeps the payment flag', async (method) => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('<html>proxy error</html>', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForReads: true })[method]('c'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/a payment was sent with this request and may have been charged/);
+      expect(payments()).toBe(1);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});
+
 describe('review round 4 (#138)', () => {
   it('assetDecimals without asset is rejected (it would rescale the USDC cap)', () => {
     expect(() => client({ maxAmount: '1', assetDecimals: 18 })).toThrow(/only valid together with payment.asset/);

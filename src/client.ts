@@ -205,7 +205,7 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const data = (await response.json()) as GatewayNotaryInfoResponse;
+    const data = await this.readJson<GatewayNotaryInfoResponse>(response);
     const info: NotaryInfo = {
       enabled: data.enabled,
       available: data.available,
@@ -232,7 +232,7 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const data = (await response.json()) as GatewayPoolStatusResponse;
+    const data = await this.readJson<GatewayPoolStatusResponse>(response);
     return {
       enabled: data.enabled,
       available: Object.fromEntries(
@@ -426,7 +426,7 @@ export class ProvenanceClient {
     }
 
     const text = await response.text();
-    const raw = JSON.parse(text) as Record<string, unknown>;
+    const raw = this.parseJson<Record<string, unknown>>(text, response);
     const wrapped = Boolean(raw['metadata'] && typeof raw['metadata'] === 'object');
     const canonicalData = canonicalDataOf(text, wrapped);
 
@@ -760,9 +760,9 @@ export class ProvenanceClient {
     // 1. Wrapped format: {metadata: {...}, signatures: [...]}
     // 2. Direct format: {data: "...", content_hash: "...", stamp_id: "...", signatures?: [...]}
     const text = await response.text();
-    const data = JSON.parse(text) as
-      | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
-      | (ProvenanceMetadata & { signatures?: NotarySignature[] });
+    const data = this.parseJson<
+      { metadata: ProvenanceMetadata; signatures?: NotarySignature[] } | (ProvenanceMetadata & { signatures?: NotarySignature[] })
+    >(text, response);
     const wrapped = Boolean('metadata' in data && data.metadata && typeof data.metadata === 'object');
 
     if ('metadata' in data && wrapped) {
@@ -1057,17 +1057,34 @@ export class ProvenanceClient {
     try {
       return (await response.json()) as T;
     } catch (error) {
-      const failure = new GatewayConnectionError(
-        `Invalid response from gateway: ${error instanceof Error ? error.message : String(error)}`,
-        response.status,
-        'INVALID_RESPONSE'
-      );
-      if (this.paidResponses.has(response)) {
-        failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
-        failure.message += ' (a payment was sent with this request and may have been charged)';
-      }
-      throw failure;
+      throw this.invalidResponse(error, response);
     }
+  }
+
+  /**
+   * Parse a successful response body already read as text (downloads keep the
+   * text for canonical hashing). Fails as readJson does (#173).
+   */
+  private parseJson<T>(text: string, response: Response): T {
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      throw this.invalidResponse(error, response);
+    }
+  }
+
+  /** INVALID_RESPONSE for a success body that is not JSON, flagged if the request was paid */
+  private invalidResponse(error: unknown, response: Response): GatewayConnectionError {
+    const failure = new GatewayConnectionError(
+      `Invalid response from gateway: ${error instanceof Error ? error.message : String(error)}`,
+      response.status,
+      'INVALID_RESPONSE'
+    );
+    if (this.paidResponses.has(response)) {
+      failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
+      failure.message += ' (a payment was sent with this request and may have been charged)';
+    }
+    return failure;
   }
 
   /**

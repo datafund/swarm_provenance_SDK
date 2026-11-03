@@ -88,6 +88,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('notaryInfo', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.notaryInfo().catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should return notary info when available', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -134,6 +145,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('poolStatus', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.poolStatus().catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should return pool status', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -472,6 +494,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('download', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.download('abcd1234'.repeat(8)).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should download and decode content', async () => {
       const contentHash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
       mockFetch.mockResolvedValueOnce({
@@ -757,6 +790,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('downloadDocument (#89)', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.downloadDocument('abcd1234'.repeat(8)).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should download raw JSON document (wrapped format)', async () => {
       const doc = { file_hash: 'abc123', filename: 'test.txt' };
       const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
