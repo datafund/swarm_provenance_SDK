@@ -100,9 +100,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `upload()` now check the fields they read too. `pricing()` needs a boolean `x402_enabled`, and
   optional fields of the right type when present. `acquireStamp()` needs a `batch_id` of 64 hex
   characters, a number `depth` and a string `size_name`. `upload()` needs a `reference` of 64 or
-  128 hex characters, with an optional `0x` prefix. Before, a body of `null` threw a raw `TypeError`, `acquireStamp()` could
-  return `batchId: undefined`, and `upload()` then sent that as its stamp or returned no
-  `reference`. `upload()` no longer sends the data after a malformed pool answer.
+  128 hex characters, with an optional `0x` prefix. Before, a body of `null` threw a raw
+  `TypeError`, `acquireStamp()` could return `batchId: undefined`, and `upload()` then sent that
+  as its stamp or returned no `reference`. `upload()` no longer sends the data after a malformed pool answer.
   `PoolStatus.lowReserveWarning` and `AcquiredStamp.fallbackUsed` are `false` when the gateway
   leaves them out, and `INVALID_RESPONSE` when they are not booleans. A pool `batch_id` is
   lowercased, as a caller's `stampId` is (#168). If the request was paid, the error carries
