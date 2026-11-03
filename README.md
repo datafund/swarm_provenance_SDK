@@ -341,7 +341,7 @@ for a gateway with another limit; it must be a positive integer.
 const result = await client.upload(content, {
   sign?: 'notary',                         // Enable notary signing
   standard?: string,                       // Provenance standard identifier
-  stampId?: string,                        // Use existing stamp (skip pool)
+  stampId?: string,                        // Use existing stamp (skip pool); sent in lowercase, see below
   poolSize?: 'small' | 'medium' | 'large', // Pool size preset
   contentType?: string,                    // Content type
   raw?: boolean,                           // Upload a JSON document without base64 wrapping
@@ -356,6 +356,15 @@ const result = await client.upload(content, {
 //   expiresAt?: string,          // when the stamp runs out (ISO 8601, UTC), if the gateway knows
 // }
 ```
+
+A `stampId` of 64 hex characters is sent in lowercase. Bee batch ids are lowercase, and the
+gateway checks stamp ownership against them without changing the case, so it can refuse a
+mixed-case id with 403 `STAMP_OWNERSHIP_DENIED`. The lowercase id is used everywhere: in the
+`stamp_id` query parameter, in the `stamp_id` field of the metadata stored on Swarm (and so in
+`result.metadata.stamp_id`), in the owner proof, and in `error.payment.stampId` and the retry
+advice. A retry with the same `idempotencyKey` is the same request with either spelling of the
+id. The case of `stamp_id` does not affect verification: `content_hash` and notary signatures
+cover `data` only. Any other `stampId` is sent unchanged, and the gateway refuses it.
 
 ### Owner-proof uploads
 
@@ -419,7 +428,8 @@ How it works:
 - A proof lets whoever holds it make one upload to your stamp. The SDK never puts it in an
   error message. Do not log it.
 - `ownerSigner` requires `stampId`. Without one, or with one that is not 64 hex characters,
-  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything.
+  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything. A mixed-case
+  `stampId` is accepted and sent in lowercase (see "Upload").
 - `ownerSigner` cannot be combined with `idempotencyKey`. The upload is not paid, so the
   gateway does not use the key, and `upload()` throws `INVALID_INPUT` before signing anything.
 - If the signer fails (for example, the user rejects the request) or returns anything other
@@ -1011,6 +1021,10 @@ issue numbers and lists the open release-gate items.
   a payment. An owner-proof upload uses the free tier and never pays, in any payment mode.
   New exports: `Pricing`, `PricingOptions`, `PriceQuote`, `OwnerSigner`, `ownerProofMessage`.
   Uploads without `ownerSigner` are unchanged.
+- `upload()` sends a `stampId` of 64 hex characters in lowercase (#168). 0.6.1 sent it as given,
+  and the gateway's ownership check can refuse a mixed-case id with 403
+  `STAMP_OWNERSHIP_DENIED`, also on paid uploads. The stored metadata's `stamp_id`,
+  `result.metadata.stamp_id` and `error.payment.stampId` are lowercase too.
 - Error handling (#112): gateway errors show the envelope's top-level `message` first, except
   for validation errors (a `detail` list), which list the fields; a `detail` string the message
   lacks is appended, and `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to

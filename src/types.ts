@@ -163,7 +163,11 @@ export interface UploadOptions {
   sign?: 'notary';
   /** Provenance standard identifier */
   standard?: string;
-  /** Use existing stamp ID (skip pool acquisition) */
+  /**
+   * Use existing stamp ID (skip pool acquisition). A 64-hex-character id is
+   * sent and stored in lowercase, as Bee batch ids are: the gateway's
+   * ownership check does not change the case (#168).
+   */
   stampId?: string;
   /** Pool size preset (default: 'small') */
   poolSize?: 'small' | 'medium' | 'large';

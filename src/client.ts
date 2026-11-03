@@ -389,6 +389,13 @@ export class ProvenanceClient {
     // One key for the whole operation: the pool acquisition and the upload are
     // different paths, so the gateway keeps them apart (#102)
     assertOwnerProofOptions(options);
+    // Bee batch ids are lowercase, and the gateway looks the stamp up in its
+    // ownership registry exactly as sent: a mixed-case id is refused there
+    // (#168). Lowercased once, so the query, the body, the owner proof, the
+    // retry advice and a keyed retry all carry the same id.
+    if (options.stampId !== undefined && STAMP_ID.test(options.stampId)) {
+      options = { ...options, stampId: options.stampId.toLowerCase() };
+    }
     // An owner-proof upload is unpaid: no key (#124)
     const idempotencyKey = options.ownerSigner ? undefined : this.operationKey(options.idempotencyKey);
     const metadata = await this.prepareMetadata(content, options);

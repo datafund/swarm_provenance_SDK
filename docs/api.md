@@ -106,7 +106,7 @@ Upload provenance data to Swarm.
 |----------|------|---------|-------------|
 | `sign` | `'notary'` | - | Enable notary signing |
 | `standard` | `string` | - | Provenance standard identifier |
-| `stampId` | `string` | - | Use existing stamp (skip pool) |
+| `stampId` | `string` | - | Use existing stamp (skip pool). 64 hex characters are sent in lowercase |
 | `poolSize` | `'small' \| 'medium' \| 'large'` | `'small'` | Pool size preset |
 | `contentType` | `string` | - | Content type |
 | `raw` | `boolean` | `false` | Upload raw JSON without base64 wrapping |
