@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
+// Node 18 has no global File; node:buffer has it from 18.13
+import { File } from 'node:buffer';
 import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
@@ -2712,7 +2714,7 @@ describe('a Blob or File that cannot be read (#202)', () => {
 
   /** A Blob whose read fails as a browser's does when the picked file changed or was removed */
   function unreadable(kind: 'Blob' | 'File'): Blob {
-    const content = kind === 'File' ? new File(['x'], 'data.bin') : new Blob(['x']);
+    const content = kind === 'File' ? (new File(['x'], 'data.bin') as unknown as Blob) : new Blob(['x']);
     const readError = new DOMException('The requested file could not be read', 'NotReadableError');
     Object.defineProperty(content, 'arrayBuffer', { value: () => Promise.reject(readError) });
     return content;
