@@ -188,8 +188,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `rpcUrl`. Before, viem's plain `Error` escaped. The message does not include the key. (#202)
 - `fromEip1193Provider()` throws `ChainConfigurationError` when the wallet refuses account
   access (`eth_requestAccounts`, for example EIP-1193 code 4001), as for a declined chain
-  switch. It also throws it for an answer that is not a list starting with an address string.
-  Before, the wallet's error escaped as it was. (#202)
+  switch. It also throws it for an answer that is not a list starting with an address (`0x`
+  and 40 hex characters). Before, the wallet's error escaped as it was, and any string was
+  taken as the account. (#202)
 - `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the signer's
   `getAddress()` fails, as writes already did when the signer's `getChainId()` fails. Unlike
   that check, an SDK error from the signer passes through unchanged. Nothing is sent. Before,
