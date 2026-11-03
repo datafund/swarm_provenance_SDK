@@ -594,6 +594,17 @@ describe('paid reads with a body that is not the expected shape (#179)', () => {
 describe('paid requests with a success body that is not the expected shape (#199)', () => {
   const NOTE = /a payment was sent with this request and may have been charged/;
   const SHAPE = /^Invalid response from gateway: expected a JSON object/;
+  const OLD_HINT = /To retry without paying twice/;
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  /** The hint for a malformed paid 200: a keyed retry replays it, so contact the operator */
+  const replayHint = (operation: string, key: string, transaction?: string) =>
+    new RegExp(
+      escape(
+        `The gateway stores its answer for idempotencyKey "${key}", so calling ${operation} again with that key ` +
+          'returns the same malformed answer. The payment may have been taken: contact the gateway operator with ' +
+          (transaction ? `transaction ${transaction}` : 'the idempotency key')
+      ) + '$'
+    );
 
   function expectPaidInvalid(error: unknown): GatewayConnectionError {
     expect(error).toBeInstanceOf(GatewayConnectionError);
@@ -621,26 +632,69 @@ describe('paid requests with a success body that is not the expected shape (#199
     ['{}', {}],
     ['a body without batch_id', { ...POOL_BODY, batch_id: undefined }],
     ['a body whose depth is a string', { ...POOL_BODY, depth: '17' }],
-  ])('a paid 200 to acquireStamp() with %s keeps the payment flag and the retry hint', async (_label, body) => {
+  ])('a paid 200 to acquireStamp() with %s keeps the payment flag and says a keyed retry replays it', async (_label, body) => {
     afterPayment = { status: 200, body };
     const error = await client({ payForPool: true }).acquireStamp('small', { idempotencyKey: 'pool-1' }).catch((e: unknown) => e);
     const failure = expectPaidInvalid(error);
     expect(failure).not.toBeInstanceOf(StampError);
     expect(failure.payment).toMatchObject({ idempotencyKey: 'pool-1' });
-    expect(failure.message).toMatch(/To retry without paying twice, call acquireStamp\(\) again with idempotencyKey "pool-1"$/);
+    expect(failure.message).toMatch(replayHint('acquireStamp()', 'pool-1'));
+    expect(failure.message).not.toMatch(OLD_HINT);
     expect(payments()).toBe(1);
   });
 
   it.each([
     ['{}', {}],
     ['a reference that is not hex', { reference: 'not-a-reference' }],
-  ])('a paid 200 to upload() with %s keeps the payment flag, the stamp and the retry hint', async (_label, body) => {
+  ])('a paid 200 to upload() with %s keeps the payment flag and the stamp, and says a keyed retry replays it', async (_label, body) => {
     afterPayment = { status: 200, body };
     const error = await client().upload('hello', { stampId: STAMP, idempotencyKey: 'up-1' }).catch((e: unknown) => e);
     const failure = expectPaidInvalid(error);
     expect(failure.payment).toEqual({ paymentSent: true, idempotencyKey: 'up-1', stampId: STAMP });
-    expect(failure.message).toMatch(new RegExp(`To retry without paying twice, call upload\\(\\) again with idempotencyKey "up-1" and stampId "${STAMP}"$`));
+    expect(failure.message).toMatch(replayHint('upload()', 'up-1'));
+    expect(failure.message).not.toMatch(OLD_HINT);
     expect(payments()).toBe(1);
+  });
+
+  it.each([
+    ['upload()', (c: ProvenanceClient) => c.upload('hello', { stampId: STAMP, idempotencyKey: 'k-tx' })],
+    ['acquireStamp()', (c: ProvenanceClient) => c.acquireStamp('small', { idempotencyKey: 'k-tx' })],
+  ] as const)('a malformed paid 200 to %s names the transaction to give the operator', async (operation, call) => {
+    const tx = '0x' + '7'.repeat(64);
+    afterPayment = { status: 200, body: {}, headers: { 'X-Payment-Transaction': tx } };
+    const failure = expectPaidInvalid(await call(client({ payForPool: true })).catch((e: unknown) => e));
+    expect(failure.payment).toMatchObject({ transaction: tx });
+    expect(failure.message).toMatch(replayHint(operation, 'k-tx', tx));
+  });
+
+  it.each([
+    ['upload()', (c: ProvenanceClient) => c.upload('hello', { stampId: STAMP, idempotencyKey: 'k-err' }), ` and stampId "${STAMP}"`],
+    ['acquireStamp()', (c: ProvenanceClient) => c.acquireStamp('small', { idempotencyKey: 'k-err' }), ''],
+  ] as const)('a paid request to %s answered with an error status keeps the retry advice', async (operation, call, stamp) => {
+    afterPayment = { status: 500, body: { detail: 'Internal server error during upload' } };
+    const error = (await call(client({ payForPool: true })).catch((e: unknown) => e)) as ProvenanceError;
+    expect(error.payment).toMatchObject({ paymentSent: true, idempotencyKey: 'k-err' });
+    expect(error.message).toMatch(new RegExp(escape(`To retry without paying twice, call ${operation} again with idempotencyKey "k-err"${stamp}`) + '$'));
+    expect(error.message).not.toMatch(/returns the same malformed answer/);
+  });
+
+  it('a paid upload whose 200 is not JSON also says a keyed retry replays it', async () => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'POST', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('<html>proxy error</html>', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = (await client().upload('hello', { stampId: STAMP, idempotencyKey: 'k-html' }).catch((e: unknown) => e)) as GatewayConnectionError;
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect(error.message).toMatch(replayHint('upload()', 'k-html'));
+      expect(error.message).not.toMatch(OLD_HINT);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
   });
 
   it('a paid upload with a paid pool stamp and a malformed 200 keeps both payments', async () => {
@@ -660,7 +714,8 @@ describe('paid requests with a success body that is not the expected shape (#199
       expect(failure.payment).toMatchObject({ stampId: POOL_STAMP, idempotencyKey: ANY_KEY });
       expect(failure.stampId).toBe(POOL_STAMP);
       expect(failure.stampPayment).toBeDefined();
-      expect(failure.message).toMatch(new RegExp(`and stampId "${POOL_STAMP}"$`));
+      expect(failure.message).toMatch(/returns the same malformed answer\. The payment may have been taken: contact the gateway operator with /);
+      expect(failure.message).not.toMatch(OLD_HINT);
       expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/data/']);
     } finally {
       vi.stubGlobal('fetch', gateway);
@@ -672,7 +727,8 @@ describe('paid requests with a success body that is not the expected shape (#199
     const error = await client({ payForPool: true }).upload('hello', { idempotencyKey: 'up-2' }).catch((e: unknown) => e);
     const failure = expectPaidInvalid(error);
     expect(failure.stampId).toBeUndefined();
-    expect(failure.message).toMatch(/To retry without paying twice, call upload\(\) again with idempotencyKey "up-2"$/);
+    expect(failure.message).toMatch(replayHint('upload()', 'up-2'));
+    expect(failure.message).not.toMatch(OLD_HINT);
     expect(seen.some((s) => s.path === '/api/v1/data/')).toBe(false);
     expect(payments()).toBe(1);
   });

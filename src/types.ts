@@ -561,7 +561,8 @@ export interface GatewayPoolStatusResponse {
   current_levels: Record<string, number>;
   available_stamps: Record<string, string[]>;
   total_stamps: number;
-  low_reserve_warning: boolean;
+  /** Absent is read as false (#199) */
+  low_reserve_warning?: boolean;
   last_check: string;
   next_check: string;
   errors: string[];
@@ -571,7 +572,8 @@ export interface GatewayAcquireStampResponse {
   batch_id: string;
   depth: number;
   size_name: string;
-  fallback_used: boolean;
+  /** Absent is read as false (#199) */
+  fallback_used?: boolean;
   expires_at?: string | null;
 }
 

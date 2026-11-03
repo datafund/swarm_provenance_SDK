@@ -2155,7 +2155,6 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
 
   it.each([
     ['pricing', 'x402_enabled that is not a boolean', { ...PRICING, x402_enabled: 'yes' }],
-    ['pricing', 'quotes that is null', { ...PRICING, quotes: null }],
     ['pricing', 'quotes that is an array', { ...PRICING, quotes: [] }],
     ['pricing', 'quote that is not an object', { ...PRICING, quotes: { data_upload: 'cheap' } }],
     ['pricing', 'quote without price_usd', { ...PRICING, quotes: { data_upload: { ...QUOTE, price_usd: undefined } } }],
@@ -2276,6 +2275,8 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
   it('pricing() treats absent quotes and null optional fields as absent', async () => {
     mockFetch.mockResolvedValueOnce(json({ x402_enabled: true, currency: null, pay_to: null, free_tier: null, quotes: { data_upload: null } }));
     expect(await new ProvenanceClient().pricing()).toEqual({ x402Enabled: true, quotes: {} });
+    mockFetch.mockResolvedValueOnce(json({ ...PRICING, quotes: null }));
+    expect((await new ProvenanceClient().pricing()).quotes).toEqual({});
     mockFetch.mockResolvedValueOnce(json({ x402_enabled: false }));
     expect(await new ProvenanceClient().pricing()).toEqual({ x402Enabled: false, quotes: {} });
   });
@@ -2286,7 +2287,7 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
     ['no expires_at', {}, {}],
     ['fallback_used true', { fallback_used: true, depth: 20, size_name: 'medium' }, { fallbackUsed: true, depth: 20, sizeName: 'medium' }],
     ['no fallback_used', { fallback_used: undefined }, { fallbackUsed: false }],
-    ['an uppercase batch_id', { batch_id: 'A'.repeat(64) }, { batchId: 'A'.repeat(64) }],
+    ['an uppercase batch_id, returned in lowercase', { batch_id: 'A'.repeat(64) }, { batchId: 'a'.repeat(64) }],
   ])('acquireStamp() accepts a gateway answer with %s', async (_label, overrides, expected) => {
     mockFetch.mockResolvedValueOnce(json({ ...ACQUIRED, expires_at: undefined, ...overrides }));
     const stamp = await new ProvenanceClient().acquireStamp();
@@ -2312,6 +2313,19 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
     mockFetch.mockResolvedValueOnce(json({ reference: REFERENCE, message: 'ok', expires_at: null }));
     const result = await new ProvenanceClient().upload('hello', { stampId: STAMP_ID, sign: 'notary' });
     expect(result.reference).toBe(REFERENCE);
+  });
+
+  it('upload() sends an uppercase pool batch_id in lowercase, as a caller stampId (#168)', async () => {
+    const upper = 'ABCDEF01'.repeat(8);
+    mockFetch.mockResolvedValueOnce(json(POOL));
+    mockFetch.mockResolvedValueOnce(json({ ...ACQUIRED, batch_id: upper }));
+    mockFetch.mockResolvedValueOnce(json({ reference: REFERENCE }));
+    const result = await new ProvenanceClient().upload('hello');
+    const [url, init] = mockFetch.mock.calls[2] as [string, RequestInit];
+    expect(new URL(url).searchParams.get('stamp_id')).toBe(upper.toLowerCase());
+    const sent = JSON.parse(await ((init.body as FormData).get('file') as Blob).text()) as { stamp_id: string };
+    expect(sent.stamp_id).toBe(upper.toLowerCase());
+    expect(result.metadata.stamp_id).toBe(upper.toLowerCase());
   });
 
   it('upload() from the pool accepts the gateway answers', async () => {

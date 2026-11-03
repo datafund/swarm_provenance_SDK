@@ -1075,7 +1075,8 @@ issue numbers and lists the open release-gate items.
   (#179), and `pricing()`, `acquireStamp()` and `upload()` (#199), also throw `INVALID_RESPONSE`
   for a success body that cannot be read, is not a JSON object, or lacks the fields the method
   needs. Before, a raw `TypeError` escaped, `notaryInfo()` returned empty values, or
-  `acquireStamp()` and `upload()` returned results without a stamp id or reference. `downloadDocument()` reports a record with no `data` field or no `content_hash`
+  `acquireStamp()` and `upload()` returned results without a stamp id or reference.
+  `downloadDocument()` reports a record with no `data` field or no `content_hash`
   as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179). A record in the other method's
   format names the right method: `download()` on a raw upload says to use `downloadDocument()`,
   and `downloadDocument()` on a base64 upload says to use `download()`. The hint is given only

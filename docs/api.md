@@ -18,7 +18,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `timeout` | `number` | `30000` | Request timeout in milliseconds |
 | `paidTimeout` | `number` | `120000`, or `timeout` if that is longer | Timeout in milliseconds for an attempt that may pay (x402 mode: the 402, signing, and the paid request), and for an owner-proof upload |
 | `payment` | `'free' \| 'none' \| X402PaymentConfig` | `'free'` | Payment mode (see below) |
-| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. A 429 whose code is not a rate limit (such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) is not retried. An x402 attempt that sent a payment is not retried, except as described under X402PaymentConfig; unpaid attempts are |
+| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. A delta-seconds value above `Number.MAX_SAFE_INTEGER` cannot be read, so the 429 is retried with the normal backoff, not thrown at once. A 429 whose code is not a rate limit (such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) is not retried. An x402 attempt that sent a payment is not retried, except as described under X402PaymentConfig; unpaid attempts are |
 | `maxUploadBytes` | `number` | `10485760` | Largest upload, in bytes of the uploaded metadata JSON. A larger upload throws `FILE_TOO_LARGE` before a stamp is acquired. With base64, that is about 7.5 MiB of content. A value that is not a positive integer throws `INVALID_INPUT` in the constructor |
 
 #### X402PaymentConfig
@@ -159,9 +159,10 @@ interface PriceQuote {
 
 Quotes follow the current chain price: treat them as current, not guaranteed. An error status
 throws `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError`
-for a rate-limited free-tier request. A success body that cannot be read, is not JSON, or is
-not an object with boolean `x402_enabled` throws `GatewayConnectionError` with code
-`INVALID_RESPONSE` (#173, #199). Optional fields can be absent or `null`. When present, they
+for a rate-limited free-tier request. A success body that cannot be read, is not JSON, or does
+not have the expected shape throws `GatewayConnectionError` with code `INVALID_RESPONSE` (#173,
+#199). The expected shape is an object with boolean `x402_enabled`. Optional fields, `quotes`
+included, can be absent or `null`. When present, they
 must have the type they are copied as, or the call throws `INVALID_RESPONSE`: string
 `currency`, `network`, `asset` and `pay_to`, number `min_price_usd`, `free_tier` with boolean
 `enabled` and string `header`, and `quotes` as an object. Each of the four quotes, when
@@ -191,11 +192,14 @@ only on a paid acquisition. An error status from the pool throws `StampError` (s
 except a rate-limited free-tier request, which throws `PaymentRateLimitError` (`'free'`
 mode), and the three idempotency stop codes after a paid acquisition, which throw
 `PaymentOutcomeError`. A connection failure or timeout throws `GatewayConnectionError`
-(`CONNECTION_FAILED` or `TIMEOUT`). A success body that cannot be read, is not JSON, or is not
-an object with a `batch_id` of 64 hex characters, number `depth` and string `size_name` throws
-`GatewayConnectionError` with code `INVALID_RESPONSE`, not `StampError` (#173, #199). So does
-a `fallback_used` that is present but not a boolean; when it is absent, `fallbackUsed` is
-`false`. After a paid acquisition, the error has `error.payment`. In x402 mode with `payForPool`, the
+(`CONNECTION_FAILED` or `TIMEOUT`). A success body that cannot be read, is not JSON, or does
+not have the expected shape throws `GatewayConnectionError` with code `INVALID_RESPONSE`, not
+`StampError` (#173, #199). The expected shape is an object with a `batch_id` of 64 hex
+characters, number `depth` and string `size_name`, and a boolean `fallback_used` if present.
+When `fallback_used` is absent, `fallbackUsed` is `false`. `batchId` is returned in lowercase,
+as `upload()` sends a caller's `stampId` (#168). After a paid acquisition, the error has
+`error.payment`, and the message says that a retry with the same `idempotencyKey` returns the
+same answer (see `upload()`). In x402 mode with `payForPool`, the
 payment errors listed under `upload()` also apply.
 
 #### `upload(content, options?): Promise<UploadResult>`
@@ -275,7 +279,7 @@ A receipt is present only when the request carried a payment the gateway accepte
 | `NotaryError` | the gateway's code | With `sign: 'notary'`: the upload request got an error status (see NotaryError) |
 | `GatewayConnectionError` | the gateway's code | Without `sign: 'notary'`: the upload request got an error status. `body` holds the response |
 | `GatewayConnectionError` | `CONNECTION_FAILED`, `TIMEOUT` | A request could not be sent, got no response, or timed out. With `ownerSigner`, also a timeout while waiting for the signature or the clock |
-| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body cannot be read or is not JSON (#173). Or the upload's body is not an object with a `reference` of 64 or 128 hex characters, or the pool acquisition's body lacks the fields `acquireStamp()` needs (#199). Also with `sign: 'notary'`. Nothing is uploaded after a malformed pool answer |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body cannot be read, is not JSON, or does not have the expected shape (#173, #199): for the upload, an object with a `reference` of 64 or 128 hex characters; for the pool acquisition, the fields `acquireStamp()` needs. Also with `sign: 'notary'`. Nothing is uploaded after a malformed pool answer |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | A free-tier request (`'free'` mode, or an owner-proof upload) was rate limited |
 | `PaymentConfigurationError` | `PAYMENT_CONFIGURATION` | x402 mode: the `@x402` packages, Web Crypto or the wallet address are missing. Checked on the first request that may pay |
 | `PaymentRefusedError` | `PAYMENT_REFUSED` | x402 mode: the payment was refused before signing |
@@ -289,7 +293,11 @@ An error from the upload request, after `upload()` took a stamp from the pool, h
 has `payment`, with `payment.idempotencyKey`. `payment.stampId` is set only when the upload
 request itself failed; a failed paid pool acquisition inside `upload()` has no
 `payment.stampId`. Pass those back as `idempotencyKey` and `stampId` to retry without paying
-twice; the error message says how.
+twice; the error message says how. The exception is `INVALID_RESPONSE` after a paid request:
+the gateway stores its answer for the key, so a retry with the same `idempotencyKey` returns
+the same malformed answer. The payment may have been taken. The message says to contact the
+gateway operator with `payment.transaction`, or with the idempotency key when the transaction
+is not known (#199).
 
 **Raw mode example:**
 
@@ -559,7 +567,8 @@ class ProvenanceError extends Error {
 - `retryAfterSeconds` is set on errors from a 429 response when the gateway sent a
   `Retry-After` the SDK can read: whole seconds or an HTTP date (#161). It is also set when
   the SDK did not retry because the wait was longer than 60 seconds. A value above
-  `Number.MAX_SAFE_INTEGER` is not readable, so `retryAfterSeconds` is not set (#185).
+  `Number.MAX_SAFE_INTEGER` is not readable, so `retryAfterSeconds` is not set, and the 429 is
+  retried with the normal backoff instead of being thrown at once (#185).
 - `stampId` is set on errors from `upload()` after it acquired a stamp from the pool, whether
   or not the failed request paid. Pass it back as `stampId`. `stampPayment` is set when that
   stamp was paid for: that payment succeeded.
