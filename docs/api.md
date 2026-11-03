@@ -561,6 +561,15 @@ have fields that this version does not document. `instanceof` checks of a subcla
 for errors from another copy. Compare `error.name` or `error.code` when your code can receive
 errors from several copies.
 
+The brand is not a security boundary. Any object can carry the global symbol and pass
+`instanceof ProvenanceError`. If your code receives errors from a source you do not trust,
+check `code` or `name`, and do not trust the other fields of such a value. `instanceof
+ProvenanceError` never throws: a value whose prototype or brand cannot be read, such as a
+`Proxy` whose traps throw, is not a `ProvenanceError`.
+
+A subclass that you define (`class MyError extends ProvenanceError`) keeps its own prototype:
+`new MyError('x') instanceof MyError` is `true`, and its methods work.
+
 ### ProvenanceError
 
 Base error class.

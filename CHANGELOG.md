@@ -281,6 +281,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   that was not `instanceof ProvenanceError`. `ProvenanceError` now also checks a brand keyed by
   `Symbol.for('@datafund/swarm-provenance/ProvenanceError')`, so it also matches errors from
   another copy of the SDK in the process. Subclasses still match by prototype only. (#205)
+- A subclass of an SDK error class keeps its own prototype. Before, the `ProvenanceError`
+  constructor set the prototype to `ProvenanceError.prototype`, so for `class MyError extends
+  ProvenanceError {}`, `new MyError('x') instanceof MyError` was `false` and the methods of
+  `MyError` were missing. The same applied to subclasses of the SDK's other error classes. Error
+  names are unchanged. (#205)
 - An ethers v6 wallet rejection (code `ACTION_REJECTED`) is also `PaymentRefusedError` with code
   `PAYMENT_REFUSED`. Before, it threw `PaymentError` with code `PAYMENT_FAILED`. (#166)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)

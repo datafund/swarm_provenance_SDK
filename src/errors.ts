@@ -58,15 +58,22 @@ export class ProvenanceError extends Error {
    * the package (#205): `/chain` errors too, although that bundle has its own
    * copy of this class. Subclasses (StampError, ChainError, ...) inherit this
    * method but match by prototype only, so they never match across copies.
+   * Never throws: a value whose prototype or brand cannot be read (for example
+   * a Proxy whose traps throw, or a revoked Proxy) is not a ProvenanceError.
    */
   static [Symbol.hasInstance](value: unknown): boolean {
-    if (Function.prototype[Symbol.hasInstance].call(this, value)) return true;
-    return (
-      this === ProvenanceError &&
-      typeof value === 'object' &&
-      value !== null &&
-      (value as Record<symbol, unknown>)[PROVENANCE_ERROR_BRAND] === true
-    );
+    try {
+      if (Function.prototype[Symbol.hasInstance].call(this, value)) return true;
+      // Read the brand as an own data property: no getter or Proxy get trap runs
+      return (
+        this === ProvenanceError &&
+        typeof value === 'object' &&
+        value !== null &&
+        Object.getOwnPropertyDescriptor(value, PROVENANCE_ERROR_BRAND)?.value === true
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -119,7 +126,9 @@ export class ProvenanceError extends Error {
     this.name = 'ProvenanceError';
     // Not enumerable: kept out of keys, JSON and default inspection output
     Object.defineProperty(this, PROVENANCE_ERROR_BRAND, { value: true });
-    Object.setPrototypeOf(this, ProvenanceError.prototype);
+    // new.target, not ProvenanceError: a subclass (the SDK's or a consumer's)
+    // keeps its own prototype and methods. The subclasses need no call of their own.
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
@@ -144,7 +153,6 @@ export class GatewayConnectionError extends ProvenanceError {
   ) {
     super(message, code);
     this.name = 'GatewayConnectionError';
-    Object.setPrototypeOf(this, GatewayConnectionError.prototype);
   }
 }
 
@@ -155,7 +163,6 @@ export class StampError extends ProvenanceError {
   constructor(message: string, code?: string) {
     super(message, code);
     this.name = 'StampError';
-    Object.setPrototypeOf(this, StampError.prototype);
   }
 }
 
@@ -166,7 +173,6 @@ export class NotaryError extends ProvenanceError {
   constructor(message: string, code?: string) {
     super(message, code);
     this.name = 'NotaryError';
-    Object.setPrototypeOf(this, NotaryError.prototype);
   }
 }
 
@@ -177,7 +183,6 @@ export class VerificationError extends ProvenanceError {
   constructor(message: string, code?: string) {
     super(message, code);
     this.name = 'VerificationError';
-    Object.setPrototypeOf(this, VerificationError.prototype);
   }
 }
 
@@ -188,7 +193,6 @@ export class PaymentError extends ProvenanceError {
   constructor(message: string, code?: string) {
     super(message, code);
     this.name = 'PaymentError';
-    Object.setPrototypeOf(this, PaymentError.prototype);
   }
 }
 
@@ -199,7 +203,6 @@ export class PaymentConfigurationError extends PaymentError {
   constructor(message: string) {
     super(message, 'PAYMENT_CONFIGURATION');
     this.name = 'PaymentConfigurationError';
-    Object.setPrototypeOf(this, PaymentConfigurationError.prototype);
   }
 }
 
@@ -219,7 +222,6 @@ export class PaymentRefusedError extends PaymentError {
   ) {
     super(message, 'PAYMENT_REFUSED');
     this.name = 'PaymentRefusedError';
-    Object.setPrototypeOf(this, PaymentRefusedError.prototype);
   }
 }
 
@@ -244,7 +246,6 @@ export class PaymentOutcomeError extends PaymentError {
   ) {
     super(message, code);
     this.name = 'PaymentOutcomeError';
-    Object.setPrototypeOf(this, PaymentOutcomeError.prototype);
   }
 }
 
@@ -260,6 +261,5 @@ export class PaymentRateLimitError extends PaymentError {
   ) {
     super(message, 'PAYMENT_RATE_LIMIT');
     this.name = 'PaymentRateLimitError';
-    Object.setPrototypeOf(this, PaymentRateLimitError.prototype);
   }
 }

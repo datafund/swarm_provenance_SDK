@@ -1,6 +1,27 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { ProvenanceError, StampError, PaymentError, PaymentRefusedError } from '../../src/errors.js';
-import { ChainError, ChainConfigurationError, ChainConnectionError, ReceiptTimeoutError } from '../../src/chain/errors.js';
+import {
+  ProvenanceError,
+  GatewayConnectionError,
+  StampError,
+  NotaryError,
+  VerificationError,
+  PaymentError,
+  PaymentConfigurationError,
+  PaymentRefusedError,
+  PaymentOutcomeError,
+  PaymentRateLimitError,
+} from '../../src/errors.js';
+import {
+  ChainError,
+  ChainConfigurationError,
+  ChainConnectionError,
+  ChainTransactionError,
+  ChainValidationError,
+  DataAlreadyRegisteredError,
+  DataNotRegisteredError,
+  ReceiptTimeoutError,
+  SignerRequiredError,
+} from '../../src/chain/errors.js';
 
 // #205: the main entry and each chain entry are separate bundles, each with its
 // own copy of ProvenanceError. A fresh module graph gives a second copy of the
@@ -89,5 +110,97 @@ describe('instanceof ProvenanceError across copies of the class (#205)', () => {
     } else {
       expect.unreachable();
     }
+  });
+});
+
+describe('instanceof ProvenanceError never throws (#205)', () => {
+  const boom = () => {
+    throw new Error('boom');
+  };
+  const brand = Symbol.for('@datafund/swarm-provenance/ProvenanceError');
+
+  it.each([
+    ['a throwing symbol getter', Object.defineProperty({}, brand, { get: boom })],
+    ['a Proxy whose get and getOwnPropertyDescriptor traps throw', new Proxy({}, { get: boom, getOwnPropertyDescriptor: boom })],
+    ['a Proxy whose getPrototypeOf trap throws', new Proxy({}, { getPrototypeOf: boom })],
+    ['a revoked Proxy', (() => { const p = Proxy.revocable({}, {}); p.revoke(); return p.proxy; })()],
+    ['null', null],
+    ['undefined', undefined],
+    ['a number', 1],
+    ['a string', 'ProvenanceError'],
+    ['a symbol', brand],
+    ['an object with no prototype', Object.create(null)],
+  ])('returns false for %s', (_label, value) => {
+    expect(() => value instanceof ProvenanceError).not.toThrow();
+    expect(value instanceof ProvenanceError).toBe(false);
+    expect(value instanceof other.ProvenanceError).toBe(false);
+  });
+
+  it('does not call a brand getter', () => {
+    const get = vi.fn(() => true);
+    expect(Object.defineProperty({}, brand, { get }) instanceof ProvenanceError).toBe(false);
+    expect(get).not.toHaveBeenCalled();
+  });
+});
+
+describe('subclasses keep their own prototype (#205)', () => {
+  class MyErr extends ProvenanceError {
+    constructor(message: string) {
+      super(message, 'MY_ERR');
+      this.name = 'MyErr';
+    }
+    describe(): string {
+      return `${this.name}: ${this.message}`;
+    }
+  }
+  class MyStampError extends StampError {}
+
+  it('a consumer subclass is instanceof itself and ProvenanceError, with its methods', () => {
+    const error = new MyErr('x');
+    expect(error instanceof MyErr).toBe(true);
+    expect(error instanceof ProvenanceError).toBe(true);
+    expect(error instanceof other.ProvenanceError).toBe(true);
+    expect(error instanceof Error).toBe(true);
+    expect(error.describe()).toBe('MyErr: x');
+    expect(error.name).toBe('MyErr');
+    expect(error.code).toBe('MY_ERR');
+    const stamp = new MyStampError('y');
+    expect(stamp instanceof MyStampError).toBe(true);
+    expect(stamp instanceof StampError).toBe(true);
+    expect(stamp.name).toBe('StampError');
+  });
+
+  it('does not match an unrelated branded error', () => {
+    expect(new other.ProvenanceError('x') instanceof MyErr).toBe(false);
+    expect(new ProvenanceError('x') instanceof MyErr).toBe(false);
+    expect(new StampError('x') instanceof MyErr).toBe(false);
+    expect(new MyErr('x') instanceof StampError).toBe(false);
+  });
+
+  it.each([
+    [new ProvenanceError('x'), [ProvenanceError], 'ProvenanceError'],
+    [new GatewayConnectionError('x'), [GatewayConnectionError, ProvenanceError], 'GatewayConnectionError'],
+    [new StampError('x'), [StampError, ProvenanceError], 'StampError'],
+    [new NotaryError('x'), [NotaryError, ProvenanceError], 'NotaryError'],
+    [new VerificationError('x'), [VerificationError, ProvenanceError], 'VerificationError'],
+    [new PaymentError('x'), [PaymentError, ProvenanceError], 'PaymentError'],
+    [new PaymentConfigurationError('x'), [PaymentConfigurationError, PaymentError, ProvenanceError], 'PaymentConfigurationError'],
+    [new PaymentRefusedError('x'), [PaymentRefusedError, PaymentError, ProvenanceError], 'PaymentRefusedError'],
+    [new PaymentOutcomeError('x', 'C', 'unknown'), [PaymentOutcomeError, PaymentError, ProvenanceError], 'PaymentOutcomeError'],
+    [new PaymentRateLimitError('x'), [PaymentRateLimitError, PaymentError, ProvenanceError], 'PaymentRateLimitError'],
+    [new ChainError('x'), [ChainError, ProvenanceError], 'ChainError'],
+    [new ChainConfigurationError('x'), [ChainConfigurationError, ChainError, ProvenanceError], 'ChainConfigurationError'],
+    [new ChainConnectionError('x'), [ChainConnectionError, ChainError, ProvenanceError], 'ChainConnectionError'],
+    [new ChainTransactionError('x'), [ChainTransactionError, ChainError, ProvenanceError], 'ChainTransactionError'],
+    [new ReceiptTimeoutError('x', '0x1'), [ReceiptTimeoutError, ChainConnectionError, ChainError, ProvenanceError], 'ReceiptTimeoutError'],
+    [new ChainValidationError('x'), [ChainValidationError, ChainError, ProvenanceError], 'ChainValidationError'],
+    [new DataNotRegisteredError('0x1'), [DataNotRegisteredError, ChainError, ProvenanceError], 'DataNotRegisteredError'],
+    [new DataAlreadyRegisteredError('0x1', '', 0, ''), [DataAlreadyRegisteredError, ChainError, ProvenanceError], 'DataAlreadyRegisteredError'],
+    [new SignerRequiredError(), [SignerRequiredError, ChainError, ProvenanceError], 'SignerRequiredError'],
+  ] as const)('SDK error %#: instanceof itself and its parents, name unchanged', (error, classes, name) => {
+    for (const cls of classes) expect(error instanceof cls).toBe(true);
+    expect(error instanceof Error).toBe(true);
+    expect(Object.getPrototypeOf(error)).toBe(classes[0].prototype);
+    expect(error.name).toBe(name);
   });
 });
