@@ -17,7 +17,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `gatewayUrl` | `string` | `https://provenance-gateway.datafund.io` | Gateway URL |
 | `timeout` | `number` | `30000` | Request timeout in milliseconds |
 | `payment` | `'free' \| 'none' \| X402PaymentConfig` | `'free'` | Payment mode (see below) |
-| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). An x402 attempt that sent a payment is never retried; unpaid attempts are |
+| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. An x402 attempt that sent a payment is never retried; unpaid attempts are |
 
 #### X402PaymentConfig
 
@@ -30,6 +30,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `payTo` | `string[]` | any | Allowed recipients |
 | `asset` | `string` | the network's USDC | Token to pay with |
 | `assetDecimals` | `number` | `6`; **required** with `asset` | Decimals of `asset` |
+| `assetDomain` | `{ name: string; version: string }` | known for the network's USDC; **required** with `asset` | EIP-712 domain of `asset` (its `name()` and `version()` on chain). A 402 whose `extra.name` or `extra.version` differs, or is missing, is refused |
 | `maxTimeoutSeconds` | `number` | `600` | Longest authorization validity accepted |
 | `onBeforePayment` | `(p: PaymentRequest) => boolean \| void \| Promise<…>` | none | Return `false` (or throw) to refuse a payment. A payment may still not follow (signing fails, timeout) |
 | `payForReads` | `boolean` | `false` | Pay for GET/HEAD too; otherwise reads use the free tier |
@@ -105,7 +106,7 @@ Upload provenance data to Swarm.
 |----------|------|---------|-------------|
 | `sign` | `'notary'` | - | Enable notary signing |
 | `standard` | `string` | - | Provenance standard identifier |
-| `stampId` | `string` | - | Use existing stamp (skip pool) |
+| `stampId` | `string` | - | Use existing stamp (skip pool). 64 hex characters are sent in lowercase |
 | `poolSize` | `'small' \| 'medium' \| 'large'` | `'small'` | Pool size preset |
 | `contentType` | `string` | - | Content type |
 | `raw` | `boolean` | `false` | Upload raw JSON without base64 wrapping |

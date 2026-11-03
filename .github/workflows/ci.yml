@@ -1,10 +1,17 @@
 name: CI
 
 on:
+  # A push to main runs this workflow through publish.yml (workflow_call),
+  # so it is not listed here. This runs the matrix once per push to main.
   push:
-    branches: [main, development]
+    branches: [development]
   pull_request:
     branches: [main, development]
+  # publish.yml calls this workflow and publishes only if it passes.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -27,7 +34,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Type check
         run: pnpm typecheck

@@ -89,10 +89,15 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `PAYMENT_UNCONFIRMED` and carries `error.payment`. A signature rejected in the wallet throws
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
   catches these. (#106, #107, PR #138; #112)
-- In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()` whose body is
-  not valid JSON throws `GatewayConnectionError` with code `INVALID_RESPONSE`. Before, a raw
-  `SyntaxError` escaped. The other read methods still throw `SyntaxError` (#173).
-  (#107, PR #138)
+- In any mode, a success response whose body is not valid JSON throws `GatewayConnectionError`
+  with code `INVALID_RESPONSE` and the HTTP status. This applies to `pricing()`, `acquireStamp()`,
+  `upload()`, `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`. Before, a
+  raw `SyntaxError` escaped. `download()`, `downloadDocument()`, `notaryInfo()` and
+  `poolStatus()` also throw it for a success body that cannot be read, is not a JSON object, or
+  lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
+  empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
+  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH`. If the request was paid, the error carries
+  `error.payment`. (#107, PR #138; #173, #179)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)
@@ -106,6 +111,11 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   (or `asset` with `assetDecimals`), scheme `exact` with EIP-3009 only, validity up to
   `payment.maxTimeoutSeconds` (default 600), and optional `payTo` and `onBeforePayment`. A
   refused payment throws `PaymentRefusedError`. (#106)
+- The SDK checks the EIP-712 domain the gateway sends (`extra.name` and `extra.version`)
+  before signing. It must be `'USD Coin'` / `'2'` for Base mainnet USDC and `'USDC'` / `'2'`
+  for Base Sepolia USDC, the values on chain. Another domain, or none, is refused with
+  `PaymentRefusedError`. A custom `payment.asset` now also requires
+  `payment.assetDomain: { name, version }`. (#143)
 - An attempt that sent a payment is not retried. Its error carries `error.payment`. (#107)
   The one exception is a paid write answered `IDEMPOTENCY_KEY_IN_PROGRESS` (409) or
   `IDEMPOTENCY_UNAVAILABLE` (503). It is retried with the same key and a new authorization, at
@@ -223,6 +233,14 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `retryAfterSeconds` is undefined, a retry uses the normal backoff, and an
   `IDEMPOTENCY_KEY_IN_PROGRESS` retry waits the 5 s default (before, 30 s). Before, such a value
   was reported as, for example, `1e+23`. (#185)
+- The 429 retry waits at most 60 seconds for `Retry-After`. When a readable header asks for
+  more, the SDK does not wait or retry: it throws the 429 error at once, with the same class
+  and code as when the retries run out. Before, it waited as long as the header said, also for
+  a date far in the future. `health()` returns `false` at once for such a 429. Before, it waited and
+  retried, and could return `true`. (#161)
+- Errors from a 429 with a readable `Retry-After` have `retryAfterSeconds`, the wait in seconds.
+  This includes `GatewayConnectionError` and `StampError`, not only `PaymentRateLimitError`.
+  (#161)
 - `isValidSwarmReference()` accepts 128-character encrypted references and the `0x` prefix.
   (#123)
 - New error codes from the SDK: `PAYMENT_REFUSED` (`PaymentRefusedError`), `PAYMENT_FAILED`,
@@ -233,6 +251,21 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `IDEMPOTENCY_UNAVAILABLE` (retried), `IDEMPOTENCY_KEY_REUSED` and `IDEMPOTENCY_KEY_INVALID`
   (thrown with the gateway's code), and the three stop codes above. (#102)
 - The code `NOT_IMPLEMENTED` is no longer used. (#113)
+- `upload()` sends a `stampId` of 64 hex characters in lowercase, as Bee batch ids are. The
+  gateway checks stamp ownership against the id without changing its case, so a mixed-case id
+  could be refused with 403 `STAMP_OWNERSHIP_DENIED`, on paid and owner-proof uploads alike.
+  The lowercase id is also in the stored metadata's `stamp_id`, in `result.metadata.stamp_id`
+  and in `error.payment.stampId`. A retry with the same `idempotencyKey` matches with either
+  spelling. Verification is not affected: `content_hash` covers `data` only. (#168)
+- A record in the other download method's format names the right method in the error message:
+  `download()` on a raw upload says to use `downloadDocument()`, and `downloadDocument()` on a
+  base64 upload says to use `download()`. The hint is given only when the record's hash proves
+  its format. The codes stay `INVALID_RESPONSE` or `CONTENT_HASH_MISMATCH`. A record whose hash
+  matches neither format gets no hint: the #179 message for non-string `data` in `download()`,
+  else "Content hash verification failed". In browsers, `download()` reports `data` that is not
+  valid base64 as `CONTENT_HASH_MISMATCH`, as in Node.js; before, a raw `InvalidCharacterError`
+  escaped. A `CONTENT_HASH_MISMATCH` after a paid read now carries `error.payment`, as
+  `INVALID_RESPONSE` does. (#190)
 
 ### New
 
@@ -265,6 +298,16 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - A local editor settings file is removed from the repository and ignored. (#121, PR #103)
 - CI runs the payment tests against `@x402/*` 2.23.0 and 2.28.0. (#110)
 - Integration tests use the dev gateway by default. (#119)
+- `publish.yml` publishes to npm only after the `ci.yml` matrix passes for the same commit:
+  Node 18 and 20, and the payment tests against `@x402/*` 2.23.0 and 2.28.0. It installs with
+  `--frozen-lockfile`. `ci.yml` runs with read-only repository access. (#174)
+- `publish.yml` publishes to npm only after the secret scan passes for the pushed commits, and
+  runs only one publish job at a time. The secret scan runs with read-only repository access.
+  (#176)
+- `publish.yml` publishes and tags only if the commit is still the tip of `main`, so an older
+  push whose checks finish later cannot move npm `latest` back. If a version is on npm but its
+  tag is missing on origin, a later run from the tip of `main` pushes the tag without publishing
+  again. (#188, #187)
 
 ### Release gate gaps
 
@@ -278,11 +321,38 @@ The release gate in #129 is not fully met. These items are open:
 - #120 is open. These of its items are not done:
   - The `viem` peer range is still `^2.0.0`. The `@x402/*` range is narrowed.
   - `publish.yml` pins its actions by tag, not by SHA.
-  - `ci.yml` has no `permissions:` block.
   - CI checks are not required on `main`. Its protection has no required status checks, so a
-    merge to `main` can run `publish.yml` before the `ci.yml` matrix has passed.
+    pull request can be merged to `main` before its `ci.yml` checks have passed. `publish.yml`
+    still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- `publish.yml` runs its tests only on Node 24. It does not run the Node 18 and 20 matrix or
-  the `@x402` 2.23.0 and 2.28.0 tests before it publishes. The CI run of the `development` to
-  `main` pull request must cover them.
+- `publish.yml` publishes only from the tip of `main`. A superseded version is not published,
+  even when both commits pass, if the newer commit is pushed before the older commit's
+  tip-check step runs: if commit A sets 0.7.0 and commit B sets 0.7.1, 0.7.0 then never reaches
+  npm. A later commit with the same version publishes that version, from its own code. If the
+  newest commit was pushed before the older commit's tip-check step ran, and it fails its
+  checks or its push starts no run (a skip marker such as `[skip ci]`, or a push made with
+  `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, and branch
+  protection rejects a direct push to `main`. So the recovery is a new commit that a user merges
+  to `main` through a pull request, without a skip marker: for example, an empty commit on a
+  branch cut from `main`, merged to `main` by pull request with a merge commit (not squash or
+  rebase). A `development` → `main` pull request also works, but it also releases what is on
+  `development`. If a failure was flaky, re-run the failed run instead. (#188)
+- A publish run from before this change has no tip check. Do not re-run it. (#188)
+- If a version is on npm but its tag push failed, a later run tags the tip of `main` only if the
+  tip has the same version, so the tag can land on a later commit than the one that published.
+  If the tip has a different version, push the tag by hand. (#188)
+- `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
+  version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
+  and moves `latest` back. The same happens if `main` is force-moved back to an older commit
+  with an unpublished version; branch protection disables force pushes to `main` today, so this
+  needs a protection change first. The workflow cannot publish such a hotfix under another tag.
+  (#188)
+- GitHub keeps at most one pending publish job and cancels it by queue order, not by commit. An
+  older commit's job can cancel the tip commit's pending job, and then the tip check skips the
+  older one, so nothing publishes. If the tip commit's publish run was cancelled, re-run it
+  within GitHub's 30-day re-run window; this is safe because of the tip check. After that, merge
+  a new commit to `main` through a pull request, without a skip marker. `queue: max` would
+  prevent this case. It is not used because GitHub accepting the key is not checked on a real
+  run, and an invalid `publish.yml` would stop both publishing and the secret scan of pushes to
+  `main`. (#187)

@@ -51,6 +51,8 @@ interface Seen {
   nonce?: string;
   /** The uploaded file (the metadata JSON), on uploads */
   file?: string;
+  /** The stamp_id query parameter, when there is one */
+  stampId?: string;
 }
 
 interface Answer {
@@ -86,6 +88,7 @@ const gateway = async (input: string | URL | Request, init?: RequestInit): Promi
   if (request.signal.aborted) throw new DOMException('aborted', 'AbortError');
   const payment = request.headers.get('X-PAYMENT');
   const path = new URL(request.url).pathname;
+  const stampId = new URL(request.url).searchParams.get('stamp_id');
   const file = path === '/api/v1/data/' ? (await request.clone().formData()).get('file') : null;
   seen.push({
     method: request.method,
@@ -94,6 +97,7 @@ const gateway = async (input: string | URL | Request, init?: RequestInit): Promi
     key: request.headers.get('Idempotency-Key'),
     ...(payment ? { nonce: nonceOf(payment) } : {}),
     ...(file instanceof Blob ? { file: await file.text() } : {}),
+    ...(stampId !== null ? { stampId } : {}),
   });
 
   if (request.method === 'GET') {
@@ -281,6 +285,43 @@ describe('metadata built before the stamp is acquired (#112)', () => {
   });
 });
 
+describe('mixed-case stampId on a paid upload (#168)', () => {
+  // Bee batch ids, and so the gateway's ownership registry, are lowercase
+  const MIXED = 'AbCdEf'.padEnd(64, 'a');
+  const LOWER = MIXED.toLowerCase();
+
+  it('sends the lowercase id in the query and the metadata', async () => {
+    const result = await client().upload('hello', { stampId: MIXED });
+
+    const uploads = paid().filter((s) => s.path === '/api/v1/data/');
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]!.stampId).toBe(LOWER);
+    expect((JSON.parse(uploads[0]!.file!) as { stamp_id: string }).stamp_id).toBe(LOWER);
+    expect(result.metadata.stamp_id).toBe(LOWER);
+  });
+
+  it('names the lowercase id in the retry advice; a retry with either spelling is the same request', async () => {
+    paidAnswers = [{ status: 200, hang: true }, { status: 200 }];
+    const first = (await client({ paidTimeout: 100 })
+      .upload({ a: 1 }, { raw: true, stampId: MIXED })
+      .catch((e: unknown) => e)) as GatewayConnectionError;
+
+    expect(first).toBeInstanceOf(GatewayConnectionError);
+    const { idempotencyKey, stampId } = first.payment!;
+    expect(stampId).toBe(LOWER);
+    expect(first.message).toContain(`call upload() again with idempotencyKey "${idempotencyKey}" and stampId "${LOWER}"`);
+
+    // The caller retries with the id as they first gave it
+    await client().upload({ a: 1 }, { raw: true, stampId: MIXED, idempotencyKey: idempotencyKey! });
+
+    const uploads = paid().filter((s) => s.path === '/api/v1/data/');
+    expect(uploads).toHaveLength(2);
+    expect(uploads.map((u) => u.stampId)).toEqual([LOWER, LOWER]);
+    expect(uploads[1]!.key).toBe(uploads[0]!.key);
+    expect(uploads[1]!.file).toBe(uploads[0]!.file);
+  });
+});
+
 describe('review round 2 (#153)', () => {
   it('a retry with a key skips the empty-pool pre-check: the paid stamp is replayed', async () => {
     poolPaid = true;
@@ -408,6 +449,34 @@ describe('retry codes: same key, new authorization', () => {
       await vi.advanceTimersByTimeAsync(1_100);
       await expect(upload).resolves.toMatchObject({ reference: REFERENCE });
       expect(paid()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a paid attempt answered 429 with a long Retry-After is not retried, and has no cap sentence (#161)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      paidAnswers = [
+        {
+          status: 429,
+          headers: { 'Retry-After': '3600' },
+          body: envelope({ code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests.' }),
+        },
+        { status: 200 },
+      ];
+      const upload = client({ paidTimeout: 10 * 60_000 })
+        .upload('hello', { stampId: STAMP })
+        .catch((e: unknown) => e);
+      await vi.waitFor(() => expect(paid()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await upload;
+      expect(paid()).toHaveLength(1);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).statusCode).toBe(429);
+      expect((error as GatewayConnectionError).payment).toBeDefined();
+      expect((error as GatewayConnectionError).retryAfterSeconds).toBe(3600);
+      expect((error as Error).message).not.toContain('did not retry');
     } finally {
       vi.useRealTimers();
     }

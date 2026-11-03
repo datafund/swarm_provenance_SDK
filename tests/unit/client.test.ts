@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
@@ -88,6 +89,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('notaryInfo', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.notaryInfo().catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should return notary info when available', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -134,6 +146,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('poolStatus', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.poolStatus().catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should return pool status', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -228,12 +251,17 @@ describe('ProvenanceClient', () => {
         expect((withCode as StampError).code).toBe('DAILY_STAMP_ALLOWANCE_EXHAUSTED');
         expect((withCode as Error).message).toMatch(/payForPool/);
         expect((withCode as Error).message).toMatch(/stampId/);
+        // The 402's price and quota details stay available (#163)
+        expect((withCode as StampError).body).toEqual({
+          detail: { code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED', message: 'Daily stamp allowance used up.', accepts: [] },
+        });
 
         mockFetch.mockResolvedValueOnce(answer402({ x402Version: 1, error: 'Payment required', accepts: [] }));
         const withoutCode = await client.acquireStamp().catch((e: unknown) => e);
         expect(withoutCode).toBeInstanceOf(StampError);
         expect((withoutCode as StampError).code).toBe('PAYMENT_REQUIRED');
         expect((withoutCode as Error).message).toMatch(/payForPool/);
+        expect((withoutCode as StampError).body).toEqual({ detail: { x402Version: 1, error: 'Payment required', accepts: [] } });
       }
     );
 
@@ -383,6 +411,22 @@ describe('ProvenanceClient', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // No stamp acquisition
     });
 
+    it('sends a mixed-case stampId in lowercase, as Bee batch ids are (#168)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ reference: 'abcd1234'.repeat(8) }),
+      });
+      const mixed = 'ABCDEF'.padEnd(64, '0');
+
+      const result = await new ProvenanceClient().upload('Hello', { stampId: mixed });
+
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(new URL(url).searchParams.get('stamp_id')).toBe(mixed.toLowerCase());
+      const file = (init.body as FormData).get('file') as Blob;
+      expect((JSON.parse(await file.text()) as { stamp_id: string }).stamp_id).toBe(mixed.toLowerCase());
+      expect(result.metadata.stamp_id).toBe(mixed.toLowerCase());
+    });
+
     it('should upload with notary signing (signatures available on download)', async () => {
       // Mock pool status pre-check
       mockFetch.mockResolvedValueOnce({
@@ -467,6 +511,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('download', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.download('abcd1234'.repeat(8)).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should download and decode content', async () => {
       const contentHash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
       mockFetch.mockResolvedValueOnce({
@@ -752,6 +807,17 @@ describe('ProvenanceClient', () => {
   });
 
   describe('downloadDocument (#89)', () => {
+    it('throws INVALID_RESPONSE for a 200 body that is not JSON (#173)', async () => {
+      mockFetch.mockResolvedValueOnce(new Response('<html>proxy error</html>', { status: 200 }));
+
+      const client = new ProvenanceClient();
+      const error = await client.downloadDocument('abcd1234'.repeat(8)).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+    });
+
     it('should download raw JSON document (wrapped format)', async () => {
       const doc = { file_hash: 'abc123', filename: 'test.txt' };
       const contentHash = sha256Hex(toBytes(JSON.stringify(doc)));
@@ -1276,6 +1342,160 @@ describe('ProvenanceClient', () => {
       }
     });
 
+    describe('Retry-After cap (#161)', () => {
+      const NOW = Date.UTC(2026, 10, 2, 12, 0, 0);
+      const rateLimited = (retryAfter?: string, code?: string) =>
+        new Response(JSON.stringify(code ? { code, message: 'Too many requests.' } : { detail: 'Too many requests.' }), {
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: retryAfter === undefined ? {} : { 'Retry-After': retryAfter },
+        });
+      const ok = () => new Response(JSON.stringify({ enabled: true, available: true }), { status: 200 });
+
+      /** Settle state of a promise, without waiting for it */
+      function track<T>(promise: Promise<T>) {
+        const state: { settled: boolean; value?: T; error?: unknown } = { settled: false };
+        promise.then(
+          (value) => Object.assign(state, { settled: true, value }),
+          (error: unknown) => Object.assign(state, { settled: true, error })
+        );
+        return state;
+      }
+
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], now: NOW });
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it.each([
+        ['a large delta-seconds value', '3600', 3600],
+        ['an HTTP date one day ahead', new Date(NOW + 86_400_000).toUTCString(), 86_400],
+      ])('throws at once, without waiting, for %s', async (_label, retryAfter, seconds) => {
+        mockFetch.mockResolvedValueOnce(rateLimited(retryAfter));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.statusCode).toBe(429);
+        expect(error.retryAfterSeconds).toBe(seconds);
+        expect(error.message).toContain(`asked to wait ${seconds} s`);
+        expect(error.message).toContain('60 s');
+      });
+
+      it('throws a pool StampError with the gateway code at once', async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('120', 'RATE_LIMIT_EXCEEDED'));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.acquireStamp());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as StampError;
+        expect(error).toBeInstanceOf(StampError);
+        expect(error.code).toBe('RATE_LIMIT_EXCEEDED');
+        expect(error.retryAfterSeconds).toBe(120);
+        expect(error.message).toContain('asked to wait 120 s');
+      });
+
+      it('waits and retries at exactly 60 s', async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('60'));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(result.settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_100);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(result.error).toBeUndefined();
+        expect(result.value).toEqual({ enabled: true, available: true, address: undefined });
+      });
+
+      it.each([
+        ['0', '0'],
+        ['a past date', new Date(NOW - 60_000).toUTCString()],
+        ['a missing header (backoff)', undefined],
+        ['a negative number (backoff)', '-5'],
+        ['an unparsable value (backoff)', 'soon'],
+      ])('retries without the cap for %s', async (_label, retryAfter) => {
+        mockFetch.mockResolvedValueOnce(rateLimited(retryAfter));
+        mockFetch.mockResolvedValueOnce(ok());
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(result.error).toBeUndefined();
+        expect(result.settled).toBe(true);
+      });
+
+      it('puts retryAfterSeconds on the error after retries run out, without the cap sentence', async () => {
+        mockFetch.mockResolvedValue(rateLimited('1'));
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_100);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.retryAfterSeconds).toBe(1);
+        expect(error.message).not.toContain('did not retry');
+      });
+
+      it("throws a NotaryError for a sign: 'notary' upload at once", async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('120', 'RATE_LIMIT_EXCEEDED'));
+        mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.upload('Hello', { stampId: 'a'.repeat(64), sign: 'notary' }));
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(result.settled).toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as NotaryError;
+        expect(error).toBeInstanceOf(NotaryError);
+        expect(error.code).toBe('RATE_LIMIT_EXCEEDED');
+        expect(error.retryAfterSeconds).toBe(120);
+        expect(error.message).toContain('asked to wait 120 s');
+      });
+
+      it('keeps the cap sentence within the error text cap for a long gateway message', async () => {
+        /** src/client.ts MAX_ERROR_TEXT (not exported): the cap on error messages, in UTF-16 code units */
+        const MAX_ERROR_TEXT = 4096;
+        const longMessage = 'x'.repeat(MAX_ERROR_TEXT - 10);
+        mockFetch.mockResolvedValueOnce(
+          new Response(JSON.stringify({ code: 'RATE_LIMIT_EXCEEDED', message: longMessage }), {
+            status: 429,
+            headers: { 'Retry-After': '3600' },
+          })
+        );
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const result = track(client.notaryInfo());
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        const error = result.error as GatewayConnectionError;
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.message.length).toBeLessThanOrEqual(MAX_ERROR_TEXT);
+        expect(error.message).toMatch(/The SDK did not retry: the gateway asked to wait 3600 s .*See retryAfterSeconds\.$/);
+        expect(error.message.startsWith('xxxx')).toBe(true);
+      });
+
+      it("leaves the free tier as it is: PaymentRateLimitError at once, with retryAfterSeconds", async () => {
+        mockFetch.mockResolvedValueOnce(rateLimited('3600'));
+        const client = new ProvenanceClient({ retry: { maxRetries: 2, baseDelayMs: 1 } });
+        const error = await client.notaryInfo().catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(PaymentRateLimitError);
+        expect((error as PaymentRateLimitError).retryAfterSeconds).toBe(3600);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('should return error response after exhausting retries', async () => {
       // All calls return 503
       mockFetch.mockResolvedValue({
@@ -1747,6 +1967,321 @@ describe('ProvenanceClient', () => {
         expect((error as ProvenanceError).code).toBe('FILE_TOO_LARGE');
         expect((error as Error).message).toMatch(/too large/i);
       });
+    });
+  });
+});
+
+describe('success bodies that are not the expected shape (#179)', () => {
+  const REF = 'abcd1234'.repeat(8);
+  const methods = {
+    download: (c: ProvenanceClient) => c.download(REF),
+    downloadDocument: (c: ProvenanceClient) => c.downloadDocument(REF),
+    notaryInfo: (c: ProvenanceClient) => c.notaryInfo(),
+    poolStatus: (c: ProvenanceClient) => c.poolStatus(),
+  } as const;
+  type Method = keyof typeof methods;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  async function expectInvalid(method: Method, body: string | ReadableStream<Uint8Array>) {
+    mockFetch.mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const error = await methods[method](new ProvenanceClient()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+    expect((error as GatewayConnectionError).statusCode).toBe(200);
+    return error as GatewayConnectionError;
+  }
+
+  const bodies = ['null', '"str"', '42', '[]', '{}'];
+  const cases = (Object.keys(methods) as Method[]).flatMap((m) => bodies.map((b) => [m, b] as const));
+
+  it.each(cases)('%s() with the 200 body %s throws INVALID_RESPONSE', async (method, body) => {
+    const error = await expectInvalid(method, body);
+    expect(error.message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+  });
+
+  it.each([
+    ['download', 'direct body without content_hash', { data: 'aGVsbG8=', stamp_id: 's' }],
+    ['download', 'direct body whose data is not a string', { data: 42, content_hash: '0'.repeat(64) }],
+    ['download', 'wrapped body whose metadata.data is not a string', { metadata: { data: 42, content_hash: '0'.repeat(64) } }],
+    ['downloadDocument', 'direct body without a data field', { content_hash: '0'.repeat(64), stamp_id: 's' }],
+    ['downloadDocument', 'direct body whose content_hash is not a string', { data: { a: 1 }, content_hash: 42 }],
+    ['downloadDocument', 'wrapped body without metadata.content_hash', { metadata: { data: { a: 1 } } }],
+    ['notaryInfo', 'body without available', { enabled: true }],
+    ['notaryInfo', 'body whose enabled is not a boolean', { enabled: 'yes', available: true }],
+    ['poolStatus', 'body whose current_levels is null', { enabled: true, current_levels: null, reserve_config: {}, total_stamps: 1 }],
+    ['poolStatus', 'body without total_stamps', { enabled: true, current_levels: {}, reserve_config: {} }],
+    ['poolStatus', 'body without reserve_config', { enabled: true, current_levels: {}, total_stamps: 1 }],
+  ] as const)('%s() with a %s throws INVALID_RESPONSE', async (method, _label, body) => {
+    await expectInvalid(method, JSON.stringify(body));
+  });
+
+  it.each([['download'], ['downloadDocument']] as const)('%s() turns a body read failure into INVALID_RESPONSE', async (method) => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('connection reset'));
+      },
+    });
+    const error = await expectInvalid(method, stream);
+    expect(error.message).toMatch(/connection reset/);
+  });
+
+  it('notaryInfo() still accepts a disabled notary with a null or absent address', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: false, available: false, address: null, message: 'off' }), { status: 200 }));
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: false, available: false }), { status: 200 }));
+    const client = new ProvenanceClient();
+    expect(await client.notaryInfo()).toEqual({ enabled: false, available: false, address: null, message: 'off' });
+    expect(await client.notaryInfo()).toEqual({ enabled: false, available: false });
+  });
+
+  it('poolStatus() does not require low_reserve_warning or the fields it does not read', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, current_levels: { '17': 2 }, reserve_config: { '17': 1 }, total_stamps: 2 }), { status: 200 }));
+    const status = await new ProvenanceClient().poolStatus();
+    expect(status).toMatchObject({ enabled: true, available: { '17': 2 }, reserve: { '17': 1 }, totalStamps: 2 });
+  });
+
+  it.each([
+    ['an array', '[1,2]', [1, 2]],
+    ['null', 'null', null],
+    ['a number', '5', 5],
+    ['a string', '"x"', 'x'],
+  ])('downloadDocument() returns a raw upload whose data is %s, with a matching hash', async (_label, content, value) => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+    const uploaded = await new ProvenanceClient().upload(content, { raw: true, stampId: 'a'.repeat(64) });
+    const call = mockFetch.mock.calls.at(0) as [string, RequestInit];
+    const stored = await ((call[1].body as FormData).get('file') as Blob).text();
+    mockFetch.mockResolvedValueOnce(new Response(stored, { status: 200 }));
+    const result = await new ProvenanceClient().downloadDocument(REF);
+    expect(result.document).toEqual(value);
+    expect(result.metadata.content_hash).toBe(uploaded.metadata.content_hash);
+  });
+
+  it('download() ignores a wrapped signatures value that is not an array', async () => {
+    const data = 'aGVsbG8=';
+    const metadata = { data, content_hash: sha256Hex(toBytes('hello')), stamp_id: 's' };
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ metadata, signatures: 'abc' }), { status: 200 }));
+    const result = await new ProvenanceClient().download(REF);
+    expect(new TextDecoder().decode(result.file)).toBe('hello');
+    expect(result.signatures).toBeUndefined();
+    expect(result.verified).toBeUndefined();
+  });
+
+  it('downloadDocument() ignores a wrapped signatures value that is not an array', async () => {
+    const doc = { a: 1 };
+    const metadata = { data: doc, content_hash: sha256Hex(toBytes(JSON.stringify(doc))), stamp_id: 's' };
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ metadata, signatures: 'abc' }), { status: 200 }));
+    const result = await new ProvenanceClient().downloadDocument(REF);
+    expect(result.document).toEqual(doc);
+    expect(result.signatures).toBeUndefined();
+    expect(result.verified).toBeUndefined();
+  });
+
+  it('downloadDocument() still reports a well-formed record with a wrong hash as CONTENT_HASH_MISMATCH', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ data: { a: 1 }, content_hash: '0'.repeat(64), stamp_id: 's' }), { status: 200 }));
+    await expect(new ProvenanceClient().downloadDocument(REF)).rejects.toMatchObject({ name: 'ProvenanceError', code: 'CONTENT_HASH_MISMATCH' });
+  });
+
+  it('download() still reports a well-formed record with a wrong hash as CONTENT_HASH_MISMATCH', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ data: 'aGVsbG8=', content_hash: '0'.repeat(64), stamp_id: 's' }), { status: 200 }));
+    await expect(new ProvenanceClient().download(REF)).rejects.toMatchObject({ name: 'ProvenanceError', code: 'CONTENT_HASH_MISMATCH' });
+  });
+});
+
+describe('wrong download method for the record format (#190)', () => {
+  const REF = 'abcd1234'.repeat(8);
+  const TO_DOCUMENT = /use downloadDocument\(\) for raw uploads/;
+  const TO_DOWNLOAD = /use download\(\) for base64 uploads/;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  /** Upload content and return the record body the gateway stored */
+  async function stored(content: unknown, raw: boolean): Promise<string> {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ reference: 'b'.repeat(64) }), { status: 200 }));
+    await new ProvenanceClient().upload(content as string, raw ? { raw: true, stampId: 'a'.repeat(64) } : { stampId: 'a'.repeat(64) });
+    const call = mockFetch.mock.calls.at(0) as [string, RequestInit];
+    const body = await ((call[1].body as FormData).get('file') as Blob).text();
+    mockFetch.mockReset();
+    return body;
+  }
+
+  /** A 200 response as a plain object: Response itself needs Buffer, which one block removes */
+  const ok = (body: string) => ({ ok: true, status: 200, headers: new Headers(), text: () => Promise.resolve(body) });
+
+  /**
+   * Run a download without Buffer, so that utils.base64ToBytes decodes with
+   * atob as in browsers. Buffer is back before any assertion runs.
+   */
+  async function withoutBuffer<T>(run: () => Promise<T>): Promise<T> {
+    const saved = globalThis.Buffer;
+    (globalThis as { Buffer?: unknown }).Buffer = undefined;
+    try {
+      return await run();
+    } finally {
+      globalThis.Buffer = saved;
+    }
+  }
+
+  async function failure(method: 'download' | 'downloadDocument', body: string, browser = false): Promise<ProvenanceError> {
+    mockFetch.mockResolvedValueOnce(ok(body));
+    const client = new ProvenanceClient();
+    const run = () => (method === 'download' ? client.download(REF) : client.downloadDocument(REF)).catch((e: unknown) => e);
+    const error = await (browser ? withoutBuffer(run) : run());
+    expect(error).toBeInstanceOf(ProvenanceError);
+    return error as ProvenanceError;
+  }
+
+  const wrap = (body: string) => {
+    const { signatures, ...metadata } = JSON.parse(body) as Record<string, unknown>;
+    return JSON.stringify(signatures === undefined ? { metadata } : { metadata, signatures });
+  };
+
+  it.each([
+    ['a file', 'hello'],
+    ['a file that is JSON text', '{"a":1}'],
+  ])('downloadDocument() on a base64 upload of %s names download()', async (_label, content) => {
+    const body = await stored(content, false);
+    for (const record of [body, wrap(body)]) {
+      const error = await failure('downloadDocument', record);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOWNLOAD);
+      expect(error.message).not.toMatch(/^Content hash verification failed/);
+    }
+  });
+
+  it.each([
+    ['an object', { a: 1 }],
+    ['an array', '[1,2]'],
+    ['null', 'null'],
+    ['a number', '5'],
+    ['true', 'true'],
+    ['false', 'false'],
+  ])('download() on a raw upload whose data is %s names downloadDocument()', async (_label, content) => {
+    const body = await stored(content, true);
+    for (const record of [body, wrap(body)]) {
+      const error = await failure('download', record);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect(error.message).toMatch(TO_DOCUMENT);
+      expect(error.message).not.toMatch(/^Invalid response from gateway/);
+    }
+  });
+
+  it('download() on a raw upload whose data is a JSON string names downloadDocument()', async () => {
+    const body = await stored('"x"', true);
+    expect((JSON.parse(body) as { data: unknown }).data).toBe('x');
+    for (const record of [body, wrap(body)]) {
+      const error = await failure('download', record);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOCUMENT);
+    }
+  });
+
+  it('a tampered base64 record through download() keeps the plain CONTENT_HASH_MISMATCH', async () => {
+    const error = await failure('download', JSON.stringify({ data: 'aGVsbG8=', content_hash: '0'.repeat(64), stamp_id: 's' }));
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toBe('Content hash verification failed');
+  });
+
+  it('a tampered raw record through downloadDocument() keeps the plain CONTENT_HASH_MISMATCH', async () => {
+    const error = await failure('downloadDocument', JSON.stringify({ data: { a: 1 }, content_hash: '0'.repeat(64), stamp_id: 's' }));
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toBe('Content hash verification failed');
+  });
+
+  it.each([['download'], ['downloadDocument']] as const)(
+    'a string-data record that matches neither format through %s() keeps the plain CONTENT_HASH_MISMATCH',
+    async (method) => {
+      const error = await failure(method, JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' }));
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toBe('Content hash verification failed');
+    }
+  );
+
+  it('a tampered raw record with non-string data through download() keeps the #179 shape message, no hint', async () => {
+    for (const record of [
+      { data: { a: 2 }, content_hash: '0'.repeat(64), stamp_id: 's' },
+      { metadata: { data: [1, 2], content_hash: sha256Hex(toBytes('[1,3]')), stamp_id: 's' } },
+    ]) {
+      const error = await failure('download', JSON.stringify(record));
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect(error.message).toMatch(/^Invalid response from gateway: expected a JSON object with string "data"/);
+      expect(error.message).not.toMatch(TO_DOCUMENT);
+    }
+  });
+
+  /**
+   * A notary fixture (direct format) and the same record in the wrapped format.
+   * The wrapped text is built from the fixture text, not with JSON.stringify,
+   * so 2.0 and big integers in the raw fixture stay as they are.
+   */
+  function signedRecords(name: string): string[] {
+    const direct = readFileSync(new URL(`../fixtures/notary/${name}`, import.meta.url), 'utf8');
+    const at = direct.lastIndexOf('"signatures"');
+    const fields = direct.slice(0, at).trimEnd().replace(/,$/, '');
+    const wrapped = `{"metadata": ${fields}\n}, ${direct.slice(at)}`;
+    const parsed = JSON.parse(wrapped) as { metadata: Record<string, unknown>; signatures: unknown[] };
+    expect(Object.keys(parsed)).toEqual(['metadata', 'signatures']);
+    expect(parsed.metadata['content_hash']).toBe((JSON.parse(direct) as Record<string, unknown>)['content_hash']);
+    return [direct, wrapped];
+  }
+
+  it('a notary-signed raw record through download() names downloadDocument(), direct and wrapped', async () => {
+    // The fixture holds 2.0 and a big integer: the raw hash check needs the lossless canonical text
+    for (const record of signedRecords('raw-document.json')) {
+      expect(record).toContain('2.0');
+      const error = await failure('download', record);
+      expect(error.code).toBe('INVALID_RESPONSE');
+      expect(error.message).toMatch(TO_DOCUMENT);
+    }
+  });
+
+  it('a notary-signed base64 record through downloadDocument() names download(), direct and wrapped', async () => {
+    for (const record of signedRecords('base64-document.json')) {
+      const error = await failure('downloadDocument', record);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOWNLOAD);
+    }
+  });
+
+  it('a record without a string content_hash through download() keeps the #179 shape message', async () => {
+    const error = await failure('download', JSON.stringify({ data: { a: 1 }, stamp_id: 's' }));
+    expect(error.code).toBe('INVALID_RESPONSE');
+    expect(error.message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+    expect(error.message).not.toMatch(TO_DOCUMENT);
+  });
+
+  describe('without Buffer (the browser atob decoder)', () => {
+    it('download() on a raw string record that atob cannot decode names downloadDocument()', async () => {
+      const body = JSON.stringify({ data: 'x', content_hash: sha256Hex(toBytes('"x"')), stamp_id: 's' });
+      expect(() => atob('x')).toThrow();
+      const error = await failure('download', body, true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOCUMENT);
+    });
+
+    it('download() on a record that atob cannot decode and that is not raw throws CONTENT_HASH_MISMATCH, as with Buffer', async () => {
+      const error = await failure('download', JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' }), true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toBe('Content hash verification failed');
+    });
+
+    it('downloadDocument() on a base64 record decoded with atob names download()', async () => {
+      const body = JSON.stringify({ data: 'aGVsbG8=', content_hash: sha256Hex(toBytes('hello')), stamp_id: 's' });
+      const error = await failure('downloadDocument', body, true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toMatch(TO_DOWNLOAD);
+    });
+
+    it('downloadDocument() on a string record that atob cannot decode keeps the plain CONTENT_HASH_MISMATCH', async () => {
+      const error = await failure('downloadDocument', JSON.stringify({ data: 'x', content_hash: '0'.repeat(64), stamp_id: 's' }), true);
+      expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+      expect(error.message).toBe('Content hash verification failed');
     });
   });
 });

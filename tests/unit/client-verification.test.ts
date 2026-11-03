@@ -205,11 +205,11 @@ describe('review round 1 (#135)', () => {
     expect((await new ProvenanceClient().download(REF)).verified).toBe(true);
   });
 
-  it('a document with no data field fails with CONTENT_HASH_MISMATCH, not a TypeError', async () => {
+  it('a document with no data field fails with INVALID_RESPONSE, not a TypeError (#179)', async () => {
     serve(JSON.stringify({ content_hash: '0'.repeat(64), stamp_id: 'c'.repeat(64) }));
     await expect(new ProvenanceClient().downloadDocument(REF)).rejects.toMatchObject({
-      name: 'ProvenanceError',
-      code: 'CONTENT_HASH_MISMATCH',
+      name: 'GatewayConnectionError',
+      code: 'INVALID_RESPONSE',
     });
   });
 

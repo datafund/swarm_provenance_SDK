@@ -72,14 +72,17 @@ or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing 
 |--------|---------|--------|
 | `maxAmount` | `'1'` on Base Sepolia with test USDC; **required everywhere else** | Largest single payment, in tokens (`'0.50'` = 50 cents of USDC) |
 | `payTo` | any | Allowed recipients |
-| `asset` + `assetDecimals` | the network's USDC (6) | Token to pay with; both required on networks without a known USDC |
+| `asset` + `assetDecimals` + `assetDomain` | the network's USDC (6) | Token to pay with, its decimals and its EIP-712 domain (`{ name, version }`, the token's `name()` and `version()` on chain). All three are required with a custom token, and on networks without a known USDC |
 | `maxTimeoutSeconds` | `600` | Longest authorization validity the gateway may ask for |
 | `onBeforePayment` | none | `(payment) => boolean`: sees amount, asset, recipient, network; return `false` to refuse. A payment may still not happen after it (signing fails, timeout): do not count spend here |
 | `payForReads` | `false` | Also pay for reads; by default reads use the free tier (`X-Payment-Mode: free`, rate-limited) |
 | `payForPool` | `false` | Also pay for pool stamps when the gateway asks for payment; by default that 402 is not paid (see below) |
 
 Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Permit2
-approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
+approvals). The EIP-712 domain in the 402 (`extra.name` and `extra.version`) must be the
+token's own: `'USD Coin'` / `'2'` for Base mainnet USDC, `'USDC'` / `'2'` for Base Sepolia
+USDC, or `assetDomain` for a custom token. A 402 with another domain, or with none, is
+refused before signing. A payment signed over a wrong domain would fail at the facilitator. Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
 
 **Pool stamps are not paid unless you set `payForPool`.** `acquireStamp()` and `upload()` without
 `stampId` take a stamp from the gateway's pool, which is free within a daily allowance. Callers
@@ -338,7 +341,7 @@ for a gateway with another limit; it must be a positive integer.
 const result = await client.upload(content, {
   sign?: 'notary',                         // Enable notary signing
   standard?: string,                       // Provenance standard identifier
-  stampId?: string,                        // Use existing stamp (skip pool)
+  stampId?: string,                        // Use existing stamp (skip pool); sent in lowercase, see below
   poolSize?: 'small' | 'medium' | 'large', // Pool size preset
   contentType?: string,                    // Content type
   raw?: boolean,                           // Upload a JSON document without base64 wrapping
@@ -353,6 +356,15 @@ const result = await client.upload(content, {
 //   expiresAt?: string,          // when the stamp runs out (ISO 8601, UTC), if the gateway knows
 // }
 ```
+
+A `stampId` of 64 hex characters is sent in lowercase. Bee batch ids are lowercase, and the
+gateway checks stamp ownership against them without changing the case, so it can refuse a
+mixed-case id with 403 `STAMP_OWNERSHIP_DENIED`. The lowercase id is used everywhere: in the
+`stamp_id` query parameter, in the `stamp_id` field of the metadata stored on Swarm (and so in
+`result.metadata.stamp_id`), in the owner proof, and in `error.payment.stampId` and the retry
+advice. A retry with the same `idempotencyKey` is the same request with either spelling of the
+id. The case of `stamp_id` does not affect verification: `content_hash` and notary signatures
+cover `data` only. Any other `stampId` is sent unchanged, and the gateway refuses it.
 
 ### Owner-proof uploads
 
@@ -416,7 +428,8 @@ How it works:
 - A proof lets whoever holds it make one upload to your stamp. The SDK never puts it in an
   error message. Do not log it.
 - `ownerSigner` requires `stampId`. Without one, or with one that is not 64 hex characters,
-  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything.
+  `upload()` throws `ProvenanceError` (`INVALID_INPUT`) before signing anything. A mixed-case
+  `stampId` is accepted and sent in lowercase (see "Upload").
 - `ownerSigner` cannot be combined with `idempotencyKey`. The upload is not paid, so the
   gateway does not use the key, and `upload()` throws `INVALID_INPUT` before signing anything.
 - If the signer fails (for example, the user rejects the request) or returns anything other
@@ -590,10 +603,19 @@ How a 429 is handled depends on its code and on the request:
 
 | 429 | `'free'` mode, and unpaid reads in x402 mode | `'none'` mode, and x402 writes |
 |---|---|---|
-| A rate limit: `RATE_LIMIT_EXCEEDED`, `HTTP_429` (the free tier), or no code | `PaymentRateLimitError` after one request, not retried | Retried up to `retry.maxRetries` times, waiting `Retry-After` when sent; then the gateway error with its code (`StampError` from `acquireStamp()` and `upload()`'s pool acquisition, else `GatewayConnectionError`) |
+| A rate limit: `RATE_LIMIT_EXCEEDED`, `HTTP_429` (the free tier), or no code | `PaymentRateLimitError` after one request, not retried | Retried up to `retry.maxRetries` times, waiting `Retry-After` when sent (at most 60 s, see below); then the gateway error with its code (`StampError` from `acquireStamp()` and `upload()`'s pool acquisition, else `GatewayConnectionError`) |
 | Any other code, such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED` (a quota) | The gateway error with its code, at once | The gateway error with its code, at once |
 
 A request that sent a payment is never retried for a 429.
+
+The SDK waits at most 60 seconds for a `Retry-After` before it retries a 429 (#161). If
+`Retry-After` asks for more than 60 seconds (delta-seconds or an HTTP date), the SDK does not wait
+and does not retry. It throws the same error it throws when the retries run out, at once, and the
+message says why. A wait of exactly 60 seconds is still honoured. The cap is fixed; it is not part
+of the `retry` options. The backoff without `Retry-After` (`retry.baseDelayMs`) is not capped.
+
+Every error from a 429 with a readable `Retry-After` has `retryAfterSeconds`: the wait the gateway
+asked for, in seconds. Use it to decide when to try again.
 
 ## Advanced Usage
 
@@ -885,6 +907,11 @@ issue numbers and lists the open release-gate items.
   `PaymentRateLimitError.retryAfterSeconds` was `NaN`. A value that is neither seconds nor a
   date now falls back to the normal backoff. This includes a non-integer value such as `"1.5"`:
   RFC 9110 allows only whole delta-seconds. Before, `parseInt` read it as 1 second.
+- The 429 retry waits at most 60 seconds for `Retry-After` (#161). A longer wait is not taken:
+  the 429 error is thrown at once, with `retryAfterSeconds`. Before, the SDK waited as long as
+  the header said. Every SDK error from a 429 with a readable `Retry-After` now has
+  `retryAfterSeconds`, not only `PaymentRateLimitError`. `health()` returns `false` at once
+  for such a 429. Before, it waited and retried, and could return `true`.
 - Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
   transaction with that nonce is already pending, and a resend could write twice. That error and
   "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
@@ -968,7 +995,8 @@ issue numbers and lists the open release-gate items.
   and `v1Network` that disagree, or a lone unknown `v1Network`, are configuration errors. The
   default stays Base Sepolia.
 - x402 mode enforces a payment policy (#106): `maxAmount` (default `'1'` on Base Sepolia test
-  USDC, required elsewhere), USDC only (or `asset` + `assetDecimals`), `exact`/EIP-3009 only,
+  USDC, required elsewhere), USDC only (or `asset` + `assetDecimals` + `assetDomain`), the
+  token's EIP-712 domain (#143), `exact`/EIP-3009 only,
   validity up to `maxTimeoutSeconds` (default 600 s, configurable), optional `payTo` and
   `onBeforePayment`. Refusals throw
   `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
@@ -1007,6 +1035,10 @@ issue numbers and lists the open release-gate items.
   a payment. An owner-proof upload uses the free tier and never pays, in any payment mode.
   New exports: `Pricing`, `PricingOptions`, `PriceQuote`, `OwnerSigner`, `ownerProofMessage`.
   Uploads without `ownerSigner` are unchanged.
+- `upload()` sends a `stampId` of 64 hex characters in lowercase (#168). 0.6.1 sent it as given,
+  and the gateway's ownership check can refuse a mixed-case id with 403
+  `STAMP_OWNERSHIP_DENIED`, also on paid uploads. The stored metadata's `stamp_id`,
+  `result.metadata.stamp_id` and `error.payment.stampId` are lowercase too.
 - Error handling (#112): gateway errors show the envelope's top-level `message` first, except
   for validation errors (a `detail` list), which list the fields; a `detail` string the message
   lacks is appended, and `{detail: {error, detail}}` shows both texts. Errors gain `body` (parsed JSON, or text up to
@@ -1025,9 +1057,22 @@ issue numbers and lists the open release-gate items.
   (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
   sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
-  catches these. In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()`
-  that is not valid JSON throws `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw
-  `SyntaxError` (the other read methods still throw `SyntaxError`; #173).
+  catches these. In any mode, a success response that is not valid JSON throws
+  `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`. This applies to
+  `pricing()`, `acquireStamp()`, `upload()`, `download()`, `downloadDocument()`, `notaryInfo()`
+  and `poolStatus()` (#173). `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`
+  also throw `INVALID_RESPONSE` for a success body that cannot be read, is not a JSON object, or
+  lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
+  empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
+  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179). A record in the other method's
+  format names the right method: `download()` on a raw upload says to use `downloadDocument()`,
+  and `downloadDocument()` on a base64 upload says to use `download()`. The hint is given only
+  when the record's hash proves its format, and the codes stay `INVALID_RESPONSE` or
+  `CONTENT_HASH_MISMATCH`. A record whose hash matches neither format gets no hint: the
+  #179 message for non-string `data` in `download()`, else "Content hash verification failed".
+  In browsers, `download()` reports `data` that is not valid base64 as `CONTENT_HASH_MISMATCH`,
+  as in Node.js, not as a raw `InvalidCharacterError`. A `CONTENT_HASH_MISMATCH` after a paid
+  read also carries `error.payment` (#190).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
