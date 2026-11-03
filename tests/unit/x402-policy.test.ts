@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
 import { UserRejectedRequestError } from 'viem';
+import { x402Client } from '@x402/fetch';
 import {
   GatewayConnectionError,
   PaymentConfigurationError,
@@ -1059,5 +1060,89 @@ describe('EIP-712 domain of the asset (#143)', () => {
     seen = [];
     accepts = [requirement({ asset: TOKEN, extra: { name: 'USDC', version: '2' } })];
     await expectRefusedUnsigned(paying(config).upload('hello', { stampId: STAMP }), /is not the expected "Token" version "1"/);
+  });
+});
+
+describe('the before-signing hook re-checks the EIP-712 domain (#182)', () => {
+  // The 402 offers a correct option, so the first gate (policePaymentRequired)
+  // approves it. The library then hands the hook an option with another
+  // domain: the case the hook guards against. The real createPaymentPayload
+  // runs, with only the extra of each option replaced.
+  type PaymentRequired = Parameters<x402Client['createPaymentPayload']>[0];
+  /** The real method, read before any spy replaces it */
+  const original = Object.getOwnPropertyDescriptor(x402Client.prototype, 'createPaymentPayload')!.value as (
+    this: x402Client,
+    paymentRequired: PaymentRequired,
+  ) => ReturnType<x402Client['createPaymentPayload']>;
+
+  let signed: Array<Record<string, unknown>>;
+  const recording = {
+    ...wallet,
+    signTypedData: (args: Parameters<typeof wallet.signTypedData>[0]) => {
+      signed.push({ ...(args.domain as Record<string, unknown>) });
+      return wallet.signTypedData(args);
+    },
+  };
+  const paying = () => new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: recording } });
+
+  /** Replace extra on every option the library sees, then run the real method */
+  function selectWithExtra(extra?: Record<string, unknown>) {
+    return vi.spyOn(x402Client.prototype, 'createPaymentPayload').mockImplementation(function (
+      this: x402Client,
+      paymentRequired: PaymentRequired,
+    ) {
+      const changed = extra ? { ...paymentRequired, accepts: paymentRequired.accepts.map((o) => ({ ...o, extra })) } : paymentRequired;
+      return original.call(this, changed);
+    });
+  }
+
+  const v2 = {
+    scheme: 'exact',
+    network: 'eip155:84532',
+    amount: '10000',
+    asset: USDC_SEPOLIA,
+    payTo: GATEWAY_PAYTO,
+    maxTimeoutSeconds: 60,
+    extra: { name: 'USDC', version: '2' },
+  };
+
+  beforeEach(() => {
+    signed = [];
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([1, 2] as const)('x402 v%i: pays when the library keeps the approved domain (control)', async (version) => {
+    protocol = version;
+    if (version === 2) accepts = [v2];
+    const spy = selectWithExtra(undefined);
+    await paying().upload('hello', { stampId: STAMP });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(signed).toEqual([expect.objectContaining({ name: 'USDC', version: '2', chainId: 84532 })]);
+    expect(payments()).toBe(1);
+  });
+
+  it.each(
+    ([1, 2] as const).flatMap((version) => [
+      [version, 'a wrong name', { name: 'USD Coin', version: '2' }, /is not the expected "USDC" version "2"/],
+      [version, 'a wrong version', { name: 'USDC', version: '1' }, /is not the expected "USDC" version "2"/],
+      [version, 'no name', { version: '2' }, /no EIP-712 domain/],
+      [version, 'no version', { name: 'USDC' }, /no EIP-712 domain/],
+    ] as const),
+  )('x402 v%i: refuses a selected option with %s before signing', async (version, _label, extra, reason) => {
+    protocol = version;
+    if (version === 2) accepts = [v2];
+    const spy = selectWithExtra(extra);
+    const error = await paying()
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    // The first gate let the option through: the library was asked to create the payment
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(reason);
+    expect(signed).toEqual([]);
+    expect(payments()).toBe(0);
   });
 });
