@@ -229,10 +229,14 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - A `Retry-After` header given as an HTTP date is honoured. (#123)
 - A `Retry-After` value that is neither whole seconds nor a date, such as `"1.5"`, falls back to
   the normal backoff. Before, `"1.5"` was read as 1 second. (#123)
-- The 429 retry waits at most 60 seconds for `Retry-After`. When the header asks for more, the
-  SDK does not wait or retry: it throws the 429 error at once, with the same class and code as
-  when the retries run out. Before, it waited as long as the header said, also for a date far
-  in the future. `health()` returns `false` at once for such a 429. Before, it waited and
+- A `Retry-After` delta-seconds value above `Number.MAX_SAFE_INTEGER` is treated as unreadable:
+  `retryAfterSeconds` is undefined, a retry uses the normal backoff, and an
+  `IDEMPOTENCY_KEY_IN_PROGRESS` retry waits the 5 s default (before, 30 s). Before, such a value
+  was reported as, for example, `1e+23`. (#185)
+- The 429 retry waits at most 60 seconds for `Retry-After`. When a readable header asks for
+  more, the SDK does not wait or retry: it throws the 429 error at once, with the same class
+  and code as when the retries run out. Before, it waited as long as the header said, also for
+  a date far in the future. `health()` returns `false` at once for such a 429. Before, it waited and
   retried, and could return `true`. (#161)
 - Errors from a 429 with a readable `Retry-After` have `retryAfterSeconds`, the wait in seconds.
   This includes `GatewayConnectionError` and `StampError`, not only `PaymentRateLimitError`.

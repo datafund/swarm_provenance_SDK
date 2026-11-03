@@ -1118,6 +1118,19 @@ describe('ProvenanceClient', () => {
       }
     });
 
+    it('gives retryAfterSeconds undefined for a Retry-After above Number.MAX_SAFE_INTEGER (#185)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({ 'Retry-After': '99999999999999999999999' }),
+      });
+      const error = await new ProvenanceClient().notaryInfo().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PaymentRateLimitError);
+      expect((error as PaymentRateLimitError).retryAfterSeconds).toBeUndefined();
+      expect((error as PaymentRateLimitError).message).not.toContain('e+');
+    });
+
     it('should include retry metadata in PaymentRateLimitError', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -1299,6 +1312,29 @@ describe('ProvenanceClient', () => {
         await vi.advanceTimersByTimeAsync(2_000);
         expect(mockFetch).toHaveBeenCalledTimes(1);
         await vi.advanceTimersByTimeAsync(1_100);
+        await expect(health).resolves.toBe(true);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('uses the normal backoff for a Retry-After above Number.MAX_SAFE_INTEGER (#185)', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      try {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: new Headers({ 'Retry-After': '99999999999999999999999' }),
+        });
+        mockFetch.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'ok' }) });
+
+        const client = new ProvenanceClient({ payment: 'none', retry: { maxRetries: 1, baseDelayMs: 1_000 } });
+        const health = client.health();
+        await vi.advanceTimersByTimeAsync(900);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(200);
         await expect(health).resolves.toBe(true);
         expect(mockFetch).toHaveBeenCalledTimes(2);
       } finally {

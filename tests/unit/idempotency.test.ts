@@ -420,6 +420,22 @@ describe('retry codes: same key, new authorization', () => {
     }
   });
 
+  it('waits the 5 s default for a Retry-After above Number.MAX_SAFE_INTEGER (#185)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      paidAnswers = [{ ...IN_PROGRESS, headers: { 'Retry-After': '99999999999999999999999' } }, { status: 200 }];
+      const upload = client({ paidTimeout: 10 * 60_000 }).upload('hello', { stampId: STAMP });
+      await vi.waitFor(() => expect(paid()).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(paid()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(upload).resolves.toMatchObject({ reference: REFERENCE });
+      expect(paid()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('honours a Retry-After given as an HTTP date (#123)', async () => {
     const now = Date.UTC(2026, 9, 21, 12, 0, 0);
     vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], now });

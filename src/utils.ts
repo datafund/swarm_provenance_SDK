@@ -95,12 +95,16 @@ export function normalizeReference(ref: string): string {
 /**
  * Seconds to wait from a Retry-After header (RFC 9110): delta-seconds, or an
  * HTTP date (seconds from `now`, rounded up; 0 if past). Undefined if the
- * header is missing or neither form.
+ * header is missing, neither form, or delta-seconds above
+ * Number.MAX_SAFE_INTEGER (#185: such a value would be inexact, or show as 1e+23).
  */
 export function retryAfterSeconds(value: string | null | undefined, now: number = Date.now()): number | undefined {
   const text = value?.trim();
   if (!text) return undefined;
-  if (/^\d+$/.test(text)) return Number(text);
+  if (/^\d+$/.test(text)) {
+    const seconds = Number(text);
+    return Number.isSafeInteger(seconds) ? seconds : undefined;
+  }
   const at = parseHttpDate(text, now);
   if (at === undefined) return undefined;
   return Math.max(0, Math.ceil((at - now) / 1000));
