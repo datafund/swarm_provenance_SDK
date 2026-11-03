@@ -315,13 +315,17 @@ export class ProvenanceClient {
       const error = await this.handleError(response);
       if (error instanceof PaymentOutcomeError) throw error;
       if (response.status === 402 && !error.payment) {
-        throw new StampError(
-          `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it.` +
-            (payForPool
-              ? ''
-              : ' To let the SDK pay for pool stamps within the payment policy, use x402 mode with ' +
-                'payment.payForPool: true, or pass a stampId you own.'),
-          error.code ?? 'PAYMENT_REQUIRED'
+        // withPayment keeps the 402's body (price options, quota code) (#163)
+        throw withPayment(
+          new StampError(
+            `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it.` +
+              (payForPool
+                ? ''
+                : ' To let the SDK pay for pool stamps within the payment policy, use x402 mode with ' +
+                  'payment.payForPool: true, or pass a stampId you own.'),
+            error.code ?? 'PAYMENT_REQUIRED'
+          ),
+          error,
         );
       }
       throw withPayment(

@@ -391,6 +391,26 @@ describe('paid pool acquisition is opt-in (#109)', () => {
     expect(payments()).toBe(0);
   });
 
+  it.each([
+    ['acquireStamp()', (c: ProvenanceClient) => c.acquireStamp()],
+    ['upload()', (c: ProvenanceClient) => c.upload('hello')],
+  ])('without payForPool, the StampError from an unpaid pool 402 keeps error.body (%s, #163)', async (_label, call) => {
+    const error = await call(client()).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as StampError).payment).toBeUndefined();
+    expect((error as StampError).body).toEqual({
+      detail: {
+        x402Version: 1,
+        error: 'Payment required',
+        accepts,
+        code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED',
+        message: 'Daily stamp allowance used up.',
+      },
+    });
+    expect(payments()).toBe(0);
+  });
+
   it('payForPool: true pays an in-policy pool 402 and the upload', async () => {
     const result = await client({ payForPool: true }).upload('hello');
     expect(result.reference).toBe('b'.repeat(64));
