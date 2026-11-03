@@ -173,9 +173,9 @@ but it does not return a valid answer: it gets the same answer again, or
 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The error message says
 so and does not advise the retry: contact the gateway operator with `payment.transaction`, or with
 the key when the transaction is not known. If `upload()` used a pool stamp, the message also
-says to pass its `stampId` back with a new key, so the stamp is not bought again. A 200 whose body could not be read or is not JSON (a
-reset connection, a proxy's error page) is not the gateway's answer, so the retry above can
-recover the result.
+says to pass its `stampId` back with a new key, so no other stamp is needed. A 200 whose body
+could not be read or is not JSON (a reset connection, a proxy's error page) is not the gateway's
+answer, so the retry above can recover the result.
 
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
