@@ -67,44 +67,54 @@ function parseJobSteps(text: string, job: string): Step[] {
     }
   }
   if (start < 0) throw new Error(`publish.yml: no job "${job}" under jobs`);
+  // The job ends at the next non-blank, non-comment line at indent 2 or less.
+  // A comment line does not end it, at any indent.
+  const isComment = (l: string) => l.trimStart().startsWith('#');
+  let jobEnd = start + 1;
+  while (jobEnd < lines.length) {
+    const l = lines[jobEnd] ?? '';
+    if (l.trim() !== '' && !isComment(l) && indentOf(l) <= 2) break;
+    jobEnd++;
+  }
   // `defaults:` (run: shell: or working-directory:) at workflow level or under
   // the job changes how GitHub runs a step that has no shell: key, such as
   // Tag release. The run tests assume GitHub's own defaults, so refuse it.
   for (let d = 0; d < lines.length; d++) {
-    const l = lines[d] ?? '';
-    if (/^defaults:/.test(l)) fail(d, 'workflow-level "defaults:" is not supported');
+    if (/^defaults:/.test(lines[d] ?? '')) fail(d, 'workflow-level "defaults:" is not supported');
   }
-  for (let d = start + 1; d < lines.length; d++) {
+  let runsOn = -1;
+  let stepsAt = -1;
+  for (let d = start + 1; d < jobEnd; d++) {
     const l = lines[d] ?? '';
-    if (l.trim() !== '' && indentOf(l) <= 2) break; // end of the job
     if (/^ {4}defaults:/.test(l)) fail(d, `"defaults:" under job "${job}" is not supported`);
+    if (/^ {4}runs-on:/.test(l)) {
+      if (runsOn >= 0) fail(d, 'duplicate "runs-on:"');
+      runsOn = d;
+    }
+    if (l === '    steps:' && stepsAt < 0) stepsAt = d;
   }
-  let i = start + 1;
-  for (; i < lines.length; i++) {
-    const l = lines[i] ?? '';
-    if (l.trim() !== '' && indentOf(l) <= 2)
-      throw new Error(`publish.yml: job "${job}" has no "    steps:" key`);
-    if (l === '    steps:') break;
+  // On a Windows or macOS runner a step with no shell: key (Tag release) does
+  // not run as `bash -e`, so the run tests would assume the wrong shell.
+  if (runsOn < 0) throw new Error(`publish.yml: job "${job}" has no "    runs-on:" key`);
+  if (!/^ {4}runs-on: ubuntu-\S+$/.test(lines[runsOn] ?? '')) {
+    fail(runsOn, `job "${job}" must run on an ubuntu- runner`);
   }
-  if (i >= lines.length) throw new Error(`publish.yml: job "${job}" has no "    steps:" key`);
+  if (stepsAt < 0) throw new Error(`publish.yml: job "${job}" has no "    steps:" key`);
+  let i = stepsAt;
 
   const steps: Step[] = [];
   let step: Step | undefined;
   i++;
-  while (i < lines.length) {
+  while (i < jobEnd) {
     let l = lines[i] ?? '';
     if (l.includes('\t')) fail(i, 'tab character');
-    if (l.trim() === '') {
+    if (l.trim() === '' || (isComment(l) && indentOf(l) < 8)) {
       i++;
       continue;
     }
     const indent = indentOf(l);
     if (indent < 6) break; // end of the steps list
     if (indent === 6) {
-      if (l.startsWith('      #')) {
-        i++;
-        continue;
-      }
       if (!l.startsWith('      - ')) fail(i, 'expected a step item "- key: value"');
       step = { line: i + 1, keys: [] };
       steps.push(step);
@@ -307,11 +317,29 @@ describe('publish.yml step reader: fails loudly on a reshaped workflow', () => {
     );
   });
 
+  it('throws when the job does not run on an ubuntu- runner', () => {
+    const yml = sample(good).replace('runs-on: ubuntu-latest', 'runs-on: windows-latest');
+    expect(() => parseJobSteps(yml, 'publish')).toThrow(
+      /line 4: job "publish" must run on an ubuntu- runner/
+    );
+    const none = sample(good).replace('    runs-on: ubuntu-latest\n', '');
+    expect(() => parseJobSteps(none, 'publish')).toThrow(/no " {4}runs-on:" key/);
+  });
+
+  it('reads past comment lines at any indent inside the job', () => {
+    const yml = sample(`# top comment\n  # job comment\n    # steps comment\n${good}`).replace(
+      '    steps:\n',
+      '# before steps\n    steps:\n'
+    );
+    const [s] = parseJobSteps(yml, 'publish');
+    expect(s).toMatchObject({ id: 'tip-check', run: 'echo hi\n\necho there\n' });
+  });
+
   it('throws when the job or its steps are missing', () => {
     expect(() => parseJobSteps(sample(good), 'release')).toThrow(/no job "release"/);
-    expect(() => parseJobSteps('jobs:\n  publish:\n    runs-on: x\n', 'publish')).toThrow(
-      /no " {4}steps:" key/
-    );
+    expect(() =>
+      parseJobSteps('jobs:\n  publish:\n    runs-on: ubuntu-latest\n', 'publish')
+    ).toThrow(/no " {4}steps:" key/);
   });
 });
 
