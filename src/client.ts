@@ -1153,12 +1153,15 @@ export class ProvenanceClient {
 
 /**
  * A wallet's "user rejected the request" (EIP-1193 code 4001; viem's
- * UserRejectedRequestError), here or in the error's cause chain.
+ * UserRejectedRequestError; ethers v6 code ACTION_REJECTED), here or in the
+ * error's cause chain. ethers sets ACTION_REJECTED only for a user rejection
+ * and nests the provider's error under `info.error`, not `cause`; the code is
+ * enough, so `info` is not inspected (#166).
  */
 function isWalletRejection(error: unknown): boolean {
   for (let e = error, depth = 0; e && typeof e === 'object' && depth < 8; e = (e as { cause?: unknown }).cause, depth++) {
     const { code, name } = e as { code?: unknown; name?: unknown };
-    if (code === 4001 || name === 'UserRejectedRequestError') return true;
+    if (code === 4001 || code === 'ACTION_REJECTED' || name === 'UserRejectedRequestError') return true;
   }
   return false;
 }
