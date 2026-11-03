@@ -8,7 +8,7 @@ import {
   type Hex,
 } from 'viem';
 import { DATA_PROVENANCE_ABI } from './abi.js';
-import { ProvenanceError, withCause } from '../errors.js';
+import { ProvenanceError } from '../errors.js';
 import { CHAIN_PRESETS, PRESET_RPC_FALLBACKS, ZERO_BYTES32, ZERO_ADDRESS } from './constants.js';
 import {
   ChainConfigurationError,
@@ -1153,15 +1153,17 @@ export class ChainClient {
 
   /**
    * The signer's address. A custom signer's failure is a ChainConnectionError
-   * with the signer's error as `cause`, as for getChainId(); an SDK error from
-   * the signer passes through unchanged (#202).
+   * with the URL-redacted message and no `cause`, as for the signer's
+   * getChainId(): a raw signer error can carry the RPC URL and its key, and
+   * consoles print a cause even when it is not enumerable (#118). An SDK error
+   * from the signer (already redacted) passes through unchanged (#202).
    */
   private async signerAddress(): Promise<Address> {
     try {
       return await this.signer!.getAddress();
     } catch (error) {
       if (error instanceof ProvenanceError) throw error;
-      throw withCause(new ChainConnectionError(`Could not get the signer's address: ${rpcErrorMessage(error)}`), error);
+      throw new ChainConnectionError(`Could not get the signer's address: ${rpcErrorMessage(error)}`);
     }
   }
 

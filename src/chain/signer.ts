@@ -1,6 +1,5 @@
 import type { Address, Hex, ChainSigner } from './types.js';
 import { ChainConfigurationError, isAlreadyKnown, rpcErrorMessage } from './errors.js';
-import { withCause } from '../errors.js';
 
 /**
  * EIP-1193 provider interface (window.ethereum / MetaMask)
@@ -122,12 +121,10 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
   let account: ReturnType<typeof viemAccounts.privateKeyToAccount>;
   try {
     account = viemAccounts.privateKeyToAccount(privateKey);
-  } catch (error) {
-    // Not viem's message: for a key out of range it prints the key's value
-    throw withCause(
-      new ChainConfigurationError('Invalid private key: expected 0x followed by 64 hex characters, a valid secp256k1 key'),
-      error
-    );
+  } catch {
+    // Not viem's message, and not viem's error as cause: for a key out of
+    // range it prints the key's value
+    throw new ChainConfigurationError('Invalid private key: expected 0x followed by 64 hex characters, a valid secp256k1 key');
   }
   let client: ReturnType<typeof viem.createWalletClient>;
   try {
@@ -136,7 +133,8 @@ export async function fromPrivateKey(privateKey: Hex, rpcUrl: string): Promise<C
       transport: viem.http(rpcUrl),
     });
   } catch (error) {
-    throw withCause(new ChainConfigurationError(`Invalid rpcUrl: ${rpcErrorMessage(error)}`), error);
+    // No cause: viem's error can carry the RPC URL and its key (#118)
+    throw new ChainConfigurationError(`Invalid rpcUrl: ${rpcErrorMessage(error)}`);
   }
 
   return {
@@ -187,7 +185,9 @@ export async function fromEip1193Provider(provider: Eip1193Provider): Promise<Ch
       method: 'eth_requestAccounts',
     });
   } catch (error) {
-    throw withCause(new ChainConfigurationError(`The wallet did not give access to an account: ${rpcErrorMessage(error)}`), error);
+    // URL-redacted message and no cause: a wallet error can carry an RPC URL
+    // and its key, and consoles print a cause even when it is not enumerable (#118)
+    throw new ChainConfigurationError(`The wallet did not give access to an account: ${rpcErrorMessage(error)}`);
   }
 
   if (!Array.isArray(accounts) || typeof accounts[0] !== 'string') {

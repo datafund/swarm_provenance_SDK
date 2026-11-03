@@ -121,6 +121,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - If the wallet does not know the chain, it is asked to add it. This happens only for the
   built-in presets, and with `fromViemWalletClient` only when the client has `addChain`. A
   custom preset's chain must be added to the wallet by hand. (#115, PR #139)
+- `parseMetadata()` throws `ProvenanceError` with code `INVALID_INPUT` instead of `SyntaxError`
+  or a plain `Error`. See Errors and retries. (#202)
+- `fromPrivateKey()` throws `ChainConfigurationError` instead of viem's plain `Error` for an
+  invalid private key or an empty `rpcUrl`. See Chain. (#202)
 
 ### Payments (x402 mode)
 
@@ -186,9 +190,13 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   switch. It also throws it for an answer that is not a list starting with an address string.
   Before, the wallet's error escaped as it was. (#202)
 - `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the signer's
-  `getAddress()` fails, as for `getChainId()`. An SDK error from the signer passes through.
-  Nothing is sent. Before, the signer's error escaped as it was. (#202)
-- These errors keep the original error as `error.cause`, not enumerable. (#202)
+  `getAddress()` fails, as writes already did when the signer's `getChainId()` fails. Unlike
+  that check, an SDK error from the signer passes through unchanged. Nothing is sent. Before,
+  the signer's error escaped as it was. (#202)
+- These errors have no `error.cause`: the original error can carry the RPC URL and its key, or
+  print the private key, and consoles print a cause even when it is not enumerable. Their
+  message is the original message with URLs redacted; for an invalid private key it is the
+  SDK's own message. (#202)
 - Writes refuse a wrong RPC or signer chain and a contract address without code. (#115)
 - `ChainSigner` may implement `switchChain()`. The built-in wallet signers do; see Breaking
   changes. (#115)
@@ -270,8 +278,13 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `false`. Before, a raw `InvalidCharacterError` escaped. (#202)
 - The `FILE_TOO_LARGE` message of a base64 upload gives the exact largest content that fits, in
   bytes, with MiB from 1 MiB up, for example "Content up to 7864191 bytes (about 7.5 MiB) fits".
-  When only empty content fits, or no content fits, it says so. Before, it estimated the size from a fixed 512-byte overhead
-  and showed "about -0.0 MiB" or "about 0.0 MiB" for small `maxUploadBytes`. (#202)
+  When only empty content fits, or no content fits, it says so. Before, it estimated the size
+  from a fixed 512-byte overhead and showed "about -0.0 MiB" or "about 0.0 MiB" for small
+  `maxUploadBytes`. (#202)
+- `upload()` of a `Blob` or `File` that cannot be read (for example a `NotReadableError` when
+  the file changed after it was picked) throws `ProvenanceError` with code `INVALID_INPUT`
+  before any request, with the read error as `error.cause`. Before, the `DOMException` escaped.
+  (#202)
 - `ProvenanceError` declares `cause`, so `error.cause` can be read with a TypeScript lib older
   than ES2022. The SDK sets it, not enumerable, when it wraps another error. (#202)
 - `canonicalizeJsonText()` and `canonicalizeJsonValue()` are the only functions that still throw

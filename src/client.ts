@@ -39,6 +39,7 @@ import {
   PaymentError,
   PaymentOutcomeError,
   PaymentRefusedError,
+  withCause,
   type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyDocumentHash } from './metadata.js';
@@ -717,7 +718,7 @@ export class ProvenanceClient {
     } else {
       const bytes =
         content instanceof Blob
-          ? new Uint8Array(await content.arrayBuffer())
+          ? await readBlob(content)
           : toBytes(content as Uint8Array | ArrayBuffer | string);
       contentLength = bytes.length;
       metadata = buildMetadata(bytes, metadataOptions);
@@ -1375,6 +1376,21 @@ function utf8Length(text: string): number {
     } else bytes += 3; // other BMP characters; a lone surrogate encodes as U+FFFD
   }
   return bytes;
+}
+
+/**
+ * The bytes of a Blob or File to upload. A failed read (for example a
+ * NotReadableError DOMException when the file changed or was removed after it
+ * was picked) is INVALID_INPUT, before any request (#202). The read error is
+ * the cause: a local file read carries no URL.
+ */
+async function readBlob(content: Blob): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await content.arrayBuffer());
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    throw withCause(new ProvenanceError(`Could not read the Blob or File content: ${reason}`, 'INVALID_INPUT'), error);
+  }
 }
 
 /** Length of the base64 text for `bytes` bytes, with padding */

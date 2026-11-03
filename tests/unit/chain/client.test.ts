@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { inspect } from 'node:util';
 import { ChainClient } from '../../../src/chain/client.js';
 import {
   ChainConfigurationError,
@@ -2292,15 +2293,24 @@ describe('a signer whose getAddress() fails (#202)', () => {
     ['recordAccess', (client) => client.recordAccess(SAMPLE_HASH)],
   ];
 
-  it.each(CALLS)('%s wraps the error in ChainConnectionError with the cause, and sends nothing', async (_name, call) => {
+  it.each(CALLS)('%s wraps the error in ChainConnectionError without a cause, and sends nothing', async (_name, call) => {
     const walletError = new Error('wallet locked at https://rpc.example/key123');
     const { signer, sendTransaction } = failingSigner(walletError);
     const error = await call(new ChainClient({ chain: 'base-sepolia', signer })).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ChainConnectionError);
     expect((error as Error).message).toMatch(/^Could not get the signer's address: wallet locked/);
     expect((error as Error).message).not.toContain('key123');
-    expect((error as Error).cause).toBe(walletError);
+    // A raw signer error is not kept as cause: it carries the RPC URL (#118)
+    expect((error as Error).cause).toBeUndefined();
     expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each(CALLS)('%s does not print an RPC key from the signer error when the error is inspected', async (_name, call) => {
+    const walletError = new Error('request failed at https://x.alchemy.com/v2/SECRETKEY');
+    const { signer } = failingSigner(walletError);
+    const error = await call(new ChainClient({ chain: 'base-sepolia', signer })).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConnectionError);
+    expect(inspect(error)).not.toContain('SECRETKEY');
   });
 
   it.each(CALLS)('%s passes a chain error from the signer through unchanged', async (_name, call) => {

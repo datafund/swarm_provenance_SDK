@@ -294,10 +294,24 @@ export function notJsonError(what: string, error: unknown): ProvenanceError {
     reason = 'has no JSON representation (undefined, a function, or a toJSON() that returns undefined)';
   } else if (error instanceof SyntaxError && error.message.startsWith(TOO_DEEP)) {
     reason = `is nested deeper than ${MAX_JSON_DEPTH} levels`;
-  } else if (error instanceof RangeError) {
-    reason = `is nested too deeply to serialize as JSON (${error.message})`;
+  } else if (isStackOverflow(error)) {
+    reason = `is nested too deeply to serialize as JSON (${(error as Error).message})`;
   } else {
     reason = `cannot be serialized as JSON: ${error instanceof Error ? error.message : String(error)}`;
   }
   return withCause(new ProvenanceError(`${what} ${reason}`, 'INVALID_INPUT'), error);
+}
+
+/**
+ * Whether JSON.stringify ran out of stack: V8 and JavaScriptCore throw a
+ * RangeError "Maximum call stack size exceeded", SpiderMonkey an InternalError
+ * "too much recursion". Any other RangeError (a toJSON() that throws one, say)
+ * is not about nesting.
+ */
+function isStackOverflow(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error instanceof RangeError || error.name === 'InternalError') &&
+    /maximum call stack|too much recursion/i.test(error.message)
+  );
 }

@@ -271,7 +271,7 @@ A receipt is present only when the request carried a payment the gateway accepte
 
 | Error | Code | When |
 |-------|------|------|
-| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused), or JSON cannot represent it: a circular reference, a `BigInt`, nesting deeper than 1000 levels, a `toJSON()` that returns `undefined`, or a `toJSON()` or getter that throws; `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent. For content JSON cannot represent, the original error is `error.cause` (#202) |
+| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused), or JSON cannot represent it: a circular reference, a `BigInt`, nesting deeper than 1000 levels, a `toJSON()` that returns `undefined`, or a `toJSON()` or getter that throws; `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`; or a `Blob` or `File` cannot be read (for example a `NotReadableError`). Nothing is sent. For content JSON cannot represent and for a read error, the original error is `error.cause` (#202) |
 | `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent. For a base64 upload, the message gives the largest content in bytes that fits with the same options, says that only empty content fits, or says that no content fits (#202) |
 | `GatewayConnectionError` | `FILE_TOO_LARGE` | Without `sign: 'notary'`: the gateway's proxy refused the body with a 413 that is not JSON. With `sign: 'notary'`, this is a `NotaryError` with the same code |
 | `ProvenanceError` | `OWNER_PROOF_FAILED` | `ownerSigner.signMessage()` threw, or did not return a `0x`-prefixed hex string |
@@ -544,8 +544,17 @@ except the errors of `canonicalizeJsonText()` and `canonicalizeJsonValue()`. Tho
 standard JavaScript errors (see [Signature Verification](#signature-verification)). Input and
 content checks throw a plain `ProvenanceError`: `INVALID_INPUT`, `FILE_TOO_LARGE` from the SDK's
 own size check, `CONTENT_HASH_MISMATCH` and `OWNER_PROOF_FAILED`. The other errors are the
-subclasses below. When the SDK wraps an error from JavaScript, the original error is
-`error.cause`.
+subclasses below. Only these wrapped errors keep the original error as `error.cause` (not
+enumerable): raw `upload()` content, `buildDocumentMetadata()` and `computeNotaryDataHash()`
+data that JSON cannot represent; `parseMetadata()` text that is not JSON; base64 that
+`base64ToBytes()` cannot decode without `Buffer`; a `Blob` or `File` that `upload()` cannot
+read; and a failed `import('viem')` in `fromPrivateKey()`. Errors that can carry an RPC URL
+with its key, or a private key, have no `cause`, because consoles print a cause even when it is
+not enumerable. Their message is the original message with URLs redacted. This covers the
+signer's `getChainId()` and `getAddress()` failures, a declined chain switch,
+`fromEip1193Provider()` account access, and `fromPrivateKey()` with an invalid key or `rpcUrl`.
+`getProvenanceChain()` traversal errors keep a `cause` only when it is an SDK error.
+`ChainTransactionError` keeps the original error as `.originalError` instead, not enumerable.
 
 ### ProvenanceError
 
