@@ -42,9 +42,33 @@ export interface PaymentAttempt {
 }
 
 /**
+ * Marks a ProvenanceError from any copy of this class (#205). The main entry and
+ * each chain entry are separate bundles with their own copy of ProvenanceError.
+ * Symbol.for returns the same symbol in every copy, so the brand lets
+ * `instanceof ProvenanceError` match across them.
+ */
+const PROVENANCE_ERROR_BRAND = Symbol.for('@datafund/swarm-provenance/ProvenanceError');
+
+/**
  * Base error class for all SDK errors
  */
 export class ProvenanceError extends Error {
+  /**
+   * `error instanceof ProvenanceError` is true for errors from every entry of
+   * the package (#205): `/chain` errors too, although that bundle has its own
+   * copy of this class. Subclasses (StampError, ChainError, ...) inherit this
+   * method but match by prototype only, so they never match across copies.
+   */
+  static [Symbol.hasInstance](value: unknown): boolean {
+    if (Function.prototype[Symbol.hasInstance].call(this, value)) return true;
+    return (
+      this === ProvenanceError &&
+      typeof value === 'object' &&
+      value !== null &&
+      (value as Record<symbol, unknown>)[PROVENANCE_ERROR_BRAND] === true
+    );
+  }
+
   /**
    * Present when the failed request carried an x402 payment: the gateway may
    * have settled it even though the request failed. Not retried automatically,
@@ -86,6 +110,8 @@ export class ProvenanceError extends Error {
   ) {
     super(message);
     this.name = 'ProvenanceError';
+    // Not enumerable: kept out of keys, JSON and default inspection output
+    Object.defineProperty(this, PROVENANCE_ERROR_BRAND, { value: true });
     Object.setPrototypeOf(this, ProvenanceError.prototype);
   }
 }

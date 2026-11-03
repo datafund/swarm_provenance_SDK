@@ -542,6 +542,22 @@ own size check, `CONTENT_HASH_MISMATCH` and `OWNER_PROOF_FAILED`. The other erro
 subclasses below. When the SDK wraps an error from JavaScript, the original error is
 `error.cause`.
 
+Errors from the chain entries (`@datafund/swarm-provenance/chain`, including its browser build)
+are `instanceof` the `ProvenanceError` that you import from `@datafund/swarm-provenance`, in
+ESM and CJS (#205). Each entry is a separate bundle with its own copy of `ProvenanceError`, so
+`ProvenanceError` checks a brand instead of only the prototype chain. The constructor sets
+the brand: a non-enumerable property keyed by
+`Symbol.for('@datafund/swarm-provenance/ProvenanceError')`. Only `ProvenanceError` itself
+checks the brand. Subclasses such as `StampError` and `ChainError` match by prototype only, so
+a chain error is never `instanceof StampError`.
+
+`Symbol.for` returns the same symbol in every copy of the SDK. As a result, `instanceof
+ProvenanceError` is also true for an error from another copy of the SDK in the same process:
+the CJS build when you import the ESM build, or another installed version. Such an error may
+have fields that this version does not document. `instanceof` checks of a subclass are false
+for errors from another copy. Compare `error.name` or `error.code` when your code can receive
+errors from several copies.
+
 ### ProvenanceError
 
 Base error class.

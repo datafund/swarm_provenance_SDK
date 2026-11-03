@@ -67,6 +67,8 @@ jobs:
           # The viem guard (#99) is applied to both CJS chain entries (#123)
           grep -qF "npm install viem" dist/chain/index.cjs
           grep -qF "npm install viem" dist/chain/browser.cjs
+          # Chain errors are instanceof the main entry's ProvenanceError, ESM and CJS (#205)
+          node scripts/verify-dist-instanceof.mjs
 
       - name: Payment policy across the tested @x402 range
         run: |
@@ -89,8 +91,17 @@ jobs:
           for entry in index browser; do
             node -e "try { require(process.argv[1]); console.error('expected a throw'); process.exit(1) } catch (e) { if (!e.message.includes('npm install viem')) { console.error(e.message); process.exit(1) } }" "$RUNNER_TEMP/noviem/dist/chain/$entry.cjs"
           done
-          # bundled with viem inlined: loads with no node_modules at runtime
-          echo "require('$GITHUB_WORKSPACE/dist/chain/index.cjs').ChainClient.name" > "$RUNNER_TEMP/entry.cjs"
+          # bundled with viem inlined: loads with no node_modules at runtime, and a
+          # chain error is still instanceof the main entry's ProvenanceError (#205)
+          cat > "$RUNNER_TEMP/entry.cjs" <<EOF
+          const { ProvenanceError, StampError } = require('$GITHUB_WORKSPACE/dist/index.cjs');
+          const { ChainClient } = require('$GITHUB_WORKSPACE/dist/chain/index.cjs');
+          try { new ChainClient({ chain: 'nope' }); } catch (e) {
+            if (e instanceof ProvenanceError && !(e instanceof StampError)) process.exit(0);
+          }
+          console.error('bundled: chain error is not instanceof ProvenanceError');
+          process.exit(1);
+          EOF
           mkdir -p "$RUNNER_TEMP/bundle"
           # esbuild is not a direct devDependency; use the copy tsup depends on
           node -e "const esbuild = require(require.resolve('esbuild', { paths: [require.resolve('tsup')] })); esbuild.buildSync({ entryPoints: [process.argv[1]], bundle: true, platform: 'node', outfile: process.argv[2], logLevel: 'error' })" "$RUNNER_TEMP/entry.cjs" "$RUNNER_TEMP/bundle/out.cjs"

@@ -259,6 +259,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `canonicalizeJsonText()` and `canonicalizeJsonValue()` are the only functions that still throw
   standard errors (`SyntaxError`, `TypeError`, `RangeError`) for arguments of the documented
   types, as documented. (#202)
+- Errors from `@datafund/swarm-provenance/chain` and its browser build are `instanceof` the
+  `ProvenanceError` from `@datafund/swarm-provenance`, in ESM and CJS. Before, each entry
+  bundled its own copy of the class, so `new ChainClient({ chain: 'nope' })` threw an error
+  that was not `instanceof ProvenanceError`. `ProvenanceError` now also checks a brand keyed by
+  `Symbol.for('@datafund/swarm-provenance/ProvenanceError')`, so it also matches errors from
+  another copy of the SDK in the process. Subclasses still match by prototype only. (#205)
 - An ethers v6 wallet rejection (code `ACTION_REJECTED`) is also `PaymentRefusedError` with code
   `PAYMENT_REFUSED`. Before, it threw `PaymentError` with code `PAYMENT_FAILED`. (#166)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)
@@ -332,6 +338,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - CI fails the build when new commits add a secret. (#121)
 - A local editor settings file is removed from the repository and ignored. (#121, PR #103)
 - CI runs the payment tests against `@x402/*` 2.23.0 and 2.28.0. (#110)
+- CI checks the built ESM and CJS entries, and an esbuild bundle of them, for `instanceof`
+  across the main and chain entries (`scripts/verify-dist-instanceof.mjs`). (#205)
 - Integration tests use the dev gateway by default. (#119)
 - `publish.yml` publishes to npm only after the `ci.yml` matrix passes for the same commit:
   Node 18 and 20, and the payment tests against `@x402/*` 2.23.0 and 2.28.0. It installs with
