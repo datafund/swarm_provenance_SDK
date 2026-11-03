@@ -323,15 +323,15 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `POOL_EXHAUSTED` | StampError | Stamp pool is empty, no stamps available |
 | `NOTARY_NOT_ENABLED` | NotaryError | Notary service disabled |
 | `NOT_IMPLEMENTED` | VerificationError | Feature not yet implemented |
-| `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config, invalid private key or empty rpcUrl (`fromPrivateKey`), refused `eth_requestAccounts` (`fromEip1193Provider`) |
-| `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable (messages are URL-redacted via `rpcErrorMessage`); signer `getChainId()` or `getAddress()` failed (`signerAddress()`) |
+| `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config, invalid private key or empty rpcUrl (`fromPrivateKey`), refused `eth_requestAccounts` (`fromEip1193Provider`); no `cause` for the last two (viem's key error prints the key, a wallet error can carry an RPC URL) |
+| `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable (messages are URL-redacted via `rpcErrorMessage`); signer `getChainId()` failed (`ensureWriteTarget()`, every error wrapped) or `getAddress()` failed (`signerAddress()`, an SDK error passes through). Neither keeps a `cause`: only SDK errors are kept as cause (#118) |
 | `CHAIN_CONNECTION` | ReceiptTimeoutError (subclass) | Tx sent, no receipt; has `txHash` and `expected`: resume with `waitForTransaction(e.txHash, e.expected)` |
 | `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas, or no expected contract event in the receipt (`.originalError` non-enumerable) |
 | `CHAIN_VALIDATION` | ChainValidationError | Bad hash format, invalid input |
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
-| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object, or JSON cannot represent it (`notJsonError()`, original as `cause`; also `buildDocumentMetadata`, `computeNotaryDataHash`); `parseMetadata()` input; invalid base64 in browsers (`base64ToBytes`); `ownerSigner` without a 64-hex `stampId`, or with `idempotencyKey` |
+| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object, or JSON cannot represent it (`notJsonError()`, original as `cause`; also `buildDocumentMetadata`, `computeNotaryDataHash`); `parseMetadata()` input; invalid base64 in browsers (`base64ToBytes`); unreadable Blob/File in `upload()` (`readBlob()`, read error as `cause`); `ownerSigner` without a 64-hex `stampId`, or with `idempotencyKey` |
 | `OWNER_PROOF_FAILED` | ProvenanceError | `ownerSigner.signMessage` failed or returned no 0x-prefixed hex; nothing sent |
 | `OWNER_PROOF_INVALID` | GatewayConnectionError (401) | Owner proof missing, stale, already used or not a valid signature |
 | `STAMP_OWNERSHIP_DENIED` | GatewayConnectionError (403) | Uploader (payer or owner-proof signer) does not own the stamp |

@@ -2599,6 +2599,18 @@ describe('raw content JSON cannot represent, and the FILE_TOO_LARGE size hint (#
     expect((error.cause as Error).message).toMatch(/BigInt/);
   });
 
+  it('does not call a RangeError from a toJSON() a nesting problem', async () => {
+    const thrown = new RangeError('bad range');
+    const error = (await new ProvenanceClient()
+      .upload({ x: { toJSON: () => { throw thrown; } } }, { stampId: STAMP, raw: true })
+      .catch((e: unknown) => e)) as ProvenanceError;
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toBe('Raw mode content cannot be serialized as JSON: bad range');
+    expect(error.cause).toBe(thrown);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['a ProvenanceError', () => new ProvenanceError('caller refused', 'CALLER_CODE')],
     ['a ChainError subclass', () => new ChainValidationError('caller refused')],
@@ -2690,5 +2702,34 @@ describe('raw content JSON cannot represent, and the FILE_TOO_LARGE size hint (#
     it('maxUploadBytes 0 is still refused in the constructor', () => {
       expect(() => new ProvenanceClient({ maxUploadBytes: 0 })).toThrow(/maxUploadBytes must be a positive integer/);
     });
+  });
+});
+
+describe('a Blob or File that cannot be read (#202)', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  /** A Blob whose read fails as a browser's does when the picked file changed or was removed */
+  function unreadable(kind: 'Blob' | 'File'): Blob {
+    const content = kind === 'File' ? new File(['x'], 'data.bin') : new Blob(['x']);
+    const readError = new DOMException('The requested file could not be read', 'NotReadableError');
+    Object.defineProperty(content, 'arrayBuffer', { value: () => Promise.reject(readError) });
+    return content;
+  }
+
+  it.each([
+    ['Blob', { stampId: 'a'.repeat(64) }],
+    ['File', { stampId: 'a'.repeat(64) }],
+    ['File', {}],
+  ] as const)('upload() of an unreadable %s is INVALID_INPUT with the read error as cause, before any request', async (kind, options) => {
+    const content = unreadable(kind);
+    const error = (await new ProvenanceClient().upload(content, options).catch((e: unknown) => e)) as ProvenanceError;
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toBe('Could not read the Blob or File content: NotReadableError: The requested file could not be read');
+    expect(error.cause).toBeInstanceOf(DOMException);
+    expect((error.cause as DOMException).name).toBe('NotReadableError');
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

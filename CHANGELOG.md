@@ -100,9 +100,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `upload()` now check the fields they read too. `pricing()` needs a boolean `x402_enabled`, and
   optional fields of the right type when present. `acquireStamp()` needs a `batch_id` of 64 hex
   characters, a number `depth` and a string `size_name`. `upload()` needs a `reference` of 64 or
-  128 hex characters, with an optional `0x` prefix. Before, a body of `null` threw a raw `TypeError`, `acquireStamp()` could
-  return `batchId: undefined`, and `upload()` then sent that as its stamp or returned no
-  `reference`. `upload()` no longer sends the data after a malformed pool answer.
+  128 hex characters, with an optional `0x` prefix. Before, a body of `null` threw a raw
+  `TypeError`, `acquireStamp()` could return `batchId: undefined`, and `upload()` then sent that
+  as its stamp or returned no `reference`. `upload()` no longer sends the data after a malformed pool answer.
   `PoolStatus.lowReserveWarning` and `AcquiredStamp.fallbackUsed` are `false` when the gateway
   leaves them out, and `INVALID_RESPONSE` when they are not booleans. A pool `batch_id` is
   lowercased, as a caller's `stampId` is (#168). If the request was paid, the error carries
@@ -111,14 +111,20 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   idempotency key, whether the caller passed the key or the SDK generated it in x402 mode. That
   body is the gateway's own answer, so the retry does not return a valid answer: it gets the same
   answer again, or `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The
-  message says to contact the gateway operator with the transaction instead. A body that could
-  not be read or is not JSON keeps the keyed-retry advice: it is not the gateway's answer. (#107, PR #138; #173, #179, #199)
+  message says to contact the gateway operator with the transaction instead. When `upload()`
+  used a pool stamp, it also says to pass `stampId` back with a new idempotency key, so no
+  other stamp is needed. A body that could not be read or is not JSON keeps the keyed-retry
+  advice: it is not the gateway's answer. (#107, PR #138; #173, #179, #199)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)
 - If the wallet does not know the chain, it is asked to add it. This happens only for the
   built-in presets, and with `fromViemWalletClient` only when the client has `addChain`. A
   custom preset's chain must be added to the wallet by hand. (#115, PR #139)
+- `parseMetadata()` throws `ProvenanceError` with code `INVALID_INPUT` instead of `SyntaxError`
+  or a plain `Error`. See Errors and retries. (#202)
+- `fromPrivateKey()` throws `ChainConfigurationError` instead of viem's plain `Error` for an
+  invalid private key or an empty `rpcUrl`. See Chain. (#202)
 
 ### Payments (x402 mode)
 
@@ -184,9 +190,13 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   switch. It also throws it for an answer that is not a list starting with an address string.
   Before, the wallet's error escaped as it was. (#202)
 - `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the signer's
-  `getAddress()` fails, as for `getChainId()`. An SDK error from the signer passes through.
-  Nothing is sent. Before, the signer's error escaped as it was. (#202)
-- These errors keep the original error as `error.cause`, not enumerable. (#202)
+  `getAddress()` fails, as writes already did when the signer's `getChainId()` fails. Unlike
+  that check, an SDK error from the signer passes through unchanged. Nothing is sent. Before,
+  the signer's error escaped as it was. (#202)
+- These errors have no `error.cause`: the original error can carry the RPC URL and its key, or
+  print the private key, and consoles print a cause even when it is not enumerable. Their
+  message is the original message with URLs redacted; for an invalid private key it is the
+  SDK's own message. (#202)
 - Writes refuse a wrong RPC or signer chain and a contract address without code. (#115)
 - `ChainSigner` may implement `switchChain()`. The built-in wallet signers do; see Breaking
   changes. (#115)
@@ -268,8 +278,13 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `false`. Before, a raw `InvalidCharacterError` escaped. (#202)
 - The `FILE_TOO_LARGE` message of a base64 upload gives the exact largest content that fits, in
   bytes, with MiB from 1 MiB up, for example "Content up to 7864191 bytes (about 7.5 MiB) fits".
-  When only empty content fits, or no content fits, it says so. Before, it estimated the size from a fixed 512-byte overhead
-  and showed "about -0.0 MiB" or "about 0.0 MiB" for small `maxUploadBytes`. (#202)
+  When only empty content fits, or no content fits, it says so. Before, it estimated the size
+  from a fixed 512-byte overhead and showed "about -0.0 MiB" or "about 0.0 MiB" for small
+  `maxUploadBytes`. (#202)
+- `upload()` of a `Blob` or `File` that cannot be read (for example a `NotReadableError` when
+  the file changed after it was picked) throws `ProvenanceError` with code `INVALID_INPUT`
+  before any request, with the read error as `error.cause`. Before, the `DOMException` escaped.
+  (#202)
 - `ProvenanceError` declares `cause`, so `error.cause` can be read with a TypeScript lib older
   than ES2022. The SDK sets it, not enumerable, when it wraps another error. (#202)
 - `canonicalizeJsonText()` and `canonicalizeJsonValue()` are the only functions that still throw

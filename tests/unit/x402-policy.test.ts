@@ -741,8 +741,38 @@ describe('paid requests with a success body that is not the expected shape (#199
       expect(failure.stampId).toBe(POOL_STAMP);
       expect(failure.stampPayment).toBeDefined();
       expect(failure.message).toMatch(/does not return a valid answer\. The payment may have been taken: contact the gateway operator with /);
+      expect(failure.message).toMatch(new RegExp(escape(`. The pool stamp can still be used: to upload without buying another, call upload() again with stampId "${POOL_STAMP}" and a new idempotencyKey`) + '$'));
       expect(failure.message).not.toMatch(OLD_HINT);
       expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/data/']);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+
+  it('a paid upload with a free pool stamp and a malformed 200 says the stamp can be reused, not bought', async () => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      const url = input instanceof Request ? input.url : String(input);
+      const path = new URL(url).pathname;
+      if (path === '/api/v1/pool/acquire') {
+        seen.push({ method: 'POST', path, paid: false });
+        return Promise.resolve(
+          new Response(JSON.stringify(POOL_BODY), { status: 200, headers: { 'content-type': 'application/json' } })
+        );
+      }
+      if (headers.has('X-PAYMENT') && path === '/api/v1/data/') {
+        seen.push({ method: 'POST', path, paid: true });
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client().upload('hello').catch((e: unknown) => e);
+      const failure = expectPaidInvalid(error);
+      expect(failure.stampId).toBe(POOL_STAMP);
+      expect(failure.stampPayment).toBeUndefined();
+      expect(failure.message).toMatch(new RegExp(escape(`. The pool stamp can still be used: to upload without taking another, call upload() again with stampId "${POOL_STAMP}" and a new idempotencyKey`) + '$'));
+      expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/data/']);
     } finally {
       vi.stubGlobal('fetch', gateway);
     }

@@ -39,6 +39,7 @@ import {
   PaymentError,
   PaymentOutcomeError,
   PaymentRefusedError,
+  withCause,
   type PaymentAttempt,
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyDocumentHash } from './metadata.js';
@@ -717,7 +718,7 @@ export class ProvenanceClient {
     } else {
       const bytes =
         content instanceof Blob
-          ? new Uint8Array(await content.arrayBuffer())
+          ? await readBlob(content)
           : toBytes(content as Uint8Array | ArrayBuffer | string);
       contentLength = bytes.length;
       metadata = buildMetadata(bytes, metadataOptions);
@@ -1377,6 +1378,21 @@ function utf8Length(text: string): number {
   return bytes;
 }
 
+/**
+ * The bytes of a Blob or File to upload. A failed read (for example a
+ * NotReadableError DOMException when the file changed or was removed after it
+ * was picked) is INVALID_INPUT, before any request (#202). The read error is
+ * the cause: a local file read carries no URL.
+ */
+async function readBlob(content: Blob): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await content.arrayBuffer());
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    throw withCause(new ProvenanceError(`Could not read the Blob or File content: ${reason}`, 'INVALID_INPUT'), error);
+  }
+}
+
 /** Length of the base64 text for `bytes` bytes, with padding */
 function base64Length(bytes: number): number {
   return 4 * Math.ceil(bytes / 3);
@@ -1527,6 +1543,12 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
       `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway itself sent this answer, so calling ${operation} again ` +
       `with idempotencyKey "${idempotencyKey}" does not return a valid answer. The payment may have been taken: ` +
       `contact the gateway operator with ${tx ? `transaction ${tx}` : 'the idempotency key'}`;
+    // A stamp taken from the pool stays usable for another upload. A caller's
+    // own stamp is not named: the caller already has it
+    if (stampId !== undefined && error.stampId === stampId) {
+      const take = error.stampPayment ? 'buying' : 'taking';
+      error.message += `. The pool stamp can still be used: to upload without ${take} another, call ${operation} again with stampId "${stampId}" and a new idempotencyKey`;
+    }
     return error;
   }
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;
