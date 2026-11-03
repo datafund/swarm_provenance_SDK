@@ -126,7 +126,7 @@ Only the options you set are sent; the gateway applies its defaults and validati
 
 ```typescript
 interface Pricing {
-  x402Enabled: boolean;        // false: the gateway does not charge; quotes is empty
+  x402Enabled: boolean;        // false: the gateway does not charge and sends no quotes
   currency?: string;           // e.g. 'USDC'
   network?: string;            // as the gateway's 402 names it
   asset?: string;              // token contract
@@ -253,7 +253,7 @@ A receipt is present only when the request carried a payment the gateway accepte
 |-------|------|------|
 | `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or an object; `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
 | `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent |
-| `GatewayConnectionError` | `FILE_TOO_LARGE` | The gateway's proxy refused the body with a 413 that is not JSON |
+| `GatewayConnectionError` | `FILE_TOO_LARGE` | Without `sign: 'notary'`: the gateway's proxy refused the body with a 413 that is not JSON. With `sign: 'notary'`, this is a `NotaryError` with the same code |
 | `ProvenanceError` | `OWNER_PROOF_FAILED` | `ownerSigner.signMessage()` threw, or did not return a `0x`-prefixed hex string |
 | `StampError` | `POOL_EXHAUSTED`, or the gateway's code | Without `stampId`: the pool is enabled and empty, or the pool acquisition failed (see StampError) |
 | `NotaryError` | the gateway's code | With `sign: 'notary'`: the upload request got an error status (see NotaryError) |
@@ -270,8 +270,10 @@ A receipt is present only when the request carried a payment the gateway accepte
 
 An error from the upload request, after `upload()` took a stamp from the pool, has
 `stampId`, and `stampPayment` when that stamp was paid for. An error after a paid request
-has `payment`, with `payment.idempotencyKey` and `payment.stampId`. Pass those back as
-`idempotencyKey` and `stampId` to retry without paying twice; the error message says how.
+has `payment`, with `payment.idempotencyKey`. `payment.stampId` is set only when the upload
+request itself failed; a failed paid pool acquisition inside `upload()` has no
+`payment.stampId`. Pass those back as `idempotencyKey` and `stampId` to retry without paying
+twice; the error message says how.
 
 **Raw mode example:**
 
@@ -465,8 +467,8 @@ interface SignedDocument {
 }
 ```
 
-Exported for typing stored documents. `upload()` does not return it: `UploadResult` is
-`{ reference, metadata }`; download the reference to get the signatures.
+Exported for typing stored documents. `upload()` does not return it: `UploadResult` has no
+signatures (see `upload()`); download the reference to get the signatures.
 
 ### NotaryInfo
 
@@ -536,7 +538,8 @@ class ProvenanceError extends Error {
   body is JSON of at most 16384 characters. A larger JSON body, or one that is not JSON, is
   kept as text. Text longer than 4096 characters is cut to 4096 characters, ending with an
   ellipsis. An empty body leaves `body` unset. Codes and fields that the SDK does not map are
-  here, such as the price options of a 402.
+  here, such as the price options of a 402. `PaymentRateLimitError` has no `body`: the SDK
+  throws it without reading the response body.
 - `retryAfterSeconds` is set on errors from a 429 response when the gateway sent a
   `Retry-After` the SDK can read: whole seconds or an HTTP date (#161). It is also set when
   the SDK did not retry because the wait was longer than 60 seconds. A value above

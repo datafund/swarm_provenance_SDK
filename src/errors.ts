@@ -160,9 +160,12 @@ export class PaymentConfigurationError extends PaymentError {
 }
 
 /**
- * A payment the gateway asked for was refused before signing: it broke the
- * configured policy (amount, asset, recipient, validity, network) or
- * `onBeforePayment` vetoed it. Nothing was signed or paid.
+ * A payment the gateway asked for was refused before signing. Nothing was
+ * signed or paid. The causes:
+ * - it broke the configured policy (amount, asset, recipient, validity,
+ *   network), or `onBeforePayment` vetoed it;
+ * - the 402 response carries no readable payment requirements (`refusals` is empty);
+ * - the signature was declined in the wallet.
  */
 export class PaymentRefusedError extends PaymentError {
   constructor(

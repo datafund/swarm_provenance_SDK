@@ -101,8 +101,9 @@ already includes its purchase markup, and adds the pool markup. With the default
 100%, the 402 asks for twice the gateway's purchase price for that stamp. The `StampError` message
 says how to continue: pass a `stampId` you own, or set `payForPool`.
 
-A request that sent a payment is never retried automatically (unpaid attempts still retry
-on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
+A request that sent a payment is not retried on 502/503/429 (unpaid attempts still are). The
+one exception is a paid write the gateway answers with `IDEMPOTENCY_KEY_IN_PROGRESS` or
+`IDEMPOTENCY_UNAVAILABLE`: the SDK retries it with the same key, as described below. If it fails after the payment was sent, the error's `payment` field says so
 (`{ paymentSent: true, transaction?, idempotencyKey?, stampId?, ... }`). A timeout while the wallet
 is still approving the payment is not reported as paid: nothing was sent.
 
