@@ -596,12 +596,16 @@ describe('paid requests with a success body that is not the expected shape (#199
   const SHAPE = /^Invalid response from gateway: expected a JSON object/;
   const OLD_HINT = /To retry without paying twice/;
   const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  /** The hint for a malformed paid 200: a keyed retry replays it, so contact the operator */
+  /**
+   * The hint for a paid 200 of the wrong shape: the gateway itself sent it, so a
+   * keyed retry gets it again or, if it was not stored, IDEMPOTENCY_KEY_DELIVERED_NOT_STORED
+   */
+  const NO_VALID_ANSWER = /does not return a valid answer/;
   const replayHint = (operation: string, key: string, transaction?: string) =>
     new RegExp(
       escape(
-        `The gateway stores its answer for idempotencyKey "${key}", so calling ${operation} again with that key ` +
-          'returns the same malformed answer. The payment may have been taken: contact the gateway operator with ' +
+        `The gateway itself sent this answer, so calling ${operation} again with idempotencyKey "${key}" ` +
+          'does not return a valid answer. The payment may have been taken: contact the gateway operator with ' +
           (transaction ? `transaction ${transaction}` : 'the idempotency key')
       ) + '$'
     );
@@ -675,23 +679,45 @@ describe('paid requests with a success body that is not the expected shape (#199
     const error = (await call(client({ payForPool: true })).catch((e: unknown) => e)) as ProvenanceError;
     expect(error.payment).toMatchObject({ paymentSent: true, idempotencyKey: 'k-err' });
     expect(error.message).toMatch(new RegExp(escape(`To retry without paying twice, call ${operation} again with idempotencyKey "k-err"${stamp}`) + '$'));
-    expect(error.message).not.toMatch(/returns the same malformed answer/);
+    expect(error.message).not.toMatch(NO_VALID_ANSWER);
   });
 
-  it('a paid upload whose 200 is not JSON also says a keyed retry replays it', async () => {
+  /** A body that fails while it is read, as a connection reset mid-body does */
+  const resetBody = (): ReadableStream<Uint8Array> =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('connection reset'));
+      },
+    });
+
+  // The gateway stores the answer its own app produced. A body lost in transit or
+  // replaced by a proxy is not that answer, so a keyed retry can recover the stored one
+  it.each([
+    ['upload()', 'a 200 that is not JSON', (): string => '<html>proxy error</html>', ` and stampId "${STAMP}"`],
+    ['upload()', 'a 200 whose body cannot be read', resetBody, ` and stampId "${STAMP}"`],
+    ['acquireStamp()', 'a 200 that is not JSON', (): string => '<html>proxy error</html>', ''],
+    ['acquireStamp()', 'a 200 whose body cannot be read', resetBody, ''],
+  ] as const)('a paid %s with %s keeps the advice to retry with the same key', async (operation, _label, body, stamp) => {
     vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
       const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
       if (headers.has('X-PAYMENT')) {
-        seen.push({ method: 'POST', path: '/api/v1/data/', paid: true });
-        return Promise.resolve(new Response('<html>proxy error</html>', { status: 200 }));
+        seen.push({ method: 'POST', path: operation === 'upload()' ? '/api/v1/data/' : '/api/v1/pool/acquire', paid: true });
+        return Promise.resolve(new Response(body(), { status: 200 }));
       }
       return gateway(input, init);
     });
     try {
-      const error = (await client().upload('hello', { stampId: STAMP, idempotencyKey: 'k-html' }).catch((e: unknown) => e)) as GatewayConnectionError;
+      const c = client({ payForPool: true });
+      const error = (await (operation === 'upload()'
+        ? c.upload('hello', { stampId: STAMP, idempotencyKey: 'k-lost' })
+        : c.acquireStamp('small', { idempotencyKey: 'k-lost' })
+      ).catch((e: unknown) => e)) as GatewayConnectionError;
+      expect(error).toBeInstanceOf(GatewayConnectionError);
       expect(error.code).toBe('INVALID_RESPONSE');
-      expect(error.message).toMatch(replayHint('upload()', 'k-html'));
-      expect(error.message).not.toMatch(OLD_HINT);
+      expect(error.payment).toMatchObject({ paymentSent: true, idempotencyKey: 'k-lost' });
+      expect(error.message).toMatch(new RegExp(escape(`To retry without paying twice, call ${operation} again with idempotencyKey "k-lost"${stamp}`) + '$'));
+      expect(error.message).not.toMatch(NO_VALID_ANSWER);
+      expect(payments()).toBe(1);
     } finally {
       vi.stubGlobal('fetch', gateway);
     }
@@ -714,7 +740,7 @@ describe('paid requests with a success body that is not the expected shape (#199
       expect(failure.payment).toMatchObject({ stampId: POOL_STAMP, idempotencyKey: ANY_KEY });
       expect(failure.stampId).toBe(POOL_STAMP);
       expect(failure.stampPayment).toBeDefined();
-      expect(failure.message).toMatch(/returns the same malformed answer\. The payment may have been taken: contact the gateway operator with /);
+      expect(failure.message).toMatch(/does not return a valid answer\. The payment may have been taken: contact the gateway operator with /);
       expect(failure.message).not.toMatch(OLD_HINT);
       expect(seen.filter((s) => s.paid).map((s) => s.path)).toEqual(['/api/v1/pool/acquire', '/api/v1/data/']);
     } finally {

@@ -8,6 +8,7 @@ import {
   type Hex,
 } from 'viem';
 import { DATA_PROVENANCE_ABI } from './abi.js';
+import { ProvenanceError, withCause } from '../errors.js';
 import { CHAIN_PRESETS, PRESET_RPC_FALLBACKS, ZERO_BYTES32, ZERO_ADDRESS } from './constants.js';
 import {
   ChainConfigurationError,
@@ -649,7 +650,7 @@ export class ChainClient {
   async getBalance(): Promise<BalanceInfo> {
     this.requireSigner();
 
-    const address = await this.signer!.getAddress();
+    const address = await this.signerAddress();
 
     try {
       const balanceWei = await this.publicClient.getBalance({ address });
@@ -688,7 +689,7 @@ export class ChainClient {
     await this.checkNotRegistered(hash, dataHash);
 
     const data = encodeRegisterData(hash, dataType, normalizedStorageRef);
-    const owner = await this.signer!.getAddress();
+    const owner = await this.signerAddress();
 
     let receipt: TransactionResult;
     try {
@@ -724,7 +725,7 @@ export class ChainClient {
     const data = encodeRecordAccess(hash);
     // After local validation, before any network call (#115/#116)
     const target = await this.ensureWriteTarget();
-    const accessor = await this.signer!.getAddress();
+    const accessor = await this.signerAddress();
 
     const receipt = await this.sendAndWait(data, { event: 'DataAccessed' }, target);
 
@@ -1147,6 +1148,20 @@ export class ChainClient {
       // down, wrong contract) is surfaced instead of anchoring blind (#116).
       if (error instanceof DataNotRegisteredError) return;
       throw error;
+    }
+  }
+
+  /**
+   * The signer's address. A custom signer's failure is a ChainConnectionError
+   * with the signer's error as `cause`, as for getChainId(); an SDK error from
+   * the signer passes through unchanged (#202).
+   */
+  private async signerAddress(): Promise<Address> {
+    try {
+      return await this.signer!.getAddress();
+    } catch (error) {
+      if (error instanceof ProvenanceError) throw error;
+      throw withCause(new ChainConnectionError(`Could not get the signer's address: ${rpcErrorMessage(error)}`), error);
     }
   }
 

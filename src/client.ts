@@ -694,16 +694,25 @@ export class ProvenanceClient {
     if (options.raw) {
       // Accepts what earlier versions accepted: any JSON text, or a non-null object (arrays too)
       const document = rawDocument(content);
-      // Content JSON cannot represent is INVALID_INPUT here, before any request (#202)
+      // Content JSON cannot represent is INVALID_INPUT here, before any request (#202).
+      // A caller's toJSON() or getter may throw anything, a ProvenanceError too: it is the cause
       try {
         dataJson = JSON.stringify(document) as string | undefined;
-        if (dataJson === undefined) throw new TypeError(NOT_REPRESENTABLE);
+      } catch (error) {
+        throw notJsonError('Raw mode content', error);
+      }
+      if (dataJson === undefined) throw notJsonError('Raw mode content', new TypeError(NOT_REPRESENTABLE));
+      try {
         // The caller's object may change while the stamp is acquired: the
         // snapshot is what is hashed, sent and returned
         metadata = buildDocumentMetadata(JSON.parse(dataJson) as Record<string, unknown>, metadataOptions);
       } catch (error) {
-        // buildDocumentMetadata's own INVALID_INPUT (nesting) is named for the upload
-        throw notJsonError('Raw mode content', error instanceof ProvenanceError ? error.cause : error);
+        // The snapshot is plain JSON, so this is buildDocumentMetadata's own
+        // INVALID_INPUT (nesting deeper than 1000 levels): named for the upload
+        throw notJsonError(
+          'Raw mode content',
+          error instanceof ProvenanceError && error.code === 'INVALID_INPUT' ? error.cause : error
+        );
       }
     } else {
       const bytes =
@@ -1204,7 +1213,9 @@ export class ProvenanceClient {
 
   /** INVALID_RESPONSE for a success body that is JSON but not the shape the method needs (#179) */
   private shapeError(expected: string, response: Response): GatewayConnectionError {
-    return this.invalidResponse(new Error(`expected ${expected}`), response);
+    const failure = this.invalidResponse(new Error(`expected ${expected}`), response);
+    SHAPE_ERRORS.add(failure);
+    return failure;
   }
 
   /** INVALID_RESPONSE for a success body that is not JSON, flagged if the request was paid */
@@ -1377,8 +1388,9 @@ function base64Length(bytes: number): number {
  * the metadata is `overhead` plus the base64 length.
  */
 function base64SizeHint(overhead: number, maxUploadBytes: number): string {
+  if (maxUploadBytes < overhead) return `No content fits: the metadata alone is ${overhead} bytes`;
   const fits = Math.floor((maxUploadBytes - overhead) / 4) * 3;
-  if (fits <= 0) return `No content fits: the metadata alone is ${overhead} bytes`;
+  if (fits === 0) return `Only empty content fits: the metadata alone is ${overhead} bytes`;
   const mib = fits >= 1048576 ? ` (about ${(fits / 1048576).toFixed(1)} MiB)` : '';
   return `Content up to ${fits} bytes${mib} fits`;
 }
@@ -1504,13 +1516,16 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
   if (!error.payment || idempotencyKey === undefined) return error;
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
-  if (error instanceof GatewayConnectionError && error.code === 'INVALID_RESPONSE') {
-    // A 200 that cannot be read, is not JSON or is not the expected shape: the
-    // gateway keeps its answer for the key, so a keyed retry gets it again
+  if (error instanceof GatewayConnectionError && SHAPE_ERRORS.has(error)) {
+    // Valid JSON of the wrong shape is the answer the gateway's app produced. A
+    // keyed retry gets that answer again, or IDEMPOTENCY_KEY_DELIVERED_NOT_STORED
+    // when the gateway did not store it (too large, or not storable): never a
+    // valid one. A body that could not be read or is not JSON (a reset, a proxy
+    // page) is not the gateway's answer, so the advice below still applies to it.
     const tx = error.payment.transaction;
     error.message +=
-      `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway stores its answer for idempotencyKey "${idempotencyKey}", ` +
-      `so calling ${operation} again with that key returns the same malformed answer. The payment may have been taken: ` +
+      `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway itself sent this answer, so calling ${operation} again ` +
+      `with idempotencyKey "${idempotencyKey}" does not return a valid answer. The payment may have been taken: ` +
       `contact the gateway operator with ${tx ? `transaction ${tx}` : 'the idempotency key'}`;
     return error;
   }
@@ -1553,6 +1568,12 @@ function matchesAsBase64(data: string, contentHash: string): boolean {
     return false;
   }
 }
+
+/**
+ * INVALID_RESPONSE errors for a success body that is JSON of the wrong shape
+ * (shapeError), as opposed to one that could not be read or is not JSON (#199)
+ */
+const SHAPE_ERRORS = new WeakSet<GatewayConnectionError>();
 
 /** A JSON object: not null, not an array */
 function isRecord(value: unknown): value is Record<string, unknown> {

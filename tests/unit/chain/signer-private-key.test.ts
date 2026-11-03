@@ -148,3 +148,27 @@ describe('fromPrivateKey (#123)', () => {
     expect(calls.some((c) => c.method === 'eth_sendRawTransaction')).toBe(false);
   });
 });
+
+describe('fromPrivateKey() input errors are ChainConfigurationError (#202)', () => {
+  it.each([
+    ['too short', '0x1234'],
+    ['not hex', '0x' + 'zz'.repeat(32)],
+    ['zero', '0x' + '00'.repeat(32)],
+    ['above the curve order', '0x' + 'ff'.repeat(32)],
+    ['without 0x', 'ab'.repeat(32)],
+  ])('refuses a private key that is %s, keeps viem\'s error as the cause, and does not echo the key', async (_label, key) => {
+    const error = await fromPrivateKey(key as Hex, 'https://rpc.test').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as ChainConfigurationError).code).toBe('CHAIN_CONFIGURATION');
+    expect((error as Error).message).toMatch(/^Invalid private key/);
+    expect((error as Error).message).not.toContain(key.replace(/^0x/, ''));
+    expect((error as Error).cause).toBeInstanceOf(Error);
+  });
+
+  it('refuses an empty rpcUrl with ChainConfigurationError and keeps viem\'s error as the cause', async () => {
+    const error = await fromPrivateKey(generatePrivateKey(), '').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as Error).message).toMatch(/^Invalid rpcUrl/);
+    expect((error as Error).cause).toBeInstanceOf(Error);
+  });
+});

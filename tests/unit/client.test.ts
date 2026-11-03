@@ -4,6 +4,7 @@ import { ProvenanceClient } from '../../src/client.js';
 import { ProvenanceError, GatewayConnectionError, StampError, NotaryError, PaymentRateLimitError } from '../../src/errors.js';
 import { sha256Hex, toBytes } from '../../src/utils.js';
 import { verifyDocumentHash } from '../../src/metadata.js';
+import { ChainValidationError } from '../../src/chain/errors.js';
 
 // Mock fetch globally. The mocks are plain objects with json(); the client
 // reads download bodies with text() (to canonicalise them losslessly), so
@@ -2598,6 +2599,21 @@ describe('raw content JSON cannot represent, and the FILE_TOO_LARGE size hint (#
     expect((error.cause as Error).message).toMatch(/BigInt/);
   });
 
+  it.each([
+    ['a ProvenanceError', () => new ProvenanceError('caller refused', 'CALLER_CODE')],
+    ['a ChainError subclass', () => new ChainValidationError('caller refused')],
+  ])('keeps %s thrown by the caller\'s toJSON() as the cause', async (_label, make) => {
+    const callerError = make();
+    const error = (await new ProvenanceClient()
+      .upload({ toJSON: () => { throw callerError; } }, { stampId: STAMP, raw: true })
+      .catch((e: unknown) => e)) as ProvenanceError;
+    expect(error).not.toBe(callerError);
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toBe('Raw mode content cannot be serialized as JSON: caller refused');
+    expect(error.cause).toBe(callerError);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('refuses before signing an owner proof', async () => {
     const signMessage = vi.fn(() => Promise.resolve('0x' + '1'.repeat(130)));
     const error = await new ProvenanceClient()
@@ -2621,12 +2637,24 @@ describe('raw content JSON cannot represent, and the FILE_TOO_LARGE size hint (#
       expect(OVERHEAD).toBe(171);
     });
 
-    it.each([1, 100, 171, 174])('with maxUploadBytes %i says that no content fits', async (max) => {
+    it.each([1, 100, 170])('with maxUploadBytes %i says that no content fits', async (max) => {
       const error = await refusal(max, new Uint8Array(1000));
       expect(error.code).toBe('FILE_TOO_LARGE');
       expect(error.message).toContain(`No content fits: the metadata alone is ${OVERHEAD} bytes`);
       expect(error.message).not.toMatch(/-\d|\b0\.0\b|MiB/);
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it.each([171, 172, 174])('with maxUploadBytes %i says that only empty content fits, and empty content is sent', async (max) => {
+      const error = await refusal(max, new Uint8Array(1));
+      expect(error.code).toBe('FILE_TOO_LARGE');
+      expect(error.message).toContain(`Only empty content fits: the metadata alone is ${OVERHEAD} bytes`);
+      expect(error.message).not.toMatch(/-\d|\b0\.0\b|MiB/);
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      mockFetch.mockResolvedValueOnce(json({ reference: 'b'.repeat(64) }, 200));
+      await new ProvenanceClient({ maxUploadBytes: max }).upload(new Uint8Array(0), { stampId: STAMP });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
     it.each([

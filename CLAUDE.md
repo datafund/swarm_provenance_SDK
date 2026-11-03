@@ -323,8 +323,8 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `POOL_EXHAUSTED` | StampError | Stamp pool is empty, no stamps available |
 | `NOTARY_NOT_ENABLED` | NotaryError | Notary service disabled |
 | `NOT_IMPLEMENTED` | VerificationError | Feature not yet implemented |
-| `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config |
-| `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable (messages are URL-redacted via `rpcErrorMessage`) |
+| `CHAIN_CONFIGURATION` | ChainConfigurationError | Missing viem, invalid chain config, invalid private key or empty rpcUrl (`fromPrivateKey`), refused `eth_requestAccounts` (`fromEip1193Provider`) |
+| `CHAIN_CONNECTION` | ChainConnectionError | RPC unreachable (messages are URL-redacted via `rpcErrorMessage`); signer `getChainId()` or `getAddress()` failed (`signerAddress()`) |
 | `CHAIN_CONNECTION` | ReceiptTimeoutError (subclass) | Tx sent, no receipt; has `txHash` and `expected`: resume with `waitForTransaction(e.txHash, e.expected)` |
 | `CHAIN_TRANSACTION` | ChainTransactionError | Tx reverted, out of gas, or no expected contract event in the receipt (`.originalError` non-enumerable) |
 | `CHAIN_VALIDATION` | ChainValidationError | Bad hash format, invalid input |
