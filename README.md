@@ -101,8 +101,10 @@ already includes its purchase markup, and adds the pool markup. With the default
 100%, the 402 asks for twice the gateway's purchase price for that stamp. The `StampError` message
 says how to continue: pass a `stampId` you own, or set `payForPool`.
 
-A request that sent a payment is never retried automatically (unpaid attempts still retry
-on 502/503/429); if it fails after the payment was sent, the error's `payment` field says so
+A request that sent a payment is not retried on 502/503/429 (unpaid attempts still are). The
+one exception is a paid write the gateway answers with `IDEMPOTENCY_KEY_IN_PROGRESS` or
+`IDEMPOTENCY_UNAVAILABLE`: the SDK retries it with the same key, as described below. If it
+fails after the payment was sent, the error's `payment` field says so
 (`{ paymentSent: true, transaction?, idempotencyKey?, stampId?, ... }`). A timeout while the wallet
 is still approving the payment is not reported as paid: nothing was sent.
 
@@ -912,6 +914,10 @@ issue numbers and lists the open release-gate items.
   the header said. Every SDK error from a 429 with a readable `Retry-After` now has
   `retryAfterSeconds`, not only `PaymentRateLimitError`. `health()` returns `false` at once
   for such a 429. Before, it waited and retried, and could return `true`.
+- A `Retry-After` delta-seconds value above `Number.MAX_SAFE_INTEGER` is unreadable (#185):
+  `retryAfterSeconds` is not set, a retry uses the normal backoff, and an
+  `IDEMPOTENCY_KEY_IN_PROGRESS` retry waits the 5 s default (before, 30 s). Before, such a value
+  was reported as, for example, `1e+23`.
 - Chain writes no longer retry a send that fails with "replacement underpriced" (#123): a
   transaction with that nonce is already pending, and a resend could write twice. That error and
   "already known" now throw `ChainTransactionError` with "Transaction not confirmed: ... It may
@@ -1016,6 +1022,8 @@ issue numbers and lists the open release-gate items.
   code, or `PAYMENT_REQUIRED`). The unpaid acquisition carries no `Idempotency-Key`. In `'free'`
   and `'none'` modes, a pool 402 is still a `StampError`. Its message now also says how to
   continue, and its code is the gateway's code, or `PAYMENT_REQUIRED` where it used to have none.
+- The `StampError` for an unpaid pool 402 keeps the 402 response in `error.body`, with its price
+  options and code (#163).
 - Paid writes send an `Idempotency-Key` (#102); see "Retrying without paying twice". Attempts that
   may pay use `paidTimeout` (default 120 s, or `timeout` if longer) instead of `timeout`, so a
   short `timeout` no longer cuts off a paid upload. Errors after a payment carry
@@ -1053,6 +1061,9 @@ issue numbers and lists the open release-gate items.
   In x402 mode the policy reads the 402's top-level payment request before the deprecated
   `detail` copy, and a signature declined in the wallet is `PaymentRefusedError` instead of
   `GatewayConnectionError` (`CONNECTION_FAILED`).
+- An ethers v6 wallet rejection (code `ACTION_REJECTED`) is `PaymentRefusedError`
+  (`PAYMENT_REFUSED`), as EIP-1193 code 4001 and viem's `UserRejectedRequestError` are (#166).
+  Before, it was `PaymentError` (`PAYMENT_FAILED`).
 - x402 payment-library failures are no longer `GatewayConnectionError` (`CONNECTION_FAILED`)
   (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
   sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:

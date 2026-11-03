@@ -142,6 +142,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   gateway's code, or `PAYMENT_REQUIRED`. (#109)
 - An unpaid pool acquisition carries no `Idempotency-Key`. The pool's `StampError` message says
   how to continue. (#109)
+- The `StampError` for an unpaid pool 402 keeps the 402 response in `error.body`, with its
+  price options and code. Before, `error.body` was not set on it. (#163)
 - x402 mode on Node 18 without Web Crypto throws `PaymentConfigurationError` that says how to
   fix it. Before, the library failed with an unclear error. (#106, PR #138)
 
@@ -226,6 +228,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `upload()` refuses metadata over `maxUploadBytes` (default 10485760) with `FILE_TOO_LARGE`
   before it acquires a stamp. It also refuses invalid raw input before that. (#112)
 - A signature declined in the wallet throws `PaymentRefusedError`. (#112)
+- An ethers v6 wallet rejection (code `ACTION_REJECTED`) is also `PaymentRefusedError` with code
+  `PAYMENT_REFUSED`. Before, it threw `PaymentError` with code `PAYMENT_FAILED`. (#166)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)
 - A `Retry-After` value that is neither whole seconds nor a date, such as `"1.5"`, falls back to
   the normal backoff. Before, `"1.5"` was read as 1 second. (#123)

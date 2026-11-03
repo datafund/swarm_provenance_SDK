@@ -262,7 +262,12 @@ export interface ProvenanceMetadata {
 export interface DocumentMetadata {
   /** Structured JSON document data (not base64-encoded) */
   data: Record<string, unknown>;
-  /** SHA256 hash of JSON.stringify(data) */
+  /**
+   * SHA-256 of the canonical JSON of `data` (sorted keys, no spaces,
+   * non-ASCII characters escaped as \uXXXX, as Python's
+   * json.dumps(sort_keys=True, separators=(',', ':')) with ensure_ascii), since
+   * #114. The SDK 0.6.x form, SHA-256 of JSON.stringify(data), is still accepted.
+   */
   content_hash: string;
   /** Postage stamp ID used for upload */
   stamp_id: string;
