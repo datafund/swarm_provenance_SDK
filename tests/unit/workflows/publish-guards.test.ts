@@ -30,6 +30,9 @@ interface Step {
   keys: string[];
 }
 
+// A step key not listed here, anywhere in publish.yml (for example
+// `timeout-minutes:`), fails this file on purpose. Add it to STEP_KEYS only
+// after checking that it does not change how the guard steps run.
 const STEP_KEYS = new Set(['name', 'id', 'uses', 'if', 'shell', 'env', 'with', 'run']);
 const SCALAR_KEYS = ['name', 'id', 'uses', 'if', 'shell'] as const;
 
@@ -64,6 +67,18 @@ function parseJobSteps(text: string, job: string): Step[] {
     }
   }
   if (start < 0) throw new Error(`publish.yml: no job "${job}" under jobs`);
+  // `defaults:` (run: shell: or working-directory:) at workflow level or under
+  // the job changes how GitHub runs a step that has no shell: key, such as
+  // Tag release. The run tests assume GitHub's own defaults, so refuse it.
+  for (let d = 0; d < lines.length; d++) {
+    const l = lines[d] ?? '';
+    if (/^defaults:/.test(l)) fail(d, 'workflow-level "defaults:" is not supported');
+  }
+  for (let d = start + 1; d < lines.length; d++) {
+    const l = lines[d] ?? '';
+    if (l.trim() !== '' && indentOf(l) <= 2) break; // end of the job
+    if (/^ {4}defaults:/.test(l)) fail(d, `"defaults:" under job "${job}" is not supported`);
+  }
   let i = start + 1;
   for (; i < lines.length; i++) {
     const l = lines[i] ?? '';
@@ -273,6 +288,23 @@ describe('publish.yml step reader: fails loudly on a reshaped workflow', () => {
     expect(() =>
       parseJobSteps(sample(good.replace('        id:', '         id:')), 'publish')
     ).toThrow(/unexpected indentation/);
+  });
+
+  it('throws on workflow-level defaults:', () => {
+    const yml = `defaults:\n  run:\n    shell: sh\n${sample(good)}`;
+    expect(() => parseJobSteps(yml, 'publish')).toThrow(
+      /line 1: workflow-level "defaults:" is not supported/
+    );
+  });
+
+  it('throws on defaults: under the job', () => {
+    const yml = sample(good).replace(
+      '    steps:\n',
+      '    defaults:\n      run:\n        working-directory: sub\n    steps:\n'
+    );
+    expect(() => parseJobSteps(yml, 'publish')).toThrow(
+      /line 5: "defaults:" under job "publish" is not supported/
+    );
   });
 
   it('throws when the job or its steps are missing', () => {
