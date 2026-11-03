@@ -368,6 +368,14 @@ describe('errors for input JSON cannot represent, and for bad metadata text (#20
     expect((error as Error).cause).not.toBeInstanceOf(ProvenanceError);
   });
 
+  it('buildDocumentMetadata() keeps a ProvenanceError thrown by toJSON() as the cause', () => {
+    const callerError = new ProvenanceError('caller refused', 'CALLER_CODE');
+    const error = thrown(() => buildDocumentMetadata({ toJSON: () => { throw callerError; } }, { stampId: 's' }));
+    expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+    expect((error as Error).message).toBe('Document cannot be serialized as JSON: caller refused');
+    expect((error as Error).cause).toBe(callerError);
+  });
+
   it.each([
     ['text that is not JSON', 'not json', /not valid JSON/],
     ['an empty string', '', /not valid JSON/],

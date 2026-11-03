@@ -963,6 +963,12 @@ issue numbers and lists the open release-gate items.
   input address (`anchorFor().owner`, `transferOwnership().newOwner`, `setDelegate().delegate`)
   hold the address that was sent: an all-uppercase input comes back in lowercase, other
   spellings unchanged.
+- Signer errors are chain errors with the original error as `error.cause` (#202).
+  `fromPrivateKey()` throws `ChainConfigurationError` for an invalid private key or an empty
+  `rpcUrl`, instead of viem's plain `Error`. `fromEip1193Provider()` throws
+  `ChainConfigurationError` when the wallet refuses account access, instead of the wallet's
+  error. `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the
+  signer's `getAddress()` fails.
 - `fromPrivateKey` is not exported to browser builds (#123). `@datafund/swarm-provenance/chain`
   now has a `browser` export condition, listed first, that resolves to a build without
   `fromPrivateKey`; importing it there fails at bundle time ("No matching export"). Node

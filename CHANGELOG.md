@@ -176,6 +176,16 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 ### Chain
 
+- `fromPrivateKey()` throws `ChainConfigurationError` for an invalid private key or an empty
+  `rpcUrl`. Before, viem's plain `Error` escaped. The message does not include the key. (#202)
+- `fromEip1193Provider()` throws `ChainConfigurationError` when the wallet refuses account
+  access (`eth_requestAccounts`, for example EIP-1193 code 4001), as for a declined chain
+  switch. It also throws it for an answer that is not a list starting with an address string.
+  Before, the wallet's error escaped as it was. (#202)
+- `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the signer's
+  `getAddress()` fails, as for `getChainId()`. An SDK error from the signer passes through.
+  Nothing is sent. Before, the signer's error escaped as it was. (#202)
+- These errors keep the original error as `error.cause`, not enumerable. (#202)
 - Writes refuse a wrong RPC or signer chain and a contract address without code. (#115)
 - `ChainSigner` may implement `switchChain()`. The built-in wallet signers do; see Breaking
   changes. (#115)
@@ -250,14 +260,17 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   the caller's own error, escaped. (#202)
 - `parseMetadata()` throws `ProvenanceError` with code `INVALID_INPUT`. Before, it threw
   `SyntaxError` for text that is not JSON and a plain `Error` for JSON that is not metadata. The
-  messages are unchanged. (#202)
+  messages for JSON that is not metadata are unchanged. Text that is not JSON gets a new
+  message, "Invalid metadata: not valid JSON", with the `SyntaxError` as `error.cause`. (#202)
 - Without `Buffer` (browsers), `base64ToBytes()` and `extractContent()` throw `ProvenanceError`
   with code `INVALID_INPUT` for text that is not valid base64, and `verifyContentHash()` returns
   `false`. Before, a raw `InvalidCharacterError` escaped. (#202)
 - The `FILE_TOO_LARGE` message of a base64 upload gives the exact largest content that fits, in
   bytes, with MiB from 1 MiB up, for example "Content up to 7864191 bytes (about 7.5 MiB) fits".
-  When no content fits, it says so. Before, it estimated the size from a fixed 512-byte overhead
+  When only empty content fits, or no content fits, it says so. Before, it estimated the size from a fixed 512-byte overhead
   and showed "about -0.0 MiB" or "about 0.0 MiB" for small `maxUploadBytes`. (#202)
+- `ProvenanceError` declares `cause`, so `error.cause` can be read with a TypeScript lib older
+  than ES2022. The SDK sets it, not enumerable, when it wraps another error. (#202)
 - `canonicalizeJsonText()` and `canonicalizeJsonValue()` are the only functions that still throw
   standard errors (`SyntaxError`, `TypeError`, `RangeError`) for arguments of the documented
   types, as documented. (#202)

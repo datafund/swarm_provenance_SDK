@@ -271,8 +271,8 @@ A receipt is present only when the request carried a payment the gateway accepte
 
 | Error | Code | When |
 |-------|------|------|
-| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused), or JSON cannot represent it: a circular reference, a `BigInt`, nesting deeper than 1000 levels, a `toJSON()` that returns `undefined`, or a `toJSON()` or getter that throws. The original error is `error.cause` (#202); `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
-| `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent. For a base64 upload, the message gives the largest content in bytes that fits with the same options, or says that no content fits (#202) |
+| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused), or JSON cannot represent it: a circular reference, a `BigInt`, nesting deeper than 1000 levels, a `toJSON()` that returns `undefined`, or a `toJSON()` or getter that throws; `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent. For content JSON cannot represent, the original error is `error.cause` (#202) |
+| `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent. For a base64 upload, the message gives the largest content in bytes that fits with the same options, says that only empty content fits, or says that no content fits (#202) |
 | `GatewayConnectionError` | `FILE_TOO_LARGE` | Without `sign: 'notary'`: the gateway's proxy refused the body with a 413 that is not JSON. With `sign: 'notary'`, this is a `NotaryError` with the same code |
 | `ProvenanceError` | `OWNER_PROOF_FAILED` | `ownerSigner.signMessage()` threw, or did not return a `0x`-prefixed hex string |
 | `StampError` | `POOL_EXHAUSTED`, or the gateway's code | Without `stampId`: the pool is enabled and empty, or the pool acquisition failed (see StampError) |
@@ -561,6 +561,9 @@ class ProvenanceError extends Error {
   stampId?: string;
   // upload() only: the receipt for the pool stamp it paid for before this error
   stampPayment?: PaymentReceipt;
+  // The error this one wraps, when the SDK wrapped one (#202). Declared on the class,
+  // so it can be read with a TypeScript lib older than ES2022. Not enumerable
+  cause?: unknown;
 }
 ```
 

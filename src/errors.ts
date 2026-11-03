@@ -80,6 +80,13 @@ export class ProvenanceError extends Error {
    */
   public retryAfterSeconds?: number | undefined;
 
+  /**
+   * The error this one wraps, when the SDK wrapped one: for example the
+   * JSON.stringify error of raw content, or a wallet's refusal (#202).
+   * Declared here so that it can be read with a TypeScript lib older than ES2022.
+   */
+  declare public cause?: unknown;
+
   constructor(
     message: string,
     public readonly code?: string

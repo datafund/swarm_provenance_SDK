@@ -694,16 +694,25 @@ export class ProvenanceClient {
     if (options.raw) {
       // Accepts what earlier versions accepted: any JSON text, or a non-null object (arrays too)
       const document = rawDocument(content);
-      // Content JSON cannot represent is INVALID_INPUT here, before any request (#202)
+      // Content JSON cannot represent is INVALID_INPUT here, before any request (#202).
+      // A caller's toJSON() or getter may throw anything, a ProvenanceError too: it is the cause
       try {
         dataJson = JSON.stringify(document) as string | undefined;
-        if (dataJson === undefined) throw new TypeError(NOT_REPRESENTABLE);
+      } catch (error) {
+        throw notJsonError('Raw mode content', error);
+      }
+      if (dataJson === undefined) throw notJsonError('Raw mode content', new TypeError(NOT_REPRESENTABLE));
+      try {
         // The caller's object may change while the stamp is acquired: the
         // snapshot is what is hashed, sent and returned
         metadata = buildDocumentMetadata(JSON.parse(dataJson) as Record<string, unknown>, metadataOptions);
       } catch (error) {
-        // buildDocumentMetadata's own INVALID_INPUT (nesting) is named for the upload
-        throw notJsonError('Raw mode content', error instanceof ProvenanceError ? error.cause : error);
+        // The snapshot is plain JSON, so this is buildDocumentMetadata's own
+        // INVALID_INPUT (nesting deeper than 1000 levels): named for the upload
+        throw notJsonError(
+          'Raw mode content',
+          error instanceof ProvenanceError && error.code === 'INVALID_INPUT' ? error.cause : error
+        );
       }
     } else {
       const bytes =
@@ -1379,8 +1388,9 @@ function base64Length(bytes: number): number {
  * the metadata is `overhead` plus the base64 length.
  */
 function base64SizeHint(overhead: number, maxUploadBytes: number): string {
+  if (maxUploadBytes < overhead) return `No content fits: the metadata alone is ${overhead} bytes`;
   const fits = Math.floor((maxUploadBytes - overhead) / 4) * 3;
-  if (fits <= 0) return `No content fits: the metadata alone is ${overhead} bytes`;
+  if (fits === 0) return `Only empty content fits: the metadata alone is ${overhead} bytes`;
   const mib = fits >= 1048576 ? ` (about ${(fits / 1048576).toFixed(1)} MiB)` : '';
   return `Content up to ${fits} bytes${mib} fits`;
 }
