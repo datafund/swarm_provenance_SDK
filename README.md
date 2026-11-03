@@ -1028,7 +1028,11 @@ issue numbers and lists the open release-gate items.
   catches these. In any mode, a success response that is not valid JSON throws
   `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`. This applies to
   `pricing()`, `acquireStamp()`, `upload()`, `download()`, `downloadDocument()`, `notaryInfo()`
-  and `poolStatus()` (#173).
+  and `poolStatus()` (#173). `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`
+  also throw `INVALID_RESPONSE` for a success body that cannot be read, is not a JSON object, or
+  lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
+  empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
+  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.

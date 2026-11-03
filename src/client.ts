@@ -206,6 +206,10 @@ export class ProvenanceClient {
     }
 
     const data = await this.readJson<GatewayNotaryInfoResponse>(response);
+    // address may be null or absent (notary disabled or not configured): not required
+    if (!isRecord(data) || typeof data.enabled !== 'boolean' || typeof data.available !== 'boolean') {
+      throw this.shapeError('a JSON object with boolean "enabled" and "available"', response);
+    }
     const info: NotaryInfo = {
       enabled: data.enabled,
       available: data.available,
@@ -233,6 +237,18 @@ export class ProvenanceClient {
     }
 
     const data = await this.readJson<GatewayPoolStatusResponse>(response);
+    if (
+      !isRecord(data) ||
+      typeof data.enabled !== 'boolean' ||
+      typeof data.total_stamps !== 'number' ||
+      !isRecord(data.current_levels) ||
+      !isRecord(data.reserve_config)
+    ) {
+      throw this.shapeError(
+        'a JSON object with boolean "enabled", number "total_stamps" and objects "current_levels" and "reserve_config"',
+        response
+      );
+    }
     return {
       enabled: data.enabled,
       available: Object.fromEntries(
@@ -425,9 +441,15 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const text = await response.text();
-    const raw = this.parseJson<Record<string, unknown>>(text, response);
-    const wrapped = Boolean(raw['metadata'] && typeof raw['metadata'] === 'object');
+    const text = await this.readText(response);
+    const raw = this.parseJson<unknown>(text, response);
+    const record = isRecord(raw) ? (isRecord(raw['metadata']) ? raw['metadata'] : raw) : undefined;
+    // A record without a data field or a content_hash is malformed, not tampered with (#179).
+    // data may be any JSON value: raw uploads accept arrays, null, numbers and strings.
+    if (!isRecord(raw) || !record || !('data' in record) || typeof record['content_hash'] !== 'string') {
+      throw this.shapeError('a JSON object with a "data" field and a string "content_hash" (directly or under "metadata")', response);
+    }
+    const wrapped = record !== raw;
     const canonicalData = canonicalDataOf(text, wrapped);
 
     let documentData: Record<string, unknown>;
@@ -443,7 +465,10 @@ export class ProvenanceClient {
       contentHash = meta['content_hash'] as string;
       stampId = meta['stamp_id'] as string;
       provenanceStandard = meta['provenance_standard'] as string | undefined;
-      signatures = raw['signatures'] as NotarySignature[] | undefined;
+      // As in the direct format, a signatures value that is not an array is ignored
+      if (Array.isArray(raw['signatures'])) {
+        signatures = raw['signatures'] as NotarySignature[];
+      }
     } else {
       // Direct format: {data: {...}, content_hash: "...", stamp_id: "...", ...}
       documentData = raw['data'] as Record<string, unknown>;
@@ -759,16 +784,25 @@ export class ProvenanceClient {
     // Parse response - gateway may return:
     // 1. Wrapped format: {metadata: {...}, signatures: [...]}
     // 2. Direct format: {data: "...", content_hash: "...", stamp_id: "...", signatures?: [...]}
-    const text = await response.text();
-    const data = this.parseJson<
-      { metadata: ProvenanceMetadata; signatures?: NotarySignature[] } | (ProvenanceMetadata & { signatures?: NotarySignature[] })
-    >(text, response);
-    const wrapped = Boolean('metadata' in data && data.metadata && typeof data.metadata === 'object');
+    const text = await this.readText(response);
+    const parsed = this.parseJson<unknown>(text, response);
+    const record = isRecord(parsed) ? (isRecord(parsed['metadata']) ? parsed['metadata'] : parsed) : undefined;
+    // data is base64-decoded and content_hash compared: both must be strings (#179)
+    if (!record || typeof record['data'] !== 'string' || typeof record['content_hash'] !== 'string') {
+      throw this.shapeError('a JSON object with string "data" and "content_hash" (directly or under "metadata")', response);
+    }
+    const data = parsed as
+      | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
+      | (ProvenanceMetadata & { signatures?: NotarySignature[] });
+    const wrapped = record !== parsed;
 
     if ('metadata' in data && wrapped) {
       // Wrapped format
       metadata = data.metadata;
-      signatures = data.signatures;
+      // As in the direct format, a signatures value that is not an array is ignored
+      if (Array.isArray(data.signatures)) {
+        signatures = data.signatures;
+      }
     } else {
       // Direct format - signatures at same level as metadata fields
       const directData = data as ProvenanceMetadata & { signatures?: NotarySignature[] };
@@ -1073,6 +1107,20 @@ export class ProvenanceClient {
     }
   }
 
+  /** Read a successful response body as text. A read failure is INVALID_RESPONSE, as in readJson (#179) */
+  private async readText(response: Response): Promise<string> {
+    try {
+      return await response.text();
+    } catch (error) {
+      throw this.invalidResponse(error, response);
+    }
+  }
+
+  /** INVALID_RESPONSE for a success body that is JSON but not the shape the method needs (#179) */
+  private shapeError(expected: string, response: Response): GatewayConnectionError {
+    return this.invalidResponse(new Error(`expected ${expected}`), response);
+  }
+
   /** INVALID_RESPONSE for a success body that is not JSON, flagged if the request was paid */
   private invalidResponse(error: unknown, response: Response): GatewayConnectionError {
     const failure = new GatewayConnectionError(
@@ -1342,6 +1390,11 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** A JSON object: not null, not an array */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Minimum interval between re-checks of a cached notary address (see verifySignatures) */
