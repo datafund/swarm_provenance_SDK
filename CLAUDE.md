@@ -208,7 +208,7 @@ pnpm format         # Prettier
 
 ### Branching
 
-- **`main`** — Protected. Requires 1 PR review, enforced for admins. No direct pushes.
+- **`main`** — Protected. Requires a pull request (0 approving reviews), enforced for admins. No direct pushes, no force pushes. No required status checks.
 - **`development`** — Integration branch. All feature work merges here first.
 - **Feature branches** — Created from `development`: `feature/<name>`, `fix/<name>`, `chore/<name>`.
 
@@ -218,7 +218,7 @@ pnpm format         # Prettier
 2. Do work, commit, push, create PR to `development`
 3. Merge to `development` after CI passes
 4. When ready to release: bump version in `package.json`, add the version's entry to `CHANGELOG.md`, create PR from `development` → `main`
-5. After merge to `main`, CI auto-publishes to npm and creates a git tag
+5. After merge to `main`, CI auto-publishes to npm and creates a git tag (if the commit is still the tip of `main`; see Releasing)
 
 ### Releasing to npm
 
@@ -226,17 +226,29 @@ Publishing is automated via `.github/workflows/publish.yml`:
 - Triggers on push to `main`
 - Runs the full `ci.yml` matrix first (it calls `ci.yml` through `workflow_call`). The publish job needs it to pass for that commit.
 - Runs the secret scan (`secret-scan.yml`, also through `workflow_call`) on the pushed range. The publish job needs it to pass for that commit.
-- Only one publish job runs at a time (job-level concurrency group `npm-publish`). By default, GitHub keeps at most one pending job per group, so a third push that reaches the publish job while one runs and one waits cancels the waiting one. That push's version is published only if the newer push has the same version, and then from the newer commit's code, not the cancelled commit's. `queue: max` is not used yet: it is not checked on a real run, and actionlint does not accept the key (#187). The group does not keep push order: a publish job joins it only after its own matrix and scan finish, so an older push whose checks finish later can publish after a newer one and move npm `latest` back. This has not been seen on a run, and it was possible before the group was added (#188). Do not re-run the cancelled run later: `npm publish` without `--tag` would move `latest` back to the older version.
+- Only one publish job runs at a time (job-level concurrency group `npm-publish`). The group does not keep push order: a publish job joins it only after its own matrix and scan finish.
 - Checks if `package.json` version is already published
-- If new version: runs tests on Node 24, builds, publishes to npm, tags `vX.Y.Z`
-- If version unchanged: skips publish (safe for non-release merges)
+- If the version is new: runs tests on Node 24, builds, and then publishes to npm and tags `vX.Y.Z` only if the commit is still the tip of `main` (`git ls-remote origin refs/heads/main`, right before `npm publish`). If a different commit is on `main` (normally a newer one), the job skips publish and tag with a warning and a line in the run summary: that commit's own run should publish. So an older push that reaches the group late cannot move npm `latest` back (#188). If the tip cannot be read, the job fails; re-run that run, and it publishes if its commit is still the tip.
+- If the version is already published but its tag `vX.Y.Z` is missing on origin (for example, the tag push failed after `npm publish`), the job pushes the tag, but only if the commit is the tip of `main`. It never publishes again. The tag then points at the tip commit, which can be a later commit with the same version as the one that published. If origin cannot be read, the job fails. The workflow cannot fix one case: a version published, its tag push failed, and then a commit with a different version became the tip. The workflow never creates that `vX.Y.Z` tag. Push it by hand: `git tag vX.Y.Z <publishing commit> && git push origin vX.Y.Z`. The repository has no tag rulesets today.
+- A version that already published is not affected by the tip check.
+- Re-running a run whose commit is no longer the tip of `main` skips publish and tag. Three points apply:
+  - A re-run uses the workflow file of its own commit, so a run from before this change has no tip check. Do not re-run such a run: it could publish its version and move `latest` back.
+  - GitHub allows a re-run only up to 30 days after the run.
+  - A re-run's publish job joins the `npm-publish` group, so it can cancel the tip commit's pending job (see the cancel case below).
+- If `main` is force-moved back to an older commit, that push starts a run and the older commit is now the tip, so an unpublished version there publishes and moves `latest` back. This is the same accepted limit as a lower version (see below). Branch protection disables force pushes to `main` today, so this case needs a protection change first.
+- A superseded version is never published, even when both commits pass, if the newer commit is pushed before the older commit's tip-check step runs. Example: commit A sets 0.7.0, commit B sets 0.7.1, and B is pushed before A's tip-check step runs. Then 0.7.0 never reaches npm. If A's tip-check step runs first, 0.7.0 publishes. A later commit with the same version publishes that version, from its own code.
+- If the newer commit's own run fails its checks, and that commit was pushed before the older commit's tip-check step ran, nothing publishes. A fix merged to `main` then publishes the version in its `package.json`. If the failure was flaky, re-run the failed run instead.
+- If the newer commit was pushed before the older commit's tip-check step ran, and its push starts no workflow run (a skip marker in the commit message: `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]` or `skip-checks: true`; or a push made with `GITHUB_TOKEN`), nothing publishes: the older run skips because it is not the tip. `publish.yml` has no `workflow_dispatch`, so the tip commit has no run to re-run, and pushing the same SHA again starts nothing. The only recovery is a new commit that a user merges to `main` through a pull request, without a skip marker. For example, push an empty commit to a branch cut from `main` and merge it to `main` by pull request with a merge commit (not squash or rebase). A merge commit always creates a new commit on `main`. A `development` → `main` pull request also works, but it also releases what is on `development`. Branch protection rejects a direct push to `main`. A merge in the GitHub interface counts as a user push and starts `publish.yml`.
+- By default, GitHub keeps at most one pending job per group. A job that joins later cancels the pending one, by queue order, not by commit. So the tip commit's pending job can be cancelled by an older commit's job, which the tip check then skips, and nothing publishes. If the tip commit's publish run was cancelled, re-run it; this is safe because of the tip check. A re-run works only within GitHub's 30-day re-run window. After that, the only recovery is a new commit that a user merges to `main` through a pull request, without a skip marker (see the no-run case above). `queue: max` would prevent this case. It is not used because GitHub accepting the key is not checked on a real run, and an invalid `publish.yml` would stop both publishing and the secret scan of pushes to `main` (#187).
+- There is no npm version comparison. If the tip of `main` sets an unpublished version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes and moves `latest` back. The workflow cannot publish such a hotfix under a tag other than `latest`.
+- If version unchanged: skips publish (safe for non-release merges), and pushes the tag only if it is missing and the commit is the tip of `main` (see above)
 
 To release a new version:
 1. On `development`, bump version: edit `package.json` `"version"` field
 2. Commit: `chore: bump version to X.Y.Z`
 3. Add the version's entry to `CHANGELOG.md`: what changed for users, with issue numbers, and any open release-gate items
 4. Create PR `development` → `main`
-5. After merge, npm publish happens automatically
+5. After merge, npm publish happens automatically (if the commit is still the tip of `main`; see Releasing)
 
 ### CI
 

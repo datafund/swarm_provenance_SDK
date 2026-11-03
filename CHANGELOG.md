@@ -267,6 +267,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `publish.yml` publishes to npm only after the secret scan passes for the pushed commits, and
   runs only one publish job at a time. The secret scan runs with read-only repository access.
   (#176)
+- `publish.yml` publishes and tags only if the commit is still the tip of `main`, so an older
+  push whose checks finish later cannot move npm `latest` back. If a version is on npm but its
+  tag is missing on origin, a later run from the tip of `main` pushes the tag without publishing
+  again. (#188, #187)
 
 ### Release gate gaps
 
@@ -285,13 +289,33 @@ The release gate in #129 is not fully met. These items are open:
     still publishes only after the `ci.yml` matrix passes for the merged commit (#174).
   - `development` is not a protected branch.
   - `.mcp.json` and `.claude/settings.json` run `@plur-ai` packages without a pinned version.
-- By default, GitHub keeps at most one waiting publish job. When a third push to `main` reaches
-  the publish job while one runs and one waits, GitHub cancels the waiting one. Its version is
-  published only if the newer push has the same version in `package.json`, and then from the
-  newer commit's code, not the cancelled commit's. `queue: max` is not used yet: it is not
-  checked on a real run, and actionlint does not accept the key. Do not re-run a cancelled
-  publish run later: `npm publish` without `--tag` moves `latest` back. (#176, #187)
-- The `npm-publish` group runs one publish job at a time, but not in push order. A publish job
-  joins it only after its own matrix and scan finish, so an older push whose checks finish later
-  can publish after a newer one and move npm `latest` back. This has not been seen on a run,
-  and it was possible before the group was added. (#188)
+- `publish.yml` publishes only from the tip of `main`. A superseded version is not published,
+  even when both commits pass, if the newer commit is pushed before the older commit's
+  tip-check step runs: if commit A sets 0.7.0 and commit B sets 0.7.1, 0.7.0 then never reaches
+  npm. A later commit with the same version publishes that version, from its own code. If the
+  newest commit was pushed before the older commit's tip-check step ran, and it fails its
+  checks or its push starts no run (a skip marker such as `[skip ci]`, or a push made with
+  `GITHUB_TOKEN`), nothing publishes. `publish.yml` has no `workflow_dispatch`, and branch
+  protection rejects a direct push to `main`. So the recovery is a new commit that a user merges
+  to `main` through a pull request, without a skip marker: for example, an empty commit on a
+  branch cut from `main`, merged to `main` by pull request with a merge commit (not squash or
+  rebase). A `development` → `main` pull request also works, but it also releases what is on
+  `development`. If a failure was flaky, re-run the failed run instead. (#188)
+- A publish run from before this change has no tip check. Do not re-run it. (#188)
+- If a version is on npm but its tag push failed, a later run tags the tip of `main` only if the
+  tip has the same version, so the tag can land on a later commit than the one that published.
+  If the tip has a different version, push the tag by hand. (#188)
+- `publish.yml` does not compare versions with npm. If the tip of `main` sets an unpublished
+  version lower than `latest` (for example a 0.6.2 hotfix after 0.7.0), that version publishes
+  and moves `latest` back. The same happens if `main` is force-moved back to an older commit
+  with an unpublished version; branch protection disables force pushes to `main` today, so this
+  needs a protection change first. The workflow cannot publish such a hotfix under another tag.
+  (#188)
+- GitHub keeps at most one pending publish job and cancels it by queue order, not by commit. An
+  older commit's job can cancel the tip commit's pending job, and then the tip check skips the
+  older one, so nothing publishes. If the tip commit's publish run was cancelled, re-run it
+  within GitHub's 30-day re-run window; this is safe because of the tip check. After that, merge
+  a new commit to `main` through a pull request, without a skip marker. `queue: max` would
+  prevent this case. It is not used because GitHub accepting the key is not checked on a real
+  run, and an invalid `publish.yml` would stop both publishing and the secret scan of pushes to
+  `main`. (#187)
