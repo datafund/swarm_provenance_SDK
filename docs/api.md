@@ -30,6 +30,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `payTo` | `string[]` | any | Allowed recipients |
 | `asset` | `string` | the network's USDC | Token to pay with |
 | `assetDecimals` | `number` | `6`; **required** with `asset` | Decimals of `asset` |
+| `assetDomain` | `{ name: string; version: string }` | known for the network's USDC; **required** with `asset` | EIP-712 domain of `asset` (its `name()` and `version()` on chain). A 402 whose `extra.name` or `extra.version` differs, or is missing, is refused |
 | `maxTimeoutSeconds` | `number` | `600` | Longest authorization validity accepted |
 | `onBeforePayment` | `(p: PaymentRequest) => boolean \| void \| Promise<…>` | none | Return `false` (or throw) to refuse a payment. A payment may still not follow (signing fails, timeout) |
 | `payForReads` | `boolean` | `false` | Pay for GET/HEAD too; otherwise reads use the free tier |
