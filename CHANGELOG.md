@@ -100,18 +100,19 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `upload()` now check the fields they read too. `pricing()` needs a boolean `x402_enabled`, and
   optional fields of the right type when present. `acquireStamp()` needs a `batch_id` of 64 hex
   characters, a number `depth` and a string `size_name`. `upload()` needs a `reference` of 64 or
-  128 hex characters. Before, a body of `null` threw a raw `TypeError`, `acquireStamp()` could
+  128 hex characters, with an optional `0x` prefix. Before, a body of `null` threw a raw `TypeError`, `acquireStamp()` could
   return `batchId: undefined`, and `upload()` then sent that as its stamp or returned no
   `reference`. `upload()` no longer sends the data after a malformed pool answer.
   `PoolStatus.lowReserveWarning` and `AcquiredStamp.fallbackUsed` are `false` when the gateway
   leaves them out, and `INVALID_RESPONSE` when they are not booleans. A pool `batch_id` is
   lowercased, as a caller's `stampId` is (#168). If the request was paid, the error carries
-  `error.payment`. After a paid `upload()` or `acquireStamp()` with an `idempotencyKey`, an
-  `INVALID_RESPONSE` for a 200 body that is valid JSON of the wrong shape no longer advises a
-  keyed retry. That body is the gateway's own answer, which it stores for the key, so the retry
-  returns the same answer. The message says to contact the gateway operator with the
-  transaction instead. A body that could not be read or is not JSON keeps the keyed-retry
-  advice: it is not the stored answer. (#107, PR #138; #173, #179, #199)
+  `error.payment`. After a paid `upload()` or `acquireStamp()`, an `INVALID_RESPONSE` for a
+  200 body that is valid JSON of the wrong shape no longer advises a retry with the same
+  idempotency key, whether the caller passed the key or the SDK generated it in x402 mode. That
+  body is the gateway's own answer, so the retry does not return a valid answer: it gets the same
+  answer again, or `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The
+  message says to contact the gateway operator with the transaction instead. A body that could
+  not be read or is not JSON keeps the keyed-retry advice: it is not the gateway's answer. (#107, PR #138; #173, #179, #199)
 - `fromEip1193Provider` and `fromViemWalletClient` signers implement `switchChain()`. A write
   on the wrong chain now asks the wallet to switch. Wallet users see a new prompt.
   `fromViemWalletClient` does this only when the client has `switchChain`. (#115, PR #139)

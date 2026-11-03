@@ -1481,14 +1481,15 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
   if (error instanceof GatewayConnectionError && SHAPE_ERRORS.has(error)) {
-    // Valid JSON of the wrong shape is the answer the gateway's app produced, and
-    // the gateway stores that answer for the key: a keyed retry gets it again.
-    // A body that could not be read or is not JSON (a reset, a proxy page) is
-    // not the stored answer, so the advice below still applies to it.
+    // Valid JSON of the wrong shape is the answer the gateway's app produced. A
+    // keyed retry gets that answer again, or IDEMPOTENCY_KEY_DELIVERED_NOT_STORED
+    // when the gateway did not store it (too large, or not storable): never a
+    // valid one. A body that could not be read or is not JSON (a reset, a proxy
+    // page) is not the gateway's answer, so the advice below still applies to it.
     const tx = error.payment.transaction;
     error.message +=
-      `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway stores its answer for idempotencyKey "${idempotencyKey}", ` +
-      `so calling ${operation} again with that key returns the same malformed answer. The payment may have been taken: ` +
+      `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway itself sent this answer, so calling ${operation} again ` +
+      `with idempotencyKey "${idempotencyKey}" does not return a valid answer. The payment may have been taken: ` +
       `contact the gateway operator with ${tx ? `transaction ${tx}` : 'the idempotency key'}`;
     return error;
   }
