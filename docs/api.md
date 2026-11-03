@@ -18,7 +18,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `timeout` | `number` | `30000` | Request timeout in milliseconds |
 | `paidTimeout` | `number` | `120000`, or `timeout` if that is longer | Timeout in milliseconds for an attempt that may pay (x402 mode: the 402, signing, and the paid request), and for an owner-proof upload |
 | `payment` | `'free' \| 'none' \| X402PaymentConfig` | `'free'` | Payment mode (see below) |
-| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. A 429 whose code is not a rate limit (such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) is not retried. An x402 attempt that sent a payment is never retried; unpaid attempts are |
+| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. A 429 whose code is not a rate limit (such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) is not retried. An x402 attempt that sent a payment is not retried, except as described under X402PaymentConfig; unpaid attempts are |
 | `maxUploadBytes` | `number` | `10485760` | Largest upload, in bytes of the uploaded metadata JSON. A larger upload throws `FILE_TOO_LARGE` before a stamp is acquired. With base64, that is about 7.5 MiB of content. A value that is not a positive integer throws `INVALID_INPUT` in the constructor |
 
 #### X402PaymentConfig
@@ -41,7 +41,14 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 A payment outside this policy, of a scheme other than `exact`, or using a transfer method
 other than EIP-3009 is refused before anything is signed (`PaymentRefusedError`). An invalid
 config throws `PaymentConfigurationError` in the constructor. Reads use the free tier unless
-`payForReads`. An attempt that sent a payment is never retried; unpaid attempts retry as usual.
+`payForReads`. An attempt that sent a payment is not retried on 502, 503 or 429; unpaid attempts
+retry as usual. The one exception is a paid write that the gateway answers with 409
+`IDEMPOTENCY_KEY_IN_PROGRESS` or 503 `IDEMPOTENCY_UNAVAILABLE` (#102). The SDK retries it with
+the same Idempotency-Key and a new authorization, so `onBeforePayment` runs again. It does this
+at most 2 times, so at most 3 signatures per request. For `IDEMPOTENCY_KEY_IN_PROGRESS` it
+waits for `Retry-After`, capped at 30 s, or 5 s without one. For `IDEMPOTENCY_UNAVAILABLE` it
+waits `baseDelayMs`, doubled for each further retry. The gateway verifies these new authorizations but
+does not settle them.
 
 ```typescript
 interface PaymentRequest {
@@ -78,7 +85,9 @@ A 404 returns `{ enabled: false, available: false }`. Another error status throw
 `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
 rate-limited free-tier request. A success body that cannot be read, is not JSON, or is not an
 object with boolean `enabled` and `available` throws `GatewayConnectionError` with code
-`INVALID_RESPONSE` (#173, #179).
+`INVALID_RESPONSE` (#173, #179). A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
+`TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
+apply.
 
 #### `poolStatus(): Promise<PoolStatus>`
 
@@ -94,7 +103,9 @@ A 404 returns a disabled pool with no stamps. Another error status throws
 `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
 rate-limited free-tier request. A success body that cannot be read, is not JSON, or is not an
 object with boolean `enabled`, number `total_stamps` and objects `current_levels` and
-`reserve_config` throws `GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179).
+`reserve_config` throws `GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179). A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
+`TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
+apply.
 
 #### `pricing(options?): Promise<Pricing>`
 
@@ -142,7 +153,9 @@ interface PriceQuote {
 Quotes follow the current chain price: treat them as current, not guaranteed. An error status
 throws `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError`
 for a rate-limited free-tier request. A success body that is not JSON throws
-`GatewayConnectionError` with code `INVALID_RESPONSE`.
+`GatewayConnectionError` with code `INVALID_RESPONSE`. A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
+`TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
+apply.
 
 #### `acquireStamp(size?, options?): Promise<AcquiredStamp>`
 
@@ -337,6 +350,11 @@ check `verified === true`, never `verified !== false`.
 | `ProvenanceError` | `INVALID_INPUT` | `reference` is not 64 or 128 hex characters (optional `0x`), or `notaryAddress` is malformed (checked unless `verify: false`). Nothing is sent |
 | `GatewayConnectionError` | the gateway's code, if the body has one | The gateway answered with an error status, such as 404. `body` holds the response |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | The free-tier read was rate limited |
+| `GatewayConnectionError` | `CONNECTION_FAILED`, `TIMEOUT` | The request could not be sent, got no response, or timed out |
+| `PaymentConfigurationError` | `PAYMENT_CONFIGURATION` | x402 mode with `payForReads`: the `@x402` packages, Web Crypto or the wallet address are missing |
+| `PaymentRefusedError` | `PAYMENT_REFUSED` | x402 mode with `payForReads`: the payment was refused before signing |
+| `PaymentError` | `PAYMENT_FAILED`, `PAYMENT_UNCONFIRMED` | x402 mode with `payForReads`: the payment could not be created, or was sent and the response could not be processed |
+| `PaymentOutcomeError` | an idempotency stop code | x402 mode with `payForReads`: the gateway answered the paid read with one of the three stop codes |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The success body cannot be read or is not JSON (#173, #179) |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The body is not an object with string `data` and `content_hash`, directly or under `metadata` (#179) |
 | `ProvenanceError` | `CONTENT_HASH_MISMATCH` | `content_hash` is not the SHA-256 of the base64-decoded `data`. `data` that is not valid base64 is also this error |
@@ -380,6 +398,11 @@ interface DocumentDownloadResult {
 | `ProvenanceError` | `INVALID_INPUT` | `reference` is not 64 or 128 hex characters (optional `0x`), or `notaryAddress` is malformed (checked unless `verify: false`). Nothing is sent |
 | `GatewayConnectionError` | the gateway's code, if the body has one | The gateway answered with an error status, such as 404. `body` holds the response |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | The free-tier read was rate limited |
+| `GatewayConnectionError` | `CONNECTION_FAILED`, `TIMEOUT` | The request could not be sent, got no response, or timed out |
+| `PaymentConfigurationError` | `PAYMENT_CONFIGURATION` | x402 mode with `payForReads`: the `@x402` packages, Web Crypto or the wallet address are missing |
+| `PaymentRefusedError` | `PAYMENT_REFUSED` | x402 mode with `payForReads`: the payment was refused before signing |
+| `PaymentError` | `PAYMENT_FAILED`, `PAYMENT_UNCONFIRMED` | x402 mode with `payForReads`: the payment could not be created, or was sent and the response could not be processed |
+| `PaymentOutcomeError` | an idempotency stop code | x402 mode with `payForReads`: the gateway answered the paid read with one of the three stop codes |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The success body cannot be read or is not JSON (#173, #179) |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The body is not an object with a `data` field and a string `content_hash`, directly or under `metadata` (#179) |
 | `ProvenanceError` | `CONTENT_HASH_MISMATCH` | `content_hash` is not the SHA-256 of the canonical JSON of `data`, nor of `JSON.stringify(data)` (SDK 0.6.x) |
@@ -539,7 +562,9 @@ interface PaymentAttempt {
 }
 ```
 
-A failed request that carried a payment is never retried automatically.
+A failed request that carried a payment is not retried automatically. The one exception is a
+paid write answered with `IDEMPOTENCY_KEY_IN_PROGRESS` or `IDEMPOTENCY_UNAVAILABLE`, which is
+retried with the same Idempotency-Key (see X402PaymentConfig).
 
 ### GatewayConnectionError
 
@@ -585,7 +610,7 @@ causes are:
 - The 402 response carries no readable payment requirements. `refusals` is empty.
 - The signature was declined in the wallet (#112). This covers EIP-1193 code `4001`, viem's
   `UserRejectedRequestError`, and an ethers v6 error with code `ACTION_REJECTED` (#166),
-  anywhere in the error's `cause` chain. Its reason in `refusals` is `'rejected in the wallet'`.
+  within the first 8 levels of the error's `cause` chain. Its reason in `refusals` is `'rejected in the wallet'`.
   `refusals` is empty if the SDK did not record which request was being signed.
 
 ### PaymentConfigurationError
