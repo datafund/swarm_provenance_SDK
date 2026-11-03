@@ -297,10 +297,11 @@ twice; the error message says how. The exception is `INVALID_RESPONSE` after a p
 whose 200 body is valid JSON of the wrong shape. That body is the gateway's own answer, so a
 retry with the same `idempotencyKey` does not return a valid answer: it gets the same answer
 again, or `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it (a body over
-its storage limit, an empty body, or one it marks as not storable). The payment may have been taken. The message says to contact the gateway operator with
+its storage limit, a response it kept no body for, or one it marks as not storable). The payment may
+have been taken. The message says to contact the gateway operator with
 `payment.transaction`, or with the idempotency key when the transaction is not known (#199).
 When `upload()` used a pool stamp, the message also says that the stamp can still be used:
-pass `stampId` back with a new `idempotencyKey` to upload without buying another stamp. A
+pass `stampId` back with a new `idempotencyKey` to upload without getting another stamp. A
 200 body that could not be read or is not JSON is not the gateway's answer: the message advises
 the keyed retry, which can recover the result.
 

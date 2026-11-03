@@ -1546,7 +1546,8 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
     // A stamp taken from the pool stays usable for another upload. A caller's
     // own stamp is not named: the caller already has it
     if (stampId !== undefined && error.stampId === stampId) {
-      error.message += `. The pool stamp can still be used: to upload without buying another, call ${operation} again with stampId "${stampId}" and a new idempotencyKey`;
+      const take = error.stampPayment ? 'buying' : 'taking';
+      error.message += `. The pool stamp can still be used: to upload without ${take} another, call ${operation} again with stampId "${stampId}" and a new idempotencyKey`;
     }
     return error;
   }
