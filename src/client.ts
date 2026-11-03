@@ -309,7 +309,7 @@ export class ProvenanceClient {
     if (data.pay_to != null) pricing.payTo = data.pay_to;
     if (data.min_price_usd != null) pricing.minPriceUsd = data.min_price_usd;
     if (data.free_tier != null) pricing.freeTier = { enabled: data.free_tier.enabled, header: data.free_tier.header };
-    const quotes = data.quotes ?? {};
+    const quotes = data.quotes ?? {}; // absent or null: no quotes
     if (quotes.stamp_purchase) pricing.quotes.stampPurchase = toPriceQuote(quotes.stamp_purchase);
     if (quotes.pool_acquire) pricing.quotes.poolAcquire = toPriceQuote(quotes.pool_acquire);
     if (quotes.data_upload) pricing.quotes.dataUpload = toPriceQuote(quotes.data_upload);
@@ -392,7 +392,8 @@ export class ProvenanceClient {
       );
     }
     const stamp: AcquiredStamp = {
-      batchId: data.batch_id,
+      // Lowercased as a caller's stampId is (#168): the gateway's ownership registry matches it exactly
+      batchId: data.batch_id.toLowerCase(),
       depth: data.depth,
       sizeName: data.size_name,
       fallbackUsed: data.fallback_used === true,
@@ -1503,6 +1504,16 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
   if (!error.payment || idempotencyKey === undefined) return error;
   if (error instanceof PaymentOutcomeError) return error;
   if (error.code === 'IDEMPOTENCY_KEY_REUSED' || error.code === 'IDEMPOTENCY_KEY_INVALID') return error;
+  if (error instanceof GatewayConnectionError && error.code === 'INVALID_RESPONSE') {
+    // A 200 that cannot be read, is not JSON or is not the expected shape: the
+    // gateway keeps its answer for the key, so a keyed retry gets it again
+    const tx = error.payment.transaction;
+    error.message +=
+      `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway stores its answer for idempotencyKey "${idempotencyKey}", ` +
+      `so calling ${operation} again with that key returns the same malformed answer. The payment may have been taken: ` +
+      `contact the gateway operator with ${tx ? `transaction ${tx}` : 'the idempotency key'}`;
+    return error;
+  }
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;
   error.message += `${/[.!?]$/.test(error.message) ? '' : '.'} To retry without paying twice, call ${operation} again with ${args}`;
   return error;
@@ -1582,7 +1593,7 @@ function isPricingResponse(value: unknown): value is GatewayPricingResponse {
     return false;
   }
   const quotes = value['quotes'];
-  if (quotes === undefined) return true;
+  if (quotes === undefined || quotes === null) return true;
   // Only the quotes pricing() reads; one that is absent or null is not listed, as before
   return (
     isRecord(quotes) &&
