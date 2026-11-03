@@ -236,6 +236,25 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `upload()` refuses metadata over `maxUploadBytes` (default 10485760) with `FILE_TOO_LARGE`
   before it acquires a stamp. It also refuses invalid raw input before that. (#112)
 - A signature declined in the wallet throws `PaymentRefusedError`. (#112)
+- A raw upload (`raw: true`) whose content JSON cannot represent throws `ProvenanceError` with
+  code `INVALID_INPUT` before any request. This covers a circular reference, a `BigInt`, nesting
+  deeper than 1000 levels, a `toJSON()` that returns `undefined`, and a `toJSON()` or getter that
+  throws. `buildDocumentMetadata()` and `computeNotaryDataHash()` throw the same error. The
+  original error is `error.cause`. Before, a raw `TypeError`, `RangeError` or `SyntaxError`, or
+  the caller's own error, escaped. (#202)
+- `parseMetadata()` throws `ProvenanceError` with code `INVALID_INPUT`. Before, it threw
+  `SyntaxError` for text that is not JSON and a plain `Error` for JSON that is not metadata. The
+  messages are unchanged. (#202)
+- Without `Buffer` (browsers), `base64ToBytes()` and `extractContent()` throw `ProvenanceError`
+  with code `INVALID_INPUT` for text that is not valid base64, and `verifyContentHash()` returns
+  `false`. Before, a raw `InvalidCharacterError` escaped. (#202)
+- The `FILE_TOO_LARGE` message of a base64 upload gives the exact largest content that fits, in
+  bytes, with MiB from 1 MiB up, for example "Content up to 7864191 bytes (about 7.5 MiB) fits".
+  When no content fits, it says so. Before, it estimated the size from a fixed 512-byte overhead
+  and showed "about -0.0 MiB" or "about 0.0 MiB" for small `maxUploadBytes`. (#202)
+- `canonicalizeJsonText()` and `canonicalizeJsonValue()` are the only functions that still throw
+  standard errors (`SyntaxError`, `TypeError`, `RangeError`) for arguments of the documented
+  types, as documented. (#202)
 - An ethers v6 wallet rejection (code `ACTION_REJECTED`) is also `PaymentRefusedError` with code
   `PAYMENT_REFUSED`. Before, it threw `PaymentError` with code `PAYMENT_FAILED`. (#166)
 - A `Retry-After` header given as an HTTP date is honoured. (#123)

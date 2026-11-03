@@ -329,7 +329,7 @@ The `PaymentWallet` type requires `signTypedData` and `readContract`, plus an ad
 | `DATA_NOT_REGISTERED` | DataNotRegisteredError | Hash not found on-chain |
 | `SIGNER_REQUIRED` | SignerRequiredError | Write op without signer |
 | `PAYMENT_CONFIGURATION` | PaymentConfigurationError | Missing @x402 packages or invalid wallet |
-| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object; `ownerSigner` without a 64-hex `stampId`, or with `idempotencyKey` |
+| `INVALID_INPUT` | ProvenanceError | Raw mode content is not valid JSON or plain object, or JSON cannot represent it (`notJsonError()`, original as `cause`; also `buildDocumentMetadata`, `computeNotaryDataHash`); `parseMetadata()` input; invalid base64 in browsers (`base64ToBytes`); `ownerSigner` without a 64-hex `stampId`, or with `idempotencyKey` |
 | `OWNER_PROOF_FAILED` | ProvenanceError | `ownerSigner.signMessage` failed or returned no 0x-prefixed hex; nothing sent |
 | `OWNER_PROOF_INVALID` | GatewayConnectionError (401) | Owner proof missing, stale, already used or not a valid signature |
 | `STAMP_OWNERSHIP_DENIED` | GatewayConnectionError (403) | Uploader (payer or owner-proof signer) does not own the stamp |

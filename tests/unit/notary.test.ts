@@ -10,7 +10,7 @@ import {
   computeNotaryDataHash,
 } from '../../src/notary.js';
 import { canonicalizeJsonText } from '../../src/canonical-json.js';
-import { VerificationError } from '../../src/errors.js';
+import { ProvenanceError, VerificationError } from '../../src/errors.js';
 import type { NotarySignature } from '../../src/types.js';
 
 // Signed by the gateway's own ProvenanceService (see tests/fixtures/notary/generate.py)
@@ -230,5 +230,40 @@ describe('review round 3', () => {
   it('an unsupported scheme over the right data is not reported as tampered data', () => {
     const { doc, sig } = fixture('base64-document');
     expect(verifySignature({ ...sig, type: 'eip191' }, doc, NOTARY)).toMatchObject({ valid: false, dataHashValid: true });
+  });
+});
+
+describe('computeNotaryDataHash() on data JSON cannot represent (#202)', () => {
+  const circular: Record<string, unknown> = {};
+  circular['self'] = circular;
+
+  it.each([
+    ['a circular object', circular, /circular/i],
+    ['a BigInt value', { n: 1n }, /BigInt/],
+    ['undefined', undefined, /no JSON representation/],
+  ])('throws ProvenanceError INVALID_INPUT for %s, with the cause', (_label, data, message) => {
+    let error: unknown;
+    try {
+      computeNotaryDataHash({ data: data as Record<string, unknown> });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+    expect((error as Error).message).toMatch(message);
+    expect((error as Error).cause).toBeInstanceOf(TypeError);
+  });
+
+  it('verifySignature() still reports such data as invalid instead of throwing', () => {
+    const sig = {
+      type: 'notary',
+      signer: '0x' + '1'.repeat(40),
+      timestamp: '2026-01-01T00:00:00Z',
+      data_hash: 'a'.repeat(64),
+      signature: '0x' + '2'.repeat(130),
+      hashed_fields: ['data'],
+      signed_message_format: '{data_hash}|{timestamp}',
+    } as NotarySignature;
+    expect(verifySignature(sig, { data: circular }, '0x' + '1'.repeat(40)).valid).toBe(false);
   });
 });

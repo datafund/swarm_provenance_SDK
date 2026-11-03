@@ -1,6 +1,7 @@
 import type { ProvenanceMetadata, DocumentMetadata } from './types.js';
 import { sha256Hex, bytesToBase64, base64ToBytes, toBytes } from './utils.js';
-import { canonicalizeJsonValue } from './canonical-json.js';
+import { canonicalizeJsonValue, notJsonError } from './canonical-json.js';
+import { ProvenanceError, withCause } from './errors.js';
 
 /**
  * Options for building provenance metadata
@@ -43,7 +44,9 @@ export function buildMetadata(
 }
 
 /**
- * Extract the original file content from provenance metadata
+ * Extract the original file content from provenance metadata.
+ * Without Buffer (browsers), `data` that is not valid base64 throws
+ * ProvenanceError INVALID_INPUT (#202).
  */
 export function extractContent(metadata: ProvenanceMetadata): Uint8Array {
   return base64ToBytes(metadata.data);
@@ -57,7 +60,13 @@ export function extractContent(metadata: ProvenanceMetadata): Uint8Array {
  * data to the Swarm reference it was fetched by, nor to its author.
  */
 export function verifyContentHash(metadata: ProvenanceMetadata): boolean {
-  const content = extractContent(metadata);
+  let content: Uint8Array;
+  try {
+    content = extractContent(metadata);
+  } catch {
+    // Invalid base64 for atob (browsers): no match, as a Buffer decode gives (#202)
+    return false;
+  }
   const computedHash = sha256Hex(content);
   return computedHash === metadata.content_hash;
 }
@@ -84,12 +93,22 @@ export interface DocumentMetadataOptions {
  * The `data` field contains the object directly; `content_hash` is SHA-256 of
  * its canonical JSON, the convention shared with the gateway and the Python
  * tools: json.dumps(data, sort_keys=True, separators=(',', ':')).
+ *
+ * A document JSON cannot represent (a circular reference, a BigInt, nesting
+ * over 1000 levels, a toJSON() or getter that throws) throws ProvenanceError
+ * INVALID_INPUT with the original error as `cause` (#202).
  */
 export function buildDocumentMetadata(
   document: Record<string, unknown>,
   options: DocumentMetadataOptions
 ): DocumentMetadata {
-  const contentHash = sha256Hex(canonicalizeJsonValue(document));
+  let canonical: string;
+  try {
+    canonical = canonicalizeJsonValue(document);
+  } catch (error) {
+    throw notJsonError('Document', error);
+  }
+  const contentHash = sha256Hex(canonical);
 
   const metadata: DocumentMetadata = {
     data: document,
@@ -126,25 +145,32 @@ export function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: s
 }
 
 /**
- * Parse metadata from JSON string
+ * Parse metadata from JSON string.
+ * Throws ProvenanceError INVALID_INPUT for text that is not JSON (the parse
+ * error is the `cause`), or JSON that is not metadata (#202).
  */
 export function parseMetadata(json: string): ProvenanceMetadata {
-  const parsed = JSON.parse(json) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch (error) {
+    throw withCause(new ProvenanceError('Invalid metadata: not valid JSON', 'INVALID_INPUT'), error);
+  }
 
   if (typeof parsed !== 'object' || parsed === null) {
-    throw new Error('Invalid metadata: expected object');
+    throw new ProvenanceError('Invalid metadata: expected object', 'INVALID_INPUT');
   }
 
   const obj = parsed as Record<string, unknown>;
 
   if (typeof obj['data'] !== 'string') {
-    throw new Error('Invalid metadata: missing or invalid data field');
+    throw new ProvenanceError('Invalid metadata: missing or invalid data field', 'INVALID_INPUT');
   }
   if (typeof obj['content_hash'] !== 'string') {
-    throw new Error('Invalid metadata: missing or invalid content_hash field');
+    throw new ProvenanceError('Invalid metadata: missing or invalid content_hash field', 'INVALID_INPUT');
   }
   if (typeof obj['stamp_id'] !== 'string') {
-    throw new Error('Invalid metadata: missing or invalid stamp_id field');
+    throw new ProvenanceError('Invalid metadata: missing or invalid stamp_id field', 'INVALID_INPUT');
   }
 
   const result: ProvenanceMetadata = {

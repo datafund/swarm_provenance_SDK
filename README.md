@@ -1061,6 +1061,15 @@ issue numbers and lists the open release-gate items.
   In x402 mode the policy reads the 402's top-level payment request before the deprecated
   `detail` copy, and a signature declined in the wallet is `PaymentRefusedError` instead of
   `GatewayConnectionError` (`CONNECTION_FAILED`).
+- Input that JSON cannot represent throws `ProvenanceError` (`INVALID_INPUT`), with the original
+  error as `error.cause` (#202). This covers a raw `upload()` (before any request),
+  `buildDocumentMetadata()` and `computeNotaryDataHash()`: a circular reference, a `BigInt`,
+  nesting deeper than 1000 levels, or a `toJSON()` or getter that throws. Before, a raw
+  `TypeError`, `RangeError`, `SyntaxError` or the caller's own error escaped. `parseMetadata()`
+  throws `ProvenanceError` (`INVALID_INPUT`) instead of `SyntaxError` or a plain `Error`. In
+  browsers, `base64ToBytes()` and `extractContent()` throw `INVALID_INPUT` for text that is not
+  valid base64, and `verifyContentHash()` returns `false`; before, a raw `InvalidCharacterError`
+  escaped. `canonicalizeJsonText()` and `canonicalizeJsonValue()` still throw standard errors.
 - An ethers v6 wallet rejection (code `ACTION_REJECTED`) is `PaymentRefusedError`
   (`PAYMENT_REFUSED`), as EIP-1193 code 4001 and viem's `UserRejectedRequestError` are (#166).
   Before, it was `PaymentError` (`PAYMENT_FAILED`).

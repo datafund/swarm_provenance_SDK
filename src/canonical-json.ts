@@ -20,6 +20,8 @@
  * so both sides start from the same text).
  */
 
+import { ProvenanceError, withCause } from './errors.js';
+
 type JsonNode =
   | { kind: 'object'; entries: Map<string, JsonNode> }
   | { kind: 'array'; items: JsonNode[] }
@@ -37,6 +39,12 @@ const STRING_SPECIAL = /["\\\u0000-\u001f]/g;
  * limited by its ~1000-frame recursion limit).
  */
 export const MAX_JSON_DEPTH = 1000;
+
+/** canonicalizeJsonValue's TypeError message for a value JSON.stringify returns undefined for */
+export const NOT_REPRESENTABLE = 'Value is not representable as JSON';
+
+/** Start of the parser's SyntaxError message for nesting deeper than MAX_JSON_DEPTH */
+export const TOO_DEEP = 'Nesting deeper than';
 
 class LosslessParser {
   private pos = 0;
@@ -63,7 +71,7 @@ class LosslessParser {
     this.ws();
     const c = this.text[this.pos];
     if (c === '{' || c === '[') {
-      if (++this.depth > MAX_JSON_DEPTH) this.fail(`Nesting deeper than ${MAX_JSON_DEPTH}`);
+      if (++this.depth > MAX_JSON_DEPTH) this.fail(`${TOO_DEEP} ${MAX_JSON_DEPTH}`);
       const node = c === '{' ? this.object() : this.array();
       this.depth--;
       return node;
@@ -269,6 +277,27 @@ export function canonicalizeJsonValue(value: unknown): string {
   // A string's canonical form needs no parse (base64 `data` can be megabytes)
   if (typeof value === 'string') return emitString(value);
   const text = JSON.stringify(value);
-  if (text === undefined) throw new TypeError('Value is not representable as JSON');
+  if (text === undefined) throw new TypeError(NOT_REPRESENTABLE);
   return canonicalizeJsonText(text)!;
+}
+
+/**
+ * ProvenanceError INVALID_INPUT for a value JSON cannot represent, with the
+ * error from JSON.stringify or canonicalisation as `cause` (#202). `what` names
+ * the value, e.g. 'Raw mode content'. The message keeps the engine's own text
+ * (circular structure, BigInt, a throwing toJSON() or getter), which differs
+ * between engines.
+ */
+export function notJsonError(what: string, error: unknown): ProvenanceError {
+  let reason: string;
+  if (error instanceof TypeError && error.message === NOT_REPRESENTABLE) {
+    reason = 'has no JSON representation (undefined, a function, or a toJSON() that returns undefined)';
+  } else if (error instanceof SyntaxError && error.message.startsWith(TOO_DEEP)) {
+    reason = `is nested deeper than ${MAX_JSON_DEPTH} levels`;
+  } else if (error instanceof RangeError) {
+    reason = `is nested too deeply to serialize as JSON (${error.message})`;
+  } else {
+    reason = `cannot be serialized as JSON: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  return withCause(new ProvenanceError(`${what} ${reason}`, 'INVALID_INPUT'), error);
 }

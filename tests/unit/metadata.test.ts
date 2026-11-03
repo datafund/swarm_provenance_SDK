@@ -9,6 +9,7 @@ import {
   parseMetadata,
 } from '../../src/metadata.js';
 import { sha256Hex, bytesToBase64, toBytes } from '../../src/utils.js';
+import { ProvenanceError } from '../../src/errors.js';
 
 describe('buildMetadata', () => {
   it('should create metadata with correct hash', () => {
@@ -309,5 +310,104 @@ describe('round-trip', () => {
 
     expect(Array.from(extracted)).toEqual(Array.from(originalContent));
     expect(verifyContentHash(parsed)).toBe(true);
+  });
+});
+
+/** Nested objects `levels` deep: { a: { a: ... {} } } */
+function nested(levels: number): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  let node = root;
+  for (let i = 0; i < levels; i++) {
+    const child: Record<string, unknown> = {};
+    node['a'] = child;
+    node = child;
+  }
+  return root;
+}
+
+/** The error a call throws, or undefined */
+function thrown(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+/** Run without Buffer, so that base64ToBytes decodes with atob as in browsers. Buffer is back before any assertion */
+function withoutBuffer<T>(run: () => T): T {
+  const saved = globalThis.Buffer;
+  (globalThis as { Buffer?: unknown }).Buffer = undefined;
+  try {
+    return run();
+  } finally {
+    globalThis.Buffer = saved;
+  }
+}
+
+describe('errors for input JSON cannot represent, and for bad metadata text (#202)', () => {
+  const circular: Record<string, unknown> = {};
+  circular['self'] = circular;
+  const UNSERIALIZABLE: Array<[string, unknown, RegExp]> = [
+    ['a circular object', circular, /circular/i],
+    ['a BigInt value', { n: 1n }, /BigInt/],
+    ['a toJSON() that returns undefined', { toJSON: () => undefined }, /no JSON representation/],
+    ['a toJSON() that throws', { toJSON: () => { throw new Error('toJSON failed'); } }, /toJSON failed/],
+    ['a getter that throws', { get x() { throw new Error('getter failed'); } }, /getter failed/],
+    ['nesting of 1500 levels', nested(1500), /nested deeper than 1000 levels/],
+    ['nesting of 1000000 levels', nested(1_000_000), /nested too deeply/],
+  ];
+
+  it.each(UNSERIALIZABLE)('buildDocumentMetadata() refuses %s with INVALID_INPUT and keeps the cause', (_label, document, message) => {
+    const error = thrown(() => buildDocumentMetadata(document as Record<string, unknown>, { stampId: 's' }));
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+    expect((error as Error).message).toMatch(message);
+    expect((error as Error).cause).toBeInstanceOf(Error);
+    expect((error as Error).cause).not.toBeInstanceOf(ProvenanceError);
+  });
+
+  it.each([
+    ['text that is not JSON', 'not json', /not valid JSON/],
+    ['an empty string', '', /not valid JSON/],
+    ['a number', '5', /expected object/],
+    ['null', 'null', /expected object/],
+    ['a missing data field', JSON.stringify({ content_hash: 'abc', stamp_id: 'x' }), /missing or invalid data field/],
+    ['a missing content_hash field', JSON.stringify({ data: 'abc', stamp_id: 'x' }), /missing or invalid content_hash field/],
+    ['a missing stamp_id field', JSON.stringify({ data: 'abc', content_hash: 'x' }), /missing or invalid stamp_id field/],
+  ])('parseMetadata() refuses %s with INVALID_INPUT', (_label, json, message) => {
+    const error = thrown(() => parseMetadata(json));
+    expect(error).toBeInstanceOf(ProvenanceError);
+    expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+    expect((error as Error).message).toMatch(message);
+  });
+
+  it('parseMetadata() keeps the JSON parse error as the cause', () => {
+    const error = thrown(() => parseMetadata('not json'));
+    expect((error as Error).cause).toBeInstanceOf(SyntaxError);
+  });
+
+  describe('without Buffer (the browser atob decoder)', () => {
+    const metadata = { data: '!!not base64!!', content_hash: sha256Hex(toBytes('x')), stamp_id: 's' };
+
+    it('extractContent() on data that atob cannot decode throws INVALID_INPUT', () => {
+      expect(() => atob(metadata.data)).toThrow();
+      const error = withoutBuffer(() => thrown(() => extractContent(metadata)));
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).code).toBe('INVALID_INPUT');
+      expect((error as Error).message).toMatch(/base64/);
+      expect((error as Error).cause).toBeDefined();
+    });
+
+    it('verifyContentHash() on data that atob cannot decode returns false, as with Buffer', () => {
+      expect(verifyContentHash(metadata)).toBe(false);
+      expect(withoutBuffer(() => verifyContentHash(metadata))).toBe(false);
+    });
+
+    it('valid base64 still decodes without Buffer', () => {
+      const good = buildMetadata('x', { stampId: 's' });
+      expect(withoutBuffer(() => verifyContentHash(good))).toBe(true);
+    });
   });
 });

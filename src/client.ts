@@ -43,7 +43,7 @@ import {
 } from './errors.js';
 import { buildMetadata, buildDocumentMetadata, extractContent, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
-import { canonicalizeJsonText } from './canonical-json.js';
+import { canonicalizeJsonText, notJsonError, NOT_REPRESENTABLE } from './canonical-json.js';
 import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds, sha256Hex, base64ToBytes } from './utils.js';
 import {
   base64Decode,
@@ -688,19 +688,28 @@ export class ProvenanceClient {
     let metadata: ProvenanceMetadata | DocumentMetadata;
     /** A raw document's JSON: serialised once, then hashed, sent and returned as parsed from it */
     let dataJson: string | undefined;
+    /** Base64 uploads: the content's size in bytes, for the FILE_TOO_LARGE hint */
+    let contentLength = 0;
     if (options.raw) {
       // Accepts what earlier versions accepted: any JSON text, or a non-null object (arrays too)
       const document = rawDocument(content);
-      dataJson = JSON.stringify(document) as string | undefined;
-      // The caller's object may change while the stamp is acquired: the
-      // snapshot is what is hashed, sent and returned
-      const snapshot = dataJson === undefined ? document : (JSON.parse(dataJson) as Record<string, unknown>);
-      metadata = buildDocumentMetadata(snapshot, metadataOptions);
+      // Content JSON cannot represent is INVALID_INPUT here, before any request (#202)
+      try {
+        dataJson = JSON.stringify(document) as string | undefined;
+        if (dataJson === undefined) throw new TypeError(NOT_REPRESENTABLE);
+        // The caller's object may change while the stamp is acquired: the
+        // snapshot is what is hashed, sent and returned
+        metadata = buildDocumentMetadata(JSON.parse(dataJson) as Record<string, unknown>, metadataOptions);
+      } catch (error) {
+        // buildDocumentMetadata's own INVALID_INPUT (nesting) is named for the upload
+        throw notJsonError('Raw mode content', error instanceof ProvenanceError ? error.cause : error);
+      }
     } else {
       const bytes =
         content instanceof Blob
           ? new Uint8Array(await content.arrayBuffer())
           : toBytes(content as Uint8Array | ArrayBuffer | string);
+      contentLength = bytes.length;
       metadata = buildMetadata(bytes, metadataOptions);
     }
 
@@ -729,7 +738,7 @@ export class ProvenanceClient {
         options.raw
           ? `Upload too large: the document is ${size} bytes as uploaded (JSON metadata), over the limit of ${this.maxUploadBytes} bytes (maxUploadBytes)`
           : `Upload too large: ${size} bytes once base64-encoded into the metadata, over the limit of ${this.maxUploadBytes} bytes (maxUploadBytes). ` +
-              `Content up to about ${(((this.maxUploadBytes - 512) * 3) / 4 / 1048576).toFixed(1)} MiB fits`,
+              base64SizeHint(size - base64Length(contentLength), this.maxUploadBytes),
         'FILE_TOO_LARGE'
       );
     }
@@ -1354,6 +1363,23 @@ function utf8Length(text: string): number {
     } else bytes += 3; // other BMP characters; a lone surrogate encodes as U+FFFD
   }
   return bytes;
+}
+
+/** Length of the base64 text for `bytes` bytes, with padding */
+function base64Length(bytes: number): number {
+  return 4 * Math.ceil(bytes / 3);
+}
+
+/**
+ * The largest content that fits in a base64 upload, exactly, from the size of
+ * the metadata without content (#202). Base64 text needs no JSON escaping, so
+ * the metadata is `overhead` plus the base64 length.
+ */
+function base64SizeHint(overhead: number, maxUploadBytes: number): string {
+  const fits = Math.floor((maxUploadBytes - overhead) / 4) * 3;
+  if (fits <= 0) return `No content fits: the metadata alone is ${overhead} bytes`;
+  const mib = fits >= 1048576 ? ` (about ${(fits / 1048576).toFixed(1)} MiB)` : '';
+  return `Content up to ${fits} bytes${mib} fits`;
 }
 
 /** Stand-in stamp_id while the stamp is not known yet: as long as a batch ID (64 hex characters) */

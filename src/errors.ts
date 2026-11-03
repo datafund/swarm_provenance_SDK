@@ -91,6 +91,15 @@ export class ProvenanceError extends Error {
 }
 
 /**
+ * Set `cause` on an error, as the ES2022 Error constructor option does
+ * (non-enumerable), and return the error.
+ */
+export function withCause<E extends Error>(error: E, cause: unknown): E {
+  Object.defineProperty(error, 'cause', { value: cause, enumerable: false, writable: true, configurable: true });
+  return error;
+}
+
+/**
  * Error connecting to or communicating with the gateway
  */
 export class GatewayConnectionError extends ProvenanceError {

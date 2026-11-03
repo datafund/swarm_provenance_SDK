@@ -267,8 +267,8 @@ A receipt is present only when the request carried a payment the gateway accepte
 
 | Error | Code | When |
 |-------|------|------|
-| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused); `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
-| `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent |
+| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused), or JSON cannot represent it: a circular reference, a `BigInt`, nesting deeper than 1000 levels, a `toJSON()` that returns `undefined`, or a `toJSON()` or getter that throws. The original error is `error.cause` (#202); `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
+| `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent. For a base64 upload, the message gives the largest content in bytes that fits with the same options, or says that no content fits (#202) |
 | `GatewayConnectionError` | `FILE_TOO_LARGE` | Without `sign: 'notary'`: the gateway's proxy refused the body with a 413 that is not JSON. With `sign: 'notary'`, this is a `NotaryError` with the same code |
 | `ProvenanceError` | `OWNER_PROOF_FAILED` | `ownerSigner.signMessage()` threw, or did not return a `0x`-prefixed hex string |
 | `StampError` | `POOL_EXHAUSTED`, or the gateway's code | Without `stampId`: the pool is enabled and empty, or the pool acquisition failed (see StampError) |
@@ -526,9 +526,13 @@ interface AcquiredStamp {
 
 ## Errors
 
-All errors extend `ProvenanceError`. Input and content checks throw a plain
-`ProvenanceError`: `INVALID_INPUT`, `FILE_TOO_LARGE` from the SDK's own size check,
-`CONTENT_HASH_MISMATCH` and `OWNER_PROOF_FAILED`. The other errors are the subclasses below.
+All errors that the SDK throws for arguments of the documented types extend `ProvenanceError`,
+except the errors of `canonicalizeJsonText()` and `canonicalizeJsonValue()`. Those two throw
+standard JavaScript errors (see [Signature Verification](#signature-verification)). Input and
+content checks throw a plain `ProvenanceError`: `INVALID_INPUT`, `FILE_TOO_LARGE` from the SDK's
+own size check, `CONTENT_HASH_MISMATCH` and `OWNER_PROOF_FAILED`. The other errors are the
+subclasses below. When the SDK wraps an error from JavaScript, the original error is
+`error.cause`.
 
 ### ProvenanceError
 
@@ -700,17 +704,21 @@ function buildMetadata(
   options: { stampId: string; standard?: string; encryption?: string }  // MetadataBuilderOptions
 ): ProvenanceMetadata;
 
-// Extract original content from metadata
+// Extract original content from metadata. Without Buffer (browsers), data that is
+// not valid base64 throws ProvenanceError INVALID_INPUT
 function extractContent(metadata: ProvenanceMetadata): Uint8Array;
 
-// Verify content hash matches
+// Verify content hash matches (false for data that is not valid base64)
 function verifyContentHash(metadata: ProvenanceMetadata): boolean;
 
-// Serialize/parse metadata
+// Serialize/parse metadata. parseMetadata throws ProvenanceError INVALID_INPUT for text
+// that is not JSON (error.cause is the parse error) or JSON that is not metadata
 function serializeMetadata(metadata: ProvenanceMetadata): string;
 function parseMetadata(json: string): ProvenanceMetadata;
 
-// Build document metadata (raw JSON, no base64)
+// Build document metadata (raw JSON, no base64). A document JSON cannot represent
+// (circular, BigInt, nesting deeper than 1000 levels, a toJSON() or getter that throws)
+// throws ProvenanceError INVALID_INPUT; error.cause is the original error
 function buildDocumentMetadata(
   document: Record<string, unknown>,
   options: { stampId: string; standard?: string }  // DocumentMetadataOptions
@@ -758,7 +766,8 @@ function verifyDataHash(
 ): boolean;
 
 // SHA-256 of the canonical JSON of data, as the notary computes it (its data_hash).
-// Pass canonicalData for an exact result with floats and large integers
+// Pass canonicalData for an exact result with floats and large integers. Without it,
+// data JSON cannot represent throws ProvenanceError INVALID_INPUT (error.cause: the original)
 function computeNotaryDataHash(
   metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   canonicalData?: string
@@ -770,7 +779,12 @@ const NOTARY_MESSAGE_FORMAT = '{data_hash}|{timestamp}';
 // Recover the EIP-191 signer address (lowercase); throws VerificationError
 function recoverSigner(message: string, signature: string): string;
 
-// Canonical JSON, byte-compatible with Python json.dumps(sort_keys=True, separators=(',', ':'))
+// Canonical JSON, byte-compatible with Python json.dumps(sort_keys=True, separators=(',', ':')).
+// These two throw standard errors, not ProvenanceError:
+// canonicalizeJsonText: SyntaxError for text that is not JSON or is nested deeper than 1000 levels.
+// canonicalizeJsonValue: TypeError for a value JSON cannot represent (undefined, circular, BigInt)
+// and the error of a toJSON() or getter that throws, as JSON.stringify does; SyntaxError for
+// nesting deeper than 1000 levels; RangeError when JSON.stringify runs out of stack.
 function canonicalizeJsonText(text: string, path?: readonly string[]): string | undefined;
 function canonicalizeJsonValue(value: unknown): string;
 ```
@@ -784,7 +798,9 @@ function toBytes(input: Uint8Array | ArrayBuffer | string): Uint8Array;
 // SHA256 hash as hex string
 function sha256Hex(data: Uint8Array | ArrayBuffer | string): string;
 
-// Base64 encoding/decoding
+// Base64 encoding/decoding. Without Buffer (browsers), base64ToBytes throws
+// ProvenanceError INVALID_INPUT for text that atob cannot decode (error.cause: the atob
+// error). Node.js's Buffer skips characters that are not base64 and does not throw
 function bytesToBase64(bytes: Uint8Array): string;
 function base64ToBytes(base64: string): Uint8Array;
 
