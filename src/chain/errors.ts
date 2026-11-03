@@ -7,7 +7,6 @@ export class ChainError extends ProvenanceError {
   constructor(message: string, code?: string) {
     super(message, code);
     this.name = 'ChainError';
-    Object.setPrototypeOf(this, ChainError.prototype);
   }
 }
 
@@ -18,7 +17,6 @@ export class ChainConfigurationError extends ChainError {
   constructor(message: string) {
     super(message, 'CHAIN_CONFIGURATION');
     this.name = 'ChainConfigurationError';
-    Object.setPrototypeOf(this, ChainConfigurationError.prototype);
   }
 }
 
@@ -29,7 +27,6 @@ export class ChainConnectionError extends ChainError {
   constructor(message: string) {
     super(message, 'CHAIN_CONNECTION');
     this.name = 'ChainConnectionError';
-    Object.setPrototypeOf(this, ChainConnectionError.prototype);
   }
 }
 
@@ -52,7 +49,6 @@ export class ChainTransactionError extends ChainError {
     super(message, 'CHAIN_TRANSACTION');
     this.name = 'ChainTransactionError';
     Object.defineProperty(this, 'originalError', { value: originalError, enumerable: false });
-    Object.setPrototypeOf(this, ChainTransactionError.prototype);
   }
 }
 
@@ -74,7 +70,6 @@ export class ReceiptTimeoutError extends ChainConnectionError {
     // handling keeps matching; tell it apart by class or txHash
     super(message);
     this.name = 'ReceiptTimeoutError';
-    Object.setPrototypeOf(this, ReceiptTimeoutError.prototype);
   }
 }
 
@@ -120,7 +115,6 @@ export class ChainValidationError extends ChainError {
   constructor(message: string) {
     super(message, 'CHAIN_VALIDATION');
     this.name = 'ChainValidationError';
-    Object.setPrototypeOf(this, ChainValidationError.prototype);
   }
 }
 
@@ -131,7 +125,6 @@ export class DataNotRegisteredError extends ChainError {
   constructor(dataHash: string) {
     super(`Data hash ${dataHash} is not registered on-chain`, 'DATA_NOT_REGISTERED');
     this.name = 'DataNotRegisteredError';
-    Object.setPrototypeOf(this, DataNotRegisteredError.prototype);
   }
 }
 
@@ -153,7 +146,6 @@ export class DataAlreadyRegisteredError extends ChainError {
   ) {
     super(`Data hash ${dataHash} is already registered on-chain`, 'DATA_ALREADY_REGISTERED');
     this.name = 'DataAlreadyRegisteredError';
-    Object.setPrototypeOf(this, DataAlreadyRegisteredError.prototype);
   }
 }
 
@@ -164,7 +156,6 @@ export class SignerRequiredError extends ChainError {
   constructor() {
     super('A signer is required for write operations', 'SIGNER_REQUIRED');
     this.name = 'SignerRequiredError';
-    Object.setPrototypeOf(this, SignerRequiredError.prototype);
   }
 }
 

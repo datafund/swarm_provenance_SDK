@@ -191,6 +191,8 @@ Chain entry (`@datafund/swarm-provenance/chain`):
 
 Built with tsup for dual ESM/CJS output. viem is externalized. `tsup.config.ts` has two configs that tsup builds concurrently, so neither uses `clean`; `pnpm build` deletes `dist/` before running tsup. The viem require guard (#99) is applied to both `dist/chain/index.cjs` and `dist/chain/browser.cjs`.
 
+Each entry is its own bundle (`splitting: false`), so the chain entries carry their own copy of `ProvenanceError`. `instanceof ProvenanceError` still matches across entries through a `Symbol.for` brand checked in `ProvenanceError[Symbol.hasInstance]` (base class only; subclasses match by prototype). `scripts/verify-dist-instanceof.mjs` checks this on the built dist in CI "Verify dist" (#205). Do not switch to `splitting: true`: `require('viem')` would move into a hashed chunk and the viem guard and the dist checks would no longer find it.
+
 ## Dev Commands
 
 ```bash
