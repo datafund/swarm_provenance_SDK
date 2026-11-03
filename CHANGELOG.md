@@ -102,7 +102,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   characters, a number `depth` and a string `size_name`. `upload()` needs a `reference` of 64 or
   128 hex characters, with an optional `0x` prefix. Before, a body of `null` threw a raw
   `TypeError`, `acquireStamp()` could return `batchId: undefined`, and `upload()` then sent that
-  as its stamp or returned no `reference`. `upload()` no longer sends the data after a malformed pool answer.
+  as its stamp or returned no `reference`. `upload()` no longer sends the data after a malformed
+  pool answer.
   `PoolStatus.lowReserveWarning` and `AcquiredStamp.fallbackUsed` are `false` when the gateway
   leaves them out, and `INVALID_RESPONSE` when they are not booleans. A pool `batch_id` is
   lowercased, as a caller's `stampId` is (#168). If the request was paid, the error carries
@@ -187,8 +188,9 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `rpcUrl`. Before, viem's plain `Error` escaped. The message does not include the key. (#202)
 - `fromEip1193Provider()` throws `ChainConfigurationError` when the wallet refuses account
   access (`eth_requestAccounts`, for example EIP-1193 code 4001), as for a declined chain
-  switch. It also throws it for an answer that is not a list starting with an address string.
-  Before, the wallet's error escaped as it was. (#202)
+  switch. It also throws it for an answer that is not a list starting with an address (`0x`
+  and 40 hex characters). Before, the wallet's error escaped as it was, and any string was
+  taken as the account. (#202)
 - `getBalance()`, `anchor()` and `recordAccess()` throw `ChainConnectionError` when the signer's
   `getAddress()` fails, as writes already did when the signer's `getChainId()` fails. Unlike
   that check, an SDK error from the signer passes through unchanged. Nothing is sent. Before,

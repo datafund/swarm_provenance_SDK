@@ -131,6 +131,15 @@ describe('fromEip1193Provider() account access errors (#202)', () => {
     expect((error as Error).message).toBe('No accounts available from provider');
   });
 
+  it.each([
+    ['a word', ['foo']],
+    ['a short hex string', ['0x1234']],
+  ])('refuses a first account that is %s with ChainConfigurationError', async (_label, answer) => {
+    const error = await fromEip1193Provider(provider(() => Promise.resolve(answer))).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChainConfigurationError);
+    expect((error as Error).message).toBe('The wallet returned an account that is not an address');
+  });
+
   it('still returns the first account', async () => {
     const signer = await fromEip1193Provider(provider(() => Promise.resolve([ADDRESS])));
     expect(await signer.getAddress()).toBe(ADDRESS);
