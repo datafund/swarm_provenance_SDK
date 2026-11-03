@@ -4,8 +4,19 @@ on:
   push:
     branches: [main]
 
+# Jobs get read-only access unless they set their own permissions.
+permissions:
+  contents: read
+
 jobs:
+  # The ci.yml matrix: Node 18.x and 20.x, and the @x402 2.23.0 and 2.28.0
+  # payment tests. It runs for this commit and with read-only access.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    # Publish only if the full ci.yml matrix passed for this commit.
+    needs: ci
     runs-on: ubuntu-latest
 
     permissions:
@@ -25,7 +36,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Type check
         run: pnpm typecheck
