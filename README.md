@@ -968,7 +968,8 @@ issue numbers and lists the open release-gate items.
 - Signer errors are chain errors (#202). `fromPrivateKey()` throws `ChainConfigurationError`
   for an invalid private key or an empty `rpcUrl`, instead of viem's plain `Error`.
   `fromEip1193Provider()` throws `ChainConfigurationError` when the wallet refuses account
-  access, instead of the wallet's error. `getBalance()`, `anchor()` and `recordAccess()` throw
+  access, instead of the wallet's error, and when its first account is not an address.
+  `getBalance()`, `anchor()` and `recordAccess()` throw
   `ChainConnectionError` when the signer's `getAddress()` fails. These errors have no
   `error.cause`: the original error can carry the RPC URL and its key, or print the private
   key. The message keeps the original message with URLs redacted.
