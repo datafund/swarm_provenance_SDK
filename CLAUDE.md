@@ -255,6 +255,7 @@ To release a new version:
 - `.github/workflows/ci.yml` — Runs on all PRs to `main`/`development` and on pushes to `development`. On a push to `main`, `publish.yml` calls it, so the matrix runs once and gates the publish.
 - Matrix: Node 18.x + 20.x
 - Steps: typecheck → lint → test → build → verify dist → verify viem guard (CJS chain entry with viem present, absent, and bundled by tsup's esbuild)
+- `actionlint` job (in `ci.yml`): lints all workflow files, including their run scripts through shellcheck, and fails on any finding. actionlint 1.7.12 and shellcheck 0.11.0 run as pinned, checksum-verified release binaries. Check locally with `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12`.
 - `.github/workflows/secret-scan.yml` — gitleaks scan of new commits. Runs on all PRs, on pushes to `development` and by hand. On a push to `main`, `publish.yml` calls it, so the scan runs once and gates the publish.
 - Pushes to `main` are scanned only inside the "Publish to npm" workflow. If that workflow is disabled or its file is invalid, pushes to `main` are not scanned.
 

@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   # The ci.yml matrix: Node 18.x and 20.x, and the @x402 2.23.0 and 2.28.0
-  # payment tests. It runs for this commit and with read-only access.
+  # payment tests, and the actionlint check of the workflows. It runs for this
+  # commit and with read-only access.
   ci:
     uses: ./.github/workflows/ci.yml
 
@@ -75,14 +76,14 @@ jobs:
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
-          echo "name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
 
           if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version 2>/dev/null; then
-            echo "published=true" >> $GITHUB_OUTPUT
+            echo "published=true" >> "$GITHUB_OUTPUT"
             echo "Version ${PACKAGE_VERSION} already published, skipping."
           else
-            echo "published=false" >> $GITHUB_OUTPUT
+            echo "published=false" >> "$GITHUB_OUTPUT"
             echo "Version ${PACKAGE_VERSION} not yet published."
           fi
 

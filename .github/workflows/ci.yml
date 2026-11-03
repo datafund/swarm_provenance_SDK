@@ -14,6 +14,54 @@ permissions:
   contents: read
 
 jobs:
+  # Lints all workflow files, including their run scripts (through shellcheck).
+  # Fails on any finding. actionlint and shellcheck run as pinned,
+  # checksum-verified release binaries, as gitleaks does in secret-scan.yml.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      # sha256 of actionlint_1.7.12_linux_amd64.tar.gz, from the release's checksums file
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: 0.11.0
+      # sha256 of shellcheck-v0.11.0.linux.x86_64.tar.gz. The release has no
+      # checksums file; this is the asset digest GitHub lists for the release.
+      SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint and shellcheck
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -version
+          tarball="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${tarball}"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" --version
+
+      - name: Lint workflows
+        run: |
+          set -euo pipefail
+          # actionlint skips the run-script checks if it cannot find shellcheck,
+          # so pass the pinned binary and fail if it is not there.
+          shellcheck="$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          if [ ! -x "$shellcheck" ]; then
+            echo "::error::shellcheck not found at $shellcheck"
+            exit 1
+          fi
+          "$RUNNER_TEMP/actionlint" -color -shellcheck="$shellcheck"
+
   test:
     runs-on: ubuntu-latest
 

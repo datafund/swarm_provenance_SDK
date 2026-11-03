@@ -308,6 +308,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   push whose checks finish later cannot move npm `latest` back. If a version is on npm but its
   tag is missing on origin, a later run from the tip of `main` pushes the tag without publishing
   again. (#188, #187)
+- CI lints the GitHub Actions workflows with actionlint and fails on any finding. (#197)
 
 ### Release gate gaps
 
