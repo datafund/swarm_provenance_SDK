@@ -1527,6 +1527,11 @@ function withRetryHint(error: unknown, operation: string, idempotencyKey: string
       `${/[.!?]$/.test(error.message) ? '' : '.'} The gateway itself sent this answer, so calling ${operation} again ` +
       `with idempotencyKey "${idempotencyKey}" does not return a valid answer. The payment may have been taken: ` +
       `contact the gateway operator with ${tx ? `transaction ${tx}` : 'the idempotency key'}`;
+    // A stamp taken from the pool stays usable for another upload. A caller's
+    // own stamp is not named: the caller already has it
+    if (stampId !== undefined && error.stampId === stampId) {
+      error.message += `. The pool stamp can still be used: to upload without buying another, call ${operation} again with stampId "${stampId}" and a new idempotencyKey`;
+    }
     return error;
   }
   const args = stampId === undefined ? `idempotencyKey "${idempotencyKey}"` : `idempotencyKey "${idempotencyKey}" and stampId "${stampId}"`;

@@ -172,7 +172,8 @@ shape. That body is the gateway's own answer. A retry with the same key is not c
 but it does not return a valid answer: it gets the same answer again, or
 `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The error message says
 so and does not advise the retry: contact the gateway operator with `payment.transaction`, or with
-the key when the transaction is not known. A 200 whose body could not be read or is not JSON (a
+the key when the transaction is not known. If `upload()` used a pool stamp, the message also
+says to pass its `stampId` back with a new key, so the stamp is not bought again. A 200 whose body could not be read or is not JSON (a
 reset connection, a proxy's error page) is not the gateway's answer, so the retry above can
 recover the result.
 
