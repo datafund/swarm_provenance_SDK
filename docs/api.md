@@ -161,7 +161,13 @@ const stamp = await client.acquireStamp('small');
 
 In x402 mode the acquisition is paid only with `payment.payForPool: true`. Without it, a 402
 from the pool throws `StampError`. `idempotencyKey` works as in `UploadOptions`; it is sent
-only on a paid acquisition. A pool error throws `StampError` (see Errors).
+only on a paid acquisition. An error status from the pool throws `StampError` (see Errors),
+except a rate-limited free-tier request, which throws `PaymentRateLimitError` (`'free'`
+mode), and the three idempotency stop codes after a paid acquisition, which throw
+`PaymentOutcomeError`. A connection failure or timeout throws `GatewayConnectionError`
+(`CONNECTION_FAILED` or `TIMEOUT`), and a success body that is not JSON throws
+`GatewayConnectionError` with code `INVALID_RESPONSE`. In x402 mode with `payForPool`, the
+payment errors listed under `upload()` also apply.
 
 #### `upload(content, options?): Promise<UploadResult>`
 
@@ -193,7 +199,8 @@ interface OwnerSigner {
 }
 ```
 
-A viem `LocalAccount` or a viem `WalletClient` with an account fits `OwnerSigner` as is.
+A viem `LocalAccount` or a viem `WalletClient` with an account can be passed as `OwnerSigner`
+directly.
 
 **Returns:** `UploadResult` (default) or `DocumentUploadResult` (when `raw: true`)
 
@@ -226,6 +233,32 @@ interface PaymentReceipt {
 ```
 
 A receipt is present only when the request carried a payment the gateway accepted.
+
+**Errors:**
+
+| Error | Code | When |
+|-------|------|------|
+| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or an object; `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
+| `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent |
+| `GatewayConnectionError` | `FILE_TOO_LARGE` | The gateway's proxy refused the body with a 413 that is not JSON |
+| `ProvenanceError` | `OWNER_PROOF_FAILED` | `ownerSigner.signMessage()` threw, or did not return a `0x`-prefixed hex string |
+| `StampError` | `POOL_EXHAUSTED`, or the gateway's code | Without `stampId`: the pool is enabled and empty, or the pool acquisition failed (see StampError) |
+| `NotaryError` | the gateway's code | With `sign: 'notary'`: the upload request got an error status (see NotaryError) |
+| `GatewayConnectionError` | the gateway's code | Without `sign: 'notary'`: the upload request got an error status. `body` holds the response |
+| `GatewayConnectionError` | `CONNECTION_FAILED`, `TIMEOUT` | A request could not be sent, got no response, or timed out. With `ownerSigner`, also a timeout while waiting for the signature or the clock |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body is not JSON |
+| `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | A free-tier request (`'free'` mode, or an owner-proof upload) was rate limited |
+| `PaymentConfigurationError` | `PAYMENT_CONFIGURATION` | x402 mode: the `@x402` packages, Web Crypto or the wallet address are missing. Checked on the first request that may pay |
+| `PaymentRefusedError` | `PAYMENT_REFUSED` | x402 mode: the payment was refused before signing |
+| `PaymentError` | `PAYMENT_FAILED`, `PAYMENT_UNCONFIRMED` | x402 mode: the payment could not be created, or was sent and the response could not be processed |
+| `PaymentOutcomeError` | an idempotency stop code | x402 mode: a paid retry found that the first attempt needs a person to follow up |
+
+"The gateway's code" is undefined when the error body has none.
+
+An error from the upload request, after `upload()` took a stamp from the pool, has
+`stampId`, and `stampPayment` when that stamp was paid for. An error after a paid request
+has `payment`, with `payment.idempotencyKey` and `payment.stampId`. Pass those back as
+`idempotencyKey` and `stampId` to retry without paying twice; the error message says how.
 
 **Raw mode example:**
 
@@ -302,11 +335,11 @@ check `verified === true`, never `verified !== false`.
 | Error | Code | When |
 |-------|------|------|
 | `ProvenanceError` | `INVALID_INPUT` | `reference` is not 64 or 128 hex characters (optional `0x`), or `notaryAddress` is malformed (checked unless `verify: false`). Nothing is sent |
-| `GatewayConnectionError` | the gateway's code | The gateway answered with an error status, such as 404. `body` holds the response |
+| `GatewayConnectionError` | the gateway's code, if the body has one | The gateway answered with an error status, such as 404. `body` holds the response |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | The free-tier read was rate limited |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The success body cannot be read or is not JSON (#173, #179) |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The body is not an object with string `data` and `content_hash`, directly or under `metadata` (#179) |
-| `ProvenanceError` | `CONTENT_HASH_MISMATCH` | `content_hash` is not the SHA-256 of the base64-decoded `data`. In browsers, `data` that is not valid base64 is also this error |
+| `ProvenanceError` | `CONTENT_HASH_MISMATCH` | `content_hash` is not the SHA-256 of the base64-decoded `data`. `data` that is not valid base64 is also this error |
 
 When the record's hash proves that it is a raw upload (`raw: true`), the error message says
 to use `downloadDocument()` (#190). The code depends on `data`: `INVALID_RESPONSE` when
@@ -345,7 +378,7 @@ interface DocumentDownloadResult {
 | Error | Code | When |
 |-------|------|------|
 | `ProvenanceError` | `INVALID_INPUT` | `reference` is not 64 or 128 hex characters (optional `0x`), or `notaryAddress` is malformed (checked unless `verify: false`). Nothing is sent |
-| `GatewayConnectionError` | the gateway's code | The gateway answered with an error status, such as 404. `body` holds the response |
+| `GatewayConnectionError` | the gateway's code, if the body has one | The gateway answered with an error status, such as 404. `body` holds the response |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | The free-tier read was rate limited |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The success body cannot be read or is not JSON (#173, #179) |
 | `GatewayConnectionError` | `INVALID_RESPONSE` | The body is not an object with a `data` field and a string `content_hash`, directly or under `metadata` (#179) |
@@ -452,8 +485,9 @@ interface AcquiredStamp {
 
 ## Errors
 
-All errors extend `ProvenanceError`. Errors the SDK raises itself, such as `INVALID_INPUT`
-and `CONTENT_HASH_MISMATCH`, are plain `ProvenanceError` instances.
+All errors extend `ProvenanceError`. Input and content checks throw a plain
+`ProvenanceError`: `INVALID_INPUT`, `FILE_TOO_LARGE` from the SDK's own size check,
+`CONTENT_HASH_MISMATCH` and `OWNER_PROOF_FAILED`. The other errors are the subclasses below.
 
 ### ProvenanceError
 
@@ -461,7 +495,7 @@ Base error class.
 
 ```typescript
 class ProvenanceError extends Error {
-  code?: string;
+  readonly code?: string;
   // Set when the failed request carried an x402 payment: it may have been charged
   payment?: PaymentAttempt;
   // Gateway error responses only: the response body (see below)
@@ -477,8 +511,9 @@ class ProvenanceError extends Error {
 
 - `body` is set on errors from a gateway error response (#112). It is the parsed JSON if the
   body is JSON of at most 16384 characters. A larger JSON body, or one that is not JSON, is
-  kept as text, cut to 4096 characters with an ellipsis. Codes and fields that the SDK does
-  not map are here, such as the price options of a 402.
+  kept as text. Text longer than 4096 characters is cut to 4096 characters, ending with an
+  ellipsis. An empty body leaves `body` unset. Codes and fields that the SDK does not map are
+  here, such as the price options of a 402.
 - `retryAfterSeconds` is set on errors from a 429 response when the gateway sent a
   `Retry-After` the SDK can read: whole seconds or an HTTP date (#161). It is also set when
   the SDK did not retry because the wait was longer than 60 seconds. A value above
@@ -512,17 +547,18 @@ Error connecting to or communicating with the gateway.
 
 ```typescript
 class GatewayConnectionError extends ProvenanceError {
-  statusCode?: number;   // HTTP status, when there was a response
-  suggestion?: string;   // the gateway's detail.suggestion, if it sent one
+  readonly statusCode?: number;   // HTTP status, when there was a response
+  readonly suggestion?: string;   // the gateway's detail.suggestion, if it sent one
 }
 ```
 
 | Code | When |
 |------|------|
-| The gateway's code | The gateway answered with an error status. `body` holds the response |
+| The gateway's code | The gateway answered with an error status. `body` holds the response. The code is undefined when the body has none |
+| `FILE_TOO_LARGE` | The gateway's proxy answered 413 with a body that is not JSON |
 | `CONNECTION_FAILED` | The request could not be sent or got no response |
 | `TIMEOUT` | The request took longer than `timeout`, or `paidTimeout` for an attempt that may pay or signs an owner proof |
-| `INVALID_RESPONSE` | A success response whose body cannot be read, is not JSON, or does not have the fields the method needs (#173, #179). `statusCode` is the HTTP status |
+| `INVALID_RESPONSE` | A success response whose body cannot be read or is not JSON (#173, #179). `notaryInfo()`, `poolStatus()`, `download()` and `downloadDocument()` also throw it for a body that does not have the fields they need (#179). `statusCode` is the HTTP status |
 
 ### PaymentRateLimitError
 
@@ -533,9 +569,9 @@ either.
 
 ```typescript
 class PaymentRateLimitError extends PaymentError {
-  retryAfterSeconds?: number;   // from Retry-After, if readable
-  requestsLimit?: number;       // from X-RateLimit-Limit
-  requestsRemaining?: number;   // from X-RateLimit-Remaining
+  readonly retryAfterSeconds?: number;   // from Retry-After, if readable
+  readonly requestsLimit?: number;       // from X-RateLimit-Limit
+  readonly requestsRemaining?: number;   // from X-RateLimit-Remaining
 }
 ```
 
@@ -546,6 +582,7 @@ nothing was signed or paid. `refusals` lists each refused option with its reason
 causes are:
 
 - The payment broke the payment policy, or `onBeforePayment` vetoed it.
+- The 402 response carries no readable payment requirements. `refusals` is empty.
 - The signature was declined in the wallet (#112). This covers EIP-1193 code `4001`, viem's
   `UserRejectedRequestError`, and an ethers v6 error with code `ACTION_REJECTED` (#166),
   anywhere in the error's `cause` chain. Its reason in `refusals` is `'rejected in the wallet'`.
@@ -569,7 +606,7 @@ set.
 
 ```typescript
 class PaymentOutcomeError extends PaymentError {
-  outcome: 'unknown' | 'settled_not_delivered' | 'delivered';
+  readonly outcome: 'unknown' | 'settled_not_delivered' | 'delivered';
 }
 ```
 
@@ -583,19 +620,22 @@ class PaymentOutcomeError extends PaymentError {
 
 Error related to postage stamps. `acquireStamp()`, and `upload()` without `stampId`, throw it
 for a gateway error from the pool. It keeps the gateway's code, `body`, `payment` and
-`retryAfterSeconds`. The three idempotency stop codes throw `PaymentOutcomeError` instead.
+`retryAfterSeconds`. The gateway's code is undefined when the body has none. When the
+request was paid, the three idempotency stop codes throw `PaymentOutcomeError` instead.
 
 | Code | When |
 |------|------|
-| The gateway's code, else `PAYMENT_REQUIRED` | The pool answered 402 and the SDK did not pay it (no x402 mode, or no `payForPool`). `body` holds the 402 response (#163) |
+| The gateway's code, else `PAYMENT_REQUIRED` | The pool answered 402 and the SDK did not pay it (for example, without `payForPool`). `body` holds the 402 response (#163) |
 | `POOL_EXHAUSTED` | `upload()` found the pool enabled and empty before acquiring |
 | The gateway's code | Any other pool error |
 
 ### NotaryError
 
 Error related to notary signing service. `upload()` with `sign: 'notary'` throws it for a
-gateway error, with the gateway's code, `body`, `payment` and `retryAfterSeconds`. The three
-idempotency stop codes throw `PaymentOutcomeError` instead.
+gateway error, with the gateway's code, `body`, `payment` and `retryAfterSeconds`. The
+gateway's code is undefined when the body has none, and `FILE_TOO_LARGE` for a non-JSON 413.
+When the request was paid, the three idempotency stop codes throw `PaymentOutcomeError`
+instead.
 
 ### VerificationError
 
