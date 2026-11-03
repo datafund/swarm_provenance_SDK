@@ -103,7 +103,8 @@ says how to continue: pass a `stampId` you own, or set `payForPool`.
 
 A request that sent a payment is not retried on 502/503/429 (unpaid attempts still are). The
 one exception is a paid write the gateway answers with `IDEMPOTENCY_KEY_IN_PROGRESS` or
-`IDEMPOTENCY_UNAVAILABLE`: the SDK retries it with the same key, as described below. If it fails after the payment was sent, the error's `payment` field says so
+`IDEMPOTENCY_UNAVAILABLE`: the SDK retries it with the same key, as described below. If it
+fails after the payment was sent, the error's `payment` field says so
 (`{ paymentSent: true, transaction?, idempotencyKey?, stampId?, ... }`). A timeout while the wallet
 is still approving the payment is not reported as paid: nothing was sent.
 

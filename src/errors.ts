@@ -47,7 +47,9 @@ export interface PaymentAttempt {
 export class ProvenanceError extends Error {
   /**
    * Present when the failed request carried an x402 payment: the gateway may
-   * have settled it even though the request failed. Never retried automatically.
+   * have settled it even though the request failed. Not retried automatically,
+   * except a paid write the gateway answers with IDEMPOTENCY_KEY_IN_PROGRESS or
+   * IDEMPOTENCY_UNAVAILABLE: that is retried with the same Idempotency-Key.
    */
   public payment?: PaymentAttempt;
 

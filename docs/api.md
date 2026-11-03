@@ -72,6 +72,11 @@ Check if the gateway is healthy and reachable.
 const isHealthy = await client.health();
 ```
 
+It never throws. It returns `false` when the request fails or gets an error status, and when
+the gateway reports `status: 'critical'`: the gateway answers 200 even then, so that it stays
+reachable. A `degraded` gateway is still healthy, and so is a 200 whose body is not JSON. A 429
+whose `Retry-After` asks for more than 60 s returns `false` at once, without a retry (#161).
+
 #### `notaryInfo(): Promise<NotaryInfo>`
 
 Get notary service information.
@@ -251,7 +256,7 @@ A receipt is present only when the request carried a payment the gateway accepte
 
 | Error | Code | When |
 |-------|------|------|
-| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or an object; `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
+| `ProvenanceError` | `INVALID_INPUT` | Raw content (`raw: true`) is not a JSON string or a non-binary object (a `Uint8Array`, `ArrayBuffer` or `Blob` is refused); `idempotencyKey` is not 1-255 printable ASCII characters; or `ownerSigner` is set without a `stampId` of 64 hex characters, or together with `idempotencyKey`. Nothing is sent |
 | `ProvenanceError` | `FILE_TOO_LARGE` | The metadata JSON is larger than `maxUploadBytes`. Checked before a stamp is acquired; nothing is sent |
 | `GatewayConnectionError` | `FILE_TOO_LARGE` | Without `sign: 'notary'`: the gateway's proxy refused the body with a 413 that is not JSON. With `sign: 'notary'`, this is a `NotaryError` with the same code |
 | `ProvenanceError` | `OWNER_PROOF_FAILED` | `ownerSigner.signMessage()` threw, or did not return a `0x`-prefixed hex string |
@@ -678,10 +683,10 @@ Thrown by `recoverSigner()` for a malformed or unrecoverable signature
 ### Metadata Functions
 
 ```typescript
-// Build metadata from content
+// Build metadata from content (base64 data, SHA-256 of the bytes)
 function buildMetadata(
   content: Uint8Array | ArrayBuffer | string,
-  options: MetadataBuilderOptions
+  options: { stampId: string; standard?: string; encryption?: string }  // MetadataBuilderOptions
 ): ProvenanceMetadata;
 
 // Extract original content from metadata
@@ -697,14 +702,18 @@ function parseMetadata(json: string): ProvenanceMetadata;
 // Build document metadata (raw JSON, no base64)
 function buildDocumentMetadata(
   document: Record<string, unknown>,
-  options: DocumentMetadataOptions
+  options: { stampId: string; standard?: string }  // DocumentMetadataOptions
 ): DocumentMetadata;
 
 // Verify document content hash (canonical JSON, or JSON.stringify from SDK 0.6.x).
+// A self-consistency check only: it does not bind the data to its author or reference.
 // canonicalData: canonicalizeJsonText(responseText, ['data']) (['metadata', 'data'] if wrapped)
 // for exact floats/big ints
 function verifyDocumentHash(metadata: DocumentMetadata, canonicalData?: string): boolean;
 ```
+
+`MetadataBuilderOptions` and `DocumentMetadataOptions` are not exported from the package;
+the option shapes are shown inline.
 
 ### Signature Verification
 
@@ -715,7 +724,7 @@ proves who signed, not whether that signer should be trusted.
 // Verify a single signature (EIP-191 recovery against expectedSigner)
 function verifySignature(
   signature: NotarySignature,
-  metadata: { data: unknown },
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   expectedSigner?: string,
   canonicalData?: string        // canonicalizeJsonText(responseText, ['data']),
                                 // or ['metadata', 'data'] for a wrapped response
@@ -725,19 +734,33 @@ function verifySignature(
 // allValid = at least one, and every one valid
 function verifyAllSignatures(
   signatures: NotarySignature[],
-  metadata: { data: unknown },
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
   expectedSigner?: string,
   canonicalData?: string
 ): { allValid: boolean; anyValid: boolean; results: SignatureCheck[] };
 
 // Verify data hash matches the document's data (hashed_fields ['data'] only)
-function verifyDataHash(signature: NotarySignature, metadata: { data: unknown }, canonicalData?: string): boolean;
+function verifyDataHash(
+  signature: NotarySignature,
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
+  canonicalData?: string
+): boolean;
+
+// SHA-256 of the canonical JSON of data, as the notary computes it (its data_hash).
+// Pass canonicalData for an exact result with floats and large integers
+function computeNotaryDataHash(
+  metadata: Pick<ProvenanceMetadata | DocumentMetadata, 'data'>,
+  canonicalData?: string
+): string;
+
+// The notary's signed message format
+const NOTARY_MESSAGE_FORMAT = '{data_hash}|{timestamp}';
 
 // Recover the EIP-191 signer address (lowercase); throws VerificationError
 function recoverSigner(message: string, signature: string): string;
 
 // Canonical JSON, byte-compatible with Python json.dumps(sort_keys=True, separators=(',', ':'))
-function canonicalizeJsonText(text: string, path?: string[]): string | undefined;
+function canonicalizeJsonText(text: string, path?: readonly string[]): string | undefined;
 function canonicalizeJsonValue(value: unknown): string;
 ```
 
@@ -754,6 +777,10 @@ function sha256Hex(data: Uint8Array | ArrayBuffer | string): string;
 function bytesToBase64(bytes: Uint8Array): string;
 function base64ToBytes(base64: string): Uint8Array;
 
-// Swarm reference validation
+// Swarm reference validation: 64 or 128 hex characters, optional 0x prefix
 function isValidSwarmReference(ref: string): boolean;
+
+// The text an owner signs (EIP-191 personal_sign) for an owner-proof upload (#124):
+// 'swarm-connect-owner-upload:<stamp id lowercase>:<timestamp>' (unix seconds)
+function ownerProofMessage(stampId: string, timestamp: number): string;
 ```
