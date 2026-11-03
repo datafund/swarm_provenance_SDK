@@ -16,8 +16,10 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 |----------|------|---------|-------------|
 | `gatewayUrl` | `string` | `https://provenance-gateway.datafund.io` | Gateway URL |
 | `timeout` | `number` | `30000` | Request timeout in milliseconds |
+| `paidTimeout` | `number` | `120000`, or `timeout` if that is longer | Timeout in milliseconds for an attempt that may pay (x402 mode: the 402, signing, and the paid request), and for an owner-proof upload |
 | `payment` | `'free' \| 'none' \| X402PaymentConfig` | `'free'` | Payment mode (see below) |
-| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. An x402 attempt that sent a payment is never retried; unpaid attempts are |
+| `retry` | `{ maxRetries?, baseDelayMs? }` | `{ 2, 1000 }` | Retries on 502/503, and on 429 unless the request used the free tier (then `PaymentRateLimitError`). A 429 retry waits `Retry-After` up to 60 s; above that the error is thrown at once, with `retryAfterSeconds`. A 429 whose code is not a rate limit (such as `DAILY_STAMP_ALLOWANCE_EXHAUSTED`) is not retried. An x402 attempt that sent a payment is never retried; unpaid attempts are |
+| `maxUploadBytes` | `number` | `10485760` | Largest upload, in bytes of the uploaded metadata JSON. A larger upload throws `FILE_TOO_LARGE` before a stamp is acquired. With base64, that is about 7.5 MiB of content. A value that is not a positive integer throws `INVALID_INPUT` in the constructor |
 
 #### X402PaymentConfig
 
@@ -34,6 +36,7 @@ new ProvenanceClient(config?: ProvenanceClientConfig)
 | `maxTimeoutSeconds` | `number` | `600` | Longest authorization validity accepted |
 | `onBeforePayment` | `(p: PaymentRequest) => boolean \| void \| Promise<…>` | none | Return `false` (or throw) to refuse a payment. A payment may still not follow (signing fails, timeout) |
 | `payForReads` | `boolean` | `false` | Pay for GET/HEAD too; otherwise reads use the free tier |
+| `payForPool` | `boolean` | `false` | Pay for pool stamps (`acquireStamp()`, and `upload()` without `stampId`) when the pool answers 402. Otherwise that 402 is not paid and the call throws `StampError`. The policy above still applies |
 
 A payment outside this policy, of a scheme other than `exact`, or using a transfer method
 other than EIP-3009 is refused before anything is signed (`PaymentRefusedError`). An invalid
@@ -73,9 +76,9 @@ const info = await client.notaryInfo();
 
 A 404 returns `{ enabled: false, available: false }`. Another error status throws
 `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
-rate-limited free-tier request. A success body that cannot be
-read, is not JSON, or is not an object with boolean `enabled` and `available` throws
-`GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179).
+rate-limited free-tier request. A success body that cannot be read, is not JSON, or is not an
+object with boolean `enabled` and `available` throws `GatewayConnectionError` with code
+`INVALID_RESPONSE` (#173, #179).
 
 #### `poolStatus(): Promise<PoolStatus>`
 
@@ -83,24 +86,82 @@ Get stamp pool status.
 
 ```typescript
 const status = await client.poolStatus();
-// { enabled: true, available: { '17': 5 }, reserve: { '17': 10 } }
+// { enabled: true, available: { '17': 5 }, reserve: { '17': 10 }, totalStamps: 5,
+//   lowReserveWarning: true }
 ```
 
 A 404 returns a disabled pool with no stamps. Another error status throws
 `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError` for a
-rate-limited free-tier request. A success body that cannot be
-read, is not JSON, or is not an object with boolean `enabled`, number `total_stamps` and
-objects `current_levels` and `reserve_config` throws `GatewayConnectionError` with code
-`INVALID_RESPONSE` (#173, #179).
+rate-limited free-tier request. A success body that cannot be read, is not JSON, or is not an
+object with boolean `enabled`, number `total_stamps` and objects `current_levels` and
+`reserve_config` throws `GatewayConnectionError` with code `INVALID_RESPONSE` (#173, #179).
 
-#### `acquireStamp(size?: 'small' | 'medium' | 'large'): Promise<AcquiredStamp>`
+#### `pricing(options?): Promise<Pricing>`
+
+Get price quotes for the gateway's paid operations, without paying (`GET /api/v1/pricing`).
+Only the options you set are sent; the gateway applies its defaults and validation.
+
+**PricingOptions:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `size` | `'small' \| 'medium' \| 'large'` | Stamp size preset |
+| `depth` | `number` | Stamp depth (16-32) |
+| `durationHours` | `number` | Stamp duration in hours (at least 24) |
+| `uploadBytes` | `number` | Size of the upload request body in bytes (gateway default: 4096) |
+| `mb` | `number` | Bandwidth credit top-up in MB (at least 1) |
+
+**Returns:** `Pricing`
+
+```typescript
+interface Pricing {
+  x402Enabled: boolean;        // false: the gateway does not charge; quotes is empty
+  currency?: string;           // e.g. 'USDC'
+  network?: string;            // as the gateway's 402 names it
+  asset?: string;              // token contract
+  payTo?: string;              // can seed payment.payTo
+  minPriceUsd?: number;
+  freeTier?: { enabled: boolean; header: string };
+  quotes: {                    // only operations enabled on the gateway
+    stampPurchase?: PriceQuote;    // POST /api/v1/stamps/
+    poolAcquire?: PriceQuote;      // POST /api/v1/pool/acquire
+    dataUpload?: PriceQuote;       // POST /api/v1/data/
+    bandwidthCredit?: PriceQuote;  // POST /api/v1/chunks/credit
+  };
+}
+
+interface PriceQuote {
+  method: string;              // e.g. 'POST'
+  path: string;                // e.g. '/api/v1/data/'
+  priceUsd: number;
+  maxAmountRequired: string;   // smallest unit of the asset (integer string)
+  description: string;
+}
+```
+
+Quotes follow the current chain price: treat them as current, not guaranteed. An error status
+throws `GatewayConnectionError` with the gateway's code and `body`, or `PaymentRateLimitError`
+for a rate-limited free-tier request. A success body that is not JSON throws
+`GatewayConnectionError` with code `INVALID_RESPONSE`.
+
+#### `acquireStamp(size?, options?): Promise<AcquiredStamp>`
 
 Acquire a stamp from the pool.
 
 ```typescript
+acquireStamp(
+  size?: 'small' | 'medium' | 'large',   // default 'small'
+  options?: { idempotencyKey?: string }
+): Promise<AcquiredStamp>
+
 const stamp = await client.acquireStamp('small');
-// { batchId: '...', depth: 17, sizeName: 'small', fallbackUsed: false }
+// { batchId: '...', depth: 17, sizeName: 'small', fallbackUsed: false,
+//   expiresAt: '...' }
 ```
+
+In x402 mode the acquisition is paid only with `payment.payForPool: true`. Without it, a 402
+from the pool throws `StampError`. `idempotencyKey` works as in `UploadOptions`; it is sent
+only on a paid acquisition. A pool error throws `StampError` (see Errors).
 
 #### `upload(content, options?): Promise<UploadResult>`
 
@@ -123,6 +184,16 @@ Upload provenance data to Swarm.
 | `poolSize` | `'small' \| 'medium' \| 'large'` | `'small'` | Pool size preset |
 | `contentType` | `string` | - | Content type |
 | `raw` | `boolean` | `false` | Upload raw JSON without base64 wrapping |
+| `idempotencyKey` | `string` | a new random key per call (x402 mode) | Idempotency-Key for the paid requests of this upload, 1-255 printable ASCII characters (else `INVALID_INPUT`). To retry an upload that failed after paying, pass `error.payment.idempotencyKey` here and `error.payment.stampId` as `stampId`: the gateway returns the first result instead of charging again |
+| `ownerSigner` | `OwnerSigner` | - | Prove that you own `stampId` with a signed owner proof instead of a payment. Requires `stampId` (64 hex characters, no `0x`) and cannot be combined with `idempotencyKey` (else `INVALID_INPUT`). The upload uses the free tier and never pays, in any payment mode. Each attempt signs a new proof |
+
+```typescript
+interface OwnerSigner {
+  signMessage(args: { message: string }): Promise<`0x${string}`>;  // EIP-191 personal_sign
+}
+```
+
+A viem `LocalAccount` or a viem `WalletClient` with an account fits `OwnerSigner` as is.
 
 **Returns:** `UploadResult` (default) or `DocumentUploadResult` (when `raw: true`)
 
@@ -130,13 +201,31 @@ Upload provenance data to Swarm.
 interface UploadResult {
   reference: string;           // Swarm hash (64 hex chars)
   metadata: ProvenanceMetadata;
+  payment?: PaymentReceipt;    // the upload's payment, when it was paid (x402 mode)
+  stampPayment?: PaymentReceipt; // the pool stamp's payment, when upload() paid for it
+  expiresAt?: string;          // when the stamp runs out (ISO 8601, UTC; gateway estimate)
 }
 
 interface DocumentUploadResult {
   reference: string;           // Swarm hash (64 hex chars)
   metadata: DocumentMetadata;  // data is raw JSON, not base64
+  payment?: PaymentReceipt;
+  stampPayment?: PaymentReceipt;
+  expiresAt?: string;
+}
+
+interface PaymentReceipt {
+  transaction?: string;        // settlement transaction, from the gateway's receipt headers
+  network?: string;
+  payer?: string;
+  amount?: string;             // amount signed, in the token's smallest unit
+  amountDecimal?: string;      // amount in tokens
+  asset?: string;
+  replayed?: true;             // the gateway replayed the first result for this key
 }
 ```
+
+A receipt is present only when the request carried a payment the gateway accepted.
 
 **Raw mode example:**
 
@@ -339,8 +428,10 @@ interface NotaryInfo {
 ```typescript
 interface PoolStatus {
   enabled: boolean;
-  available: Record<string, number>;
-  reserve: Record<string, number>;
+  available: Record<string, number>;  // stamps per depth
+  reserve: Record<string, number>;    // reserve configuration per depth
+  totalStamps: number;
+  lowReserveWarning: boolean;         // a depth is below its reserve
 }
 ```
 
@@ -351,7 +442,9 @@ interface AcquiredStamp {
   batchId: string;
   depth: number;
   sizeName: string;
-  fallbackUsed: boolean;
+  fallbackUsed: boolean;       // a larger stamp was used as fallback
+  payment?: PaymentReceipt;    // the acquisition's payment, when it was paid (x402 mode)
+  expiresAt?: string;          // when the stamp runs out (ISO 8601, UTC; gateway estimate)
 }
 ```
 
