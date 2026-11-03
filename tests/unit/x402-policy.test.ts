@@ -1,15 +1,18 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import { createWalletClient, http, publicActions } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
 import { UserRejectedRequestError } from 'viem';
+import { x402Client } from '@x402/fetch';
 import {
   GatewayConnectionError,
   PaymentConfigurationError,
   PaymentRefusedError,
+  ProvenanceError,
   StampError,
 } from '../../src/errors.js';
+import { sha256Hex, toBytes } from '../../src/utils.js';
 import type { PaymentRequest, X402PaymentConfig } from '../../src/types.js';
 
 // Drives the REAL @x402/fetch + @x402/evm (whatever version is installed)
@@ -25,6 +28,8 @@ const wallet = createWalletClient({
 const USDC_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const GATEWAY_PAYTO = '0x1111111111111111111111111111111111111111';
 const STAMP = 'a'.repeat(64);
+/** EIP-712 domain of Base mainnet USDC (name() and version() on chain) */
+const USD_COIN = { name: 'USD Coin', version: '2' };
 const POOL_STAMP = 'd'.repeat(64);
 const POOL_BODY = { batch_id: POOL_STAMP, depth: 17, size_name: 'small', fallback_used: false };
 /** Matches the generated Idempotency-Key (#102) */
@@ -244,7 +249,7 @@ describe('x402 payment policy with the real x402 library (#106)', () => {
   it('a custom asset requires assetDecimals', () => {
     const asset = '0x2222222222222222222222222222222222222222';
     expect(() => client({ asset, maxAmount: '1' })).toThrow(/assetDecimals is required/);
-    expect(() => client({ asset, maxAmount: '1', assetDecimals: 18 })).not.toThrow();
+    expect(() => client({ asset, maxAmount: '1', assetDecimals: 18, assetDomain: { name: 'Token', version: '1' } })).not.toThrow();
   });
 
   it.each([['-1'], ['1e3'], ['0.1234567'], ['abc']])('rejects a malformed maxAmount %j at construction', (maxAmount) => {
@@ -391,6 +396,26 @@ describe('paid pool acquisition is opt-in (#109)', () => {
     expect(payments()).toBe(0);
   });
 
+  it.each([
+    ['acquireStamp()', (c: ProvenanceClient) => c.acquireStamp()],
+    ['upload()', (c: ProvenanceClient) => c.upload('hello')],
+  ])('without payForPool, the StampError from an unpaid pool 402 keeps error.body (%s, #163)', async (_label, call) => {
+    const error = await call(client()).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as StampError).payment).toBeUndefined();
+    expect((error as StampError).body).toEqual({
+      detail: {
+        x402Version: 1,
+        error: 'Payment required',
+        accepts,
+        code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED',
+        message: 'Daily stamp allowance used up.',
+      },
+    });
+    expect(payments()).toBe(0);
+  });
+
   it('payForPool: true pays an in-policy pool 402 and the upload', async () => {
     const result = await client({ payForPool: true }).upload('hello');
     expect(result.reference).toBe('b'.repeat(64));
@@ -517,6 +542,138 @@ describe('review round 3 (#138)', () => {
   });
 });
 
+describe('paid reads with an unreadable body (#173)', () => {
+  it.each([['download'], ['downloadDocument']] as const)('a paid 200 to %s() that is not JSON keeps the payment flag', async (method) => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('<html>proxy error</html>', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForReads: true })[method]('c'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/a payment was sent with this request and may have been charged/);
+      expect(payments()).toBe(1);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});
+
+describe('paid reads with a body that is not the expected shape (#179)', () => {
+  it.each([['download'], ['downloadDocument']] as const)('a paid 200 {} to %s() keeps the payment flag', async (method) => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForReads: true })[method]('c'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+      expect((error as Error).message).toMatch(/a payment was sent with this request and may have been charged/);
+      expect(payments()).toBe(1);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});
+
+describe('paid reads of a record the method cannot verify (#190)', () => {
+  const HELLO = { data: 'aGVsbG8=', content_hash: sha256Hex(toBytes('hello')), stamp_id: STAMP };
+  const RAW = { data: { a: 1 }, content_hash: sha256Hex(toBytes('{"a":1}')), stamp_id: STAMP };
+
+  /**
+   * Answer the paid retry of the download with `body`; return the error.
+   * `browser`: Buffer is removed from when the paid response is made until
+   * the call returns, so the SDK decodes base64 with atob.
+   */
+  async function paidFailure(
+    method: 'download' | 'downloadDocument',
+    body: unknown,
+    browser = false
+  ): Promise<GatewayConnectionError> {
+    const saved = globalThis.Buffer;
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        const text = JSON.stringify(body);
+        const response = new Response(text, { status: 200 });
+        if (browser) {
+          // Response.text() itself needs Buffer: answer it from the string
+          response.text = () => Promise.resolve(text);
+          (globalThis as { Buffer?: unknown }).Buffer = undefined;
+        }
+        return Promise.resolve(response);
+      }
+      return gateway(input, init);
+    });
+    try {
+      const paying = client({ payForReads: true });
+      const error = await paying[method]('c'.repeat(64))
+        .catch((e: unknown) => e)
+        .finally(() => {
+          globalThis.Buffer = saved;
+        });
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/ \(a payment was sent with this request and may have been charged\)$/);
+      expect(payments()).toBe(1);
+      return error as GatewayConnectionError;
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  }
+
+  it.each([
+    ['download', { ...HELLO, content_hash: '0'.repeat(64) }],
+    ['downloadDocument', { ...RAW, content_hash: '0'.repeat(64) }],
+  ] as const)('a paid 200 with a wrong hash to %s() keeps the payment flag', async (method, body) => {
+    const error = await paidFailure(method, body);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/^Content hash verification failed \(a payment/);
+  });
+
+  it('a paid 200 base64 record to downloadDocument() names download() and keeps the payment flag', async () => {
+    const error = await paidFailure('downloadDocument', HELLO);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/use download\(\) for base64 uploads/);
+  });
+
+  it('a paid 200 raw record whose data is a JSON string to download() names downloadDocument() and keeps the payment flag', async () => {
+    const error = await paidFailure('download', { data: 'x', content_hash: sha256Hex(toBytes('"x"')), stamp_id: STAMP });
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/use downloadDocument\(\) for raw uploads/);
+  });
+
+  it('a paid 200 string record that atob cannot decode to download() is CONTENT_HASH_MISMATCH with the payment flag', async () => {
+    const error = await paidFailure('download', { data: 'x', content_hash: '0'.repeat(64), stamp_id: STAMP }, true);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/^Content hash verification failed \(a payment/);
+  });
+
+  it('a paid 200 raw record to download() names downloadDocument() and keeps the payment flag', async () => {
+    const error = await paidFailure('download', RAW);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect(error.code).toBe('INVALID_RESPONSE');
+    expect(error.statusCode).toBe(200);
+    expect(error.message).toMatch(/use downloadDocument\(\) for raw uploads/);
+  });
+});
+
 describe('review round 4 (#138)', () => {
   it('assetDecimals without asset is rejected (it would rescale the USDC cap)', () => {
     expect(() => client({ maxAmount: '1', assetDecimals: 18 })).toThrow(/only valid together with payment.asset/);
@@ -527,7 +684,9 @@ describe('review round 4 (#138)', () => {
     expect(() =>
       client({ network: 'eip155:8453', v1Network: 'base-sepolia', asset, assetDecimals: 6, maxAmount: '1' }),
     ).toThrow(/drop v1Network|different chains/);
-    expect(() => client({ network: 'eip155:8453', asset, assetDecimals: 6, maxAmount: '1' })).not.toThrow();
+    expect(() =>
+      client({ network: 'eip155:8453', asset, assetDecimals: 6, assetDomain: { name: 'Token', version: '1' }, maxAmount: '1' }),
+    ).not.toThrow();
   });
 
   it('an undecodable PAYMENT-REQUIRED header falls back to the v1 body', async () => {
@@ -583,7 +742,7 @@ describe('one network setting (#108)', () => {
   const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
   it("network: 'base' pays the gateway's v1 'base' request in mainnet USDC", async () => {
-    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
     await client({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
   });
@@ -600,7 +759,7 @@ describe('one network setting (#108)', () => {
   });
 
   it('a known CAIP-2 network implies its v1 name', async () => {
-    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
     await client({ network: 'eip155:8453', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
   });
@@ -625,7 +784,7 @@ describe('review round 1 (#140)', () => {
   const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
   it("a config with only v1Network: 'base' (the old mainnet switch) still works", async () => {
-    accepts = [requirement({ network: 'base', asset: USDC_BASE })];
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
     await client({ v1Network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
     expect(payments()).toBe(1);
   });
@@ -719,11 +878,271 @@ describe('error handling (#112)', () => {
     expect(payments()).toBe(0);
   });
 
+  it('an ethers v6 ACTION_REJECTED rejection in the wallet is PAYMENT_REFUSED, not a failure (#166)', async () => {
+    // Mirrors ethers v6: JsonRpcApiProvider.getRpcError calls
+    // makeError('user rejected action', 'ACTION_REJECTED', { action, reason, info }).
+    // makeError adds the details to the message, sets `code`, copies the info
+    // fields onto the error and sets `shortMessage`. It sets no `cause`; the
+    // provider's 4001 error is nested under `info.error`. ethers is not a
+    // dependency, so the error is built by hand.
+    const providerError = { code: 4001, message: 'MetaMask Tx Signature: User denied transaction signature.' };
+    const payload = { method: 'eth_signTypedData_v4', params: [], id: 1, jsonrpc: '2.0' };
+    const ethersRejection = Object.assign(
+      new Error(
+        'user rejected action (action="signTypedData", reason="rejected", ' +
+          `info={ "error": ${JSON.stringify(providerError)}, "payload": ${JSON.stringify(payload)} }, ` +
+          'code=ACTION_REJECTED, version=6.16.0)',
+      ),
+      {
+        code: 'ACTION_REJECTED',
+        action: 'signTypedData',
+        reason: 'rejected',
+        info: { payload, error: providerError },
+        shortMessage: 'user rejected action',
+      },
+    );
+    const rejecting = { ...wallet, signTypedData: () => Promise.reject(ethersRejection) };
+    const error = await new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: rejecting } })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(/rejected in the wallet/);
+    expect(payments()).toBe(0);
+  });
+
   it('a policy refusal names each option without dumping the accepts JSON', async () => {
     accepts = [requirement({ maxAmountRequired: '1000001' })];
     const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PaymentRefusedError);
     expect((error as Error).message).not.toMatch(/[{}]|maxAmountRequired|"accepts"|resource/);
     expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('1000001');
+  });
+});
+
+describe('EIP-712 domain of the asset (#143)', () => {
+  const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const TOKEN = '0x2222222222222222222222222222222222222222';
+  const TOKEN_DOMAIN = { name: 'Token', version: '1' };
+
+  /** The domains the wallet was asked to sign, in order */
+  let signed: Array<Record<string, unknown>>;
+  const recording = {
+    ...wallet,
+    signTypedData: (args: Parameters<typeof wallet.signTypedData>[0]) => {
+      signed.push({ ...(args.domain as Record<string, unknown>) });
+      return wallet.signTypedData(args);
+    },
+  };
+  const paying = (payment: Partial<X402PaymentConfig> = {}) =>
+    new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: recording, ...payment } });
+
+  beforeEach(() => {
+    signed = [];
+  });
+
+  async function expectRefusedUnsigned(promise: Promise<unknown>, reason: RegExp): Promise<void> {
+    const error = await promise.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(reason);
+    expect(signed).toEqual([]);
+    expect(payments()).toBe(0);
+  }
+
+  it("Base Sepolia signs with the domain 'USDC' version '2'", async () => {
+    await paying().upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([{ name: 'USDC', version: '2', chainId: 84532, verifyingContract: USDC_SEPOLIA }]);
+    expect(payments()).toBe(1);
+  });
+
+  it("Base mainnet signs with the domain 'USD Coin' version '2'", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: USD_COIN })];
+    await paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([{ name: 'USD Coin', version: '2', chainId: 8453, verifyingContract: USDC_BASE }]);
+    expect(payments()).toBe(1);
+  });
+
+  it("refuses Base mainnet USDC offered with the name 'USDC' (the domain of Base Sepolia)", async () => {
+    accepts = [requirement({ network: 'base', asset: USDC_BASE, extra: { name: 'USDC', version: '2' } })];
+    await expectRefusedUnsigned(
+      paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP }),
+      /EIP-712 domain "USDC" version "2" is not the expected "USD Coin" version "2"/,
+    );
+  });
+
+  it.each([
+    ['a wrong name', { name: 'USD Coin', version: '2' }],
+    ['a wrong version', { name: 'USDC', version: '1' }],
+    ['a name in another case', { name: 'usdc', version: '2' }],
+    ['a numeric version', { name: 'USDC', version: 2 }],
+  ])('refuses Base Sepolia USDC offered with %s', async (_label, extra) => {
+    accepts = [requirement({ extra })];
+    await expectRefusedUnsigned(paying().upload('hello', { stampId: STAMP }), /is not the expected "USDC" version "2"/);
+  });
+
+  it.each([
+    ['no extra', { extra: undefined }],
+    ['an empty extra', { extra: {} }],
+    ['no version', { extra: { name: 'USDC' } }],
+    ['no name', { extra: { version: '2' } }],
+  ])('refuses an option with %s before the library sees it', async (_label, overrides) => {
+    accepts = [requirement(overrides)];
+    await expectRefusedUnsigned(paying().upload('hello', { stampId: STAMP }), /no EIP-712 domain/);
+  });
+
+  it('skips an option with the wrong domain and pays the correct one after it', async () => {
+    accepts = [requirement({ extra: USD_COIN }), requirement()];
+    await paying().upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([expect.objectContaining({ name: 'USDC', version: '2' })]);
+    expect(payments()).toBe(1);
+  });
+
+  it('x402 v2: signs the right domain on both networks and refuses a wrong one', async () => {
+    protocol = 2;
+    const v2 = (overrides: Record<string, unknown>) => ({
+      scheme: 'exact',
+      amount: '10000',
+      payTo: GATEWAY_PAYTO,
+      maxTimeoutSeconds: 60,
+      ...overrides,
+    });
+
+    accepts = [v2({ network: 'eip155:84532', asset: USDC_SEPOLIA, extra: { name: 'USDC', version: '2' } })];
+    await paying().upload('hello', { stampId: STAMP });
+    accepts = [v2({ network: 'eip155:8453', asset: USDC_BASE, extra: USD_COIN })];
+    await paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([
+      expect.objectContaining({ name: 'USDC', version: '2', chainId: 84532 }),
+      expect.objectContaining({ name: 'USD Coin', version: '2', chainId: 8453 }),
+    ]);
+    expect(payments()).toBe(2);
+
+    signed = [];
+    seen = [];
+    accepts = [v2({ network: 'eip155:8453', asset: USDC_BASE, extra: { name: 'USDC', version: '2' } })];
+    await expectRefusedUnsigned(
+      paying({ network: 'base', maxAmount: '0.05' }).upload('hello', { stampId: STAMP }),
+      /is not the expected "USD Coin" version "2"/,
+    );
+    accepts = [v2({ network: 'eip155:84532', asset: USDC_SEPOLIA })];
+    await expectRefusedUnsigned(paying().upload('hello', { stampId: STAMP }), /no EIP-712 domain/);
+  });
+
+  it('a custom asset requires assetDomain, and assetDomain requires a custom asset', () => {
+    expect(() => client({ asset: TOKEN, assetDecimals: 18, maxAmount: '1' })).toThrow(/assetDomain is required with payment.asset/);
+    expect(() => client({ assetDomain: TOKEN_DOMAIN, maxAmount: '1' })).toThrow(/assetDomain is only valid together with payment.asset/);
+    expect(() => client({ asset: TOKEN, assetDecimals: 18, assetDomain: TOKEN_DOMAIN, maxAmount: '1' })).not.toThrow();
+  });
+
+  it.each([
+    [null],
+    ['Token'],
+    [{ name: 'Token' }],
+    [{ version: '1' }],
+    [{ name: '', version: '1' }],
+    [{ name: 'Token', version: '' }],
+    [{ name: 'Token', version: 1 }],
+  ])('rejects assetDomain %j at construction', (assetDomain) => {
+    expect(() =>
+      client({ asset: TOKEN, assetDecimals: 18, assetDomain: assetDomain as never, maxAmount: '1' }),
+    ).toThrow(/payment.assetDomain must be/);
+  });
+
+  it('a custom asset signs with its assetDomain and refuses another domain', async () => {
+    const config = { asset: TOKEN, assetDecimals: 6, assetDomain: TOKEN_DOMAIN, maxAmount: '1' };
+    accepts = [requirement({ asset: TOKEN, extra: TOKEN_DOMAIN })];
+    await paying(config).upload('hello', { stampId: STAMP });
+    expect(signed).toEqual([{ name: 'Token', version: '1', chainId: 84532, verifyingContract: TOKEN }]);
+    expect(payments()).toBe(1);
+
+    signed = [];
+    seen = [];
+    accepts = [requirement({ asset: TOKEN, extra: { name: 'USDC', version: '2' } })];
+    await expectRefusedUnsigned(paying(config).upload('hello', { stampId: STAMP }), /is not the expected "Token" version "1"/);
+  });
+});
+
+describe('the before-signing hook re-checks the EIP-712 domain (#182)', () => {
+  // The 402 offers a correct option, so the first gate (policePaymentRequired)
+  // approves it. The library then hands the hook an option with another
+  // domain: the case the hook guards against. The real createPaymentPayload
+  // runs, with only the extra of each option replaced.
+  type PaymentRequired = Parameters<x402Client['createPaymentPayload']>[0];
+  /** The real method, read before any spy replaces it */
+  const original = Object.getOwnPropertyDescriptor(x402Client.prototype, 'createPaymentPayload')!.value as (
+    this: x402Client,
+    paymentRequired: PaymentRequired,
+  ) => ReturnType<x402Client['createPaymentPayload']>;
+
+  let signed: Array<Record<string, unknown>>;
+  const recording = {
+    ...wallet,
+    signTypedData: (args: Parameters<typeof wallet.signTypedData>[0]) => {
+      signed.push({ ...(args.domain as Record<string, unknown>) });
+      return wallet.signTypedData(args);
+    },
+  };
+  const paying = () => new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: recording } });
+
+  /** Replace extra on every option the library sees, then run the real method */
+  function selectWithExtra(extra?: Record<string, unknown>) {
+    return vi.spyOn(x402Client.prototype, 'createPaymentPayload').mockImplementation(function (
+      this: x402Client,
+      paymentRequired: PaymentRequired,
+    ) {
+      const changed = extra ? { ...paymentRequired, accepts: paymentRequired.accepts.map((o) => ({ ...o, extra })) } : paymentRequired;
+      return original.call(this, changed);
+    });
+  }
+
+  const v2 = {
+    scheme: 'exact',
+    network: 'eip155:84532',
+    amount: '10000',
+    asset: USDC_SEPOLIA,
+    payTo: GATEWAY_PAYTO,
+    maxTimeoutSeconds: 60,
+    extra: { name: 'USDC', version: '2' },
+  };
+
+  beforeEach(() => {
+    signed = [];
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([1, 2] as const)('x402 v%i: pays when the library keeps the approved domain (control)', async (version) => {
+    protocol = version;
+    if (version === 2) accepts = [v2];
+    const spy = selectWithExtra(undefined);
+    await paying().upload('hello', { stampId: STAMP });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(signed).toEqual([expect.objectContaining({ name: 'USDC', version: '2', chainId: 84532 })]);
+    expect(payments()).toBe(1);
+  });
+
+  it.each(
+    ([1, 2] as const).flatMap((version) => [
+      [version, 'a wrong name', { name: 'USD Coin', version: '2' }, /is not the expected "USDC" version "2"/],
+      [version, 'a wrong version', { name: 'USDC', version: '1' }, /is not the expected "USDC" version "2"/],
+      [version, 'no name', { version: '2' }, /no EIP-712 domain/],
+      [version, 'no version', { name: 'USDC' }, /no EIP-712 domain/],
+    ] as const),
+  )('x402 v%i: refuses a selected option with %s before signing', async (version, _label, extra, reason) => {
+    protocol = version;
+    if (version === 2) accepts = [v2];
+    const spy = selectWithExtra(extra);
+    const error = await paying()
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    // The first gate let the option through: the library was asked to create the payment
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(reason);
+    expect(signed).toEqual([]);
+    expect(payments()).toBe(0);
   });
 });

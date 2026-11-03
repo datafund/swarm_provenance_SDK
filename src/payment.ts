@@ -4,8 +4,12 @@ import { isAddress, base64ToBytes, bytesToBase64 } from './utils.js';
 
 /**
  * The networks the SDK knows, one record each: the x402 v1 name, the v2
- * CAIP-2 ID, the EVM chain ID, USDC (from @x402/evm's default asset table)
- * and whether it is a testnet. Everything per-network derives from this.
+ * CAIP-2 ID, the EVM chain ID, USDC (from @x402/evm's default asset table),
+ * the EIP-712 domain of that USDC and whether it is a testnet. Everything
+ * per-network derives from this.
+ *
+ * The domains are the contracts' `name()` and `version()` on chain (#143).
+ * The signature covers them, so a wrong one fails at the facilitator.
  */
 const NETWORKS = Object.freeze([
   Object.freeze({
@@ -13,6 +17,7 @@ const NETWORKS = Object.freeze([
     v2: 'eip155:84532' as const,
     chainId: 84532,
     usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    domain: Object.freeze({ name: 'USDC', version: '2' }),
     testnet: true,
   }),
   Object.freeze({
@@ -20,6 +25,7 @@ const NETWORKS = Object.freeze([
     v2: 'eip155:8453' as const,
     chainId: 8453,
     usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    domain: Object.freeze({ name: 'USD Coin', version: '2' }),
     testnet: false,
   }),
 ]);
@@ -108,12 +114,20 @@ function resolveNetworks(config: X402PaymentConfig): { network: `${string}:${str
 
 const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 
+/** The EIP-712 domain fields of a token that an EIP-3009 authorization signs */
+interface AssetDomain {
+  readonly name: string;
+  readonly version: string;
+}
+
 /** The checks every payment must pass before the SDK signs it (#106). */
 export interface PaymentPolicy {
   /** The network the SDK pays on per x402 version (2: CAIP-2, 1: name) */
   networkByVersion: ReadonlyMap<number, string>;
   /** Asset expected per network (undefined: none known, so refuse) */
   networks: ReadonlyMap<string, string | undefined>;
+  /** EIP-712 domain expected per network (undefined: no known asset) */
+  domains: ReadonlyMap<string, AssetDomain | undefined>;
   maxAmount: string;
   maxAtomic: bigint;
   decimals: number;
@@ -155,8 +169,23 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
   if (config.asset !== undefined && !isAddress(config.asset)) {
     throw new PaymentConfigurationError(`payment.asset must be a token address, got ${JSON.stringify(config.asset)}`);
   }
+  // The domain of a custom token cannot be assumed either (#143)
+  if (config.asset !== undefined && config.assetDomain === undefined) {
+    throw new PaymentConfigurationError(
+      "payment.assetDomain is required with payment.asset: the token's EIP-712 name and version, e.g. { name: 'USD Coin', version: '2' }"
+    );
+  }
+  if (config.asset === undefined && config.assetDomain !== undefined) {
+    throw new PaymentConfigurationError('payment.assetDomain is only valid together with payment.asset');
+  }
+  const assetDomain = config.assetDomain === undefined ? undefined : checkedAssetDomain(config.assetDomain);
+
   const networks = new Map<string, string | undefined>();
-  for (const n of [network, v1Network]) networks.set(n, config.asset ?? NETWORK_BY_ID.get(n)?.usdc);
+  const domains = new Map<string, AssetDomain | undefined>();
+  for (const n of [network, v1Network]) {
+    networks.set(n, config.asset ?? NETWORK_BY_ID.get(n)?.usdc);
+    domains.set(n, assetDomain ?? NETWORK_BY_ID.get(n)?.domain);
+  }
 
   let payTo: Set<string> | undefined;
   if (config.payTo !== undefined) {
@@ -186,6 +215,7 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
   return {
     networkByVersion,
     networks,
+    domains,
     maxAmount,
     maxAtomic,
     decimals,
@@ -193,6 +223,19 @@ export function resolvePaymentPolicy(config: X402PaymentConfig): PaymentPolicy {
     maxTimeoutSeconds,
     onBeforePayment: config.onBeforePayment,
   };
+}
+
+/** A copy of `payment.assetDomain`, after checking it has a non-empty string name and version */
+function checkedAssetDomain(value: unknown): AssetDomain {
+  const domain = value as Partial<Record<keyof AssetDomain, unknown>> | null;
+  const name = typeof domain === 'object' && domain !== null ? domain.name : undefined;
+  const version = typeof domain === 'object' && domain !== null ? domain.version : undefined;
+  if (typeof name !== 'string' || name === '' || typeof version !== 'string' || version === '') {
+    throw new PaymentConfigurationError(
+      `payment.assetDomain must be { name, version } with non-empty strings, got ${JSON.stringify(value)}`
+    );
+  }
+  return Object.freeze({ name, version });
 }
 
 /** '1.50' with 6 decimals -> 1500000n. Rejects negatives, exponents and excess precision. */
@@ -271,6 +314,9 @@ export function checkPaymentRequest(
       reasons.push(`no known USDC on ${request.network}: set payment.asset`);
     } else if (request.asset.toLowerCase() !== expected.toLowerCase()) {
       reasons.push(`asset ${request.asset || '(none)'} is not the expected ${expected}`);
+    } else {
+      const reason = domainMismatch(extra, policy.domains.get(request.network));
+      if (reason) reasons.push(reason);
     }
   }
 
@@ -294,6 +340,26 @@ export function checkPaymentRequest(
     reasons.push(`transfer method ${JSON.stringify(method)} is not 'eip3009'`);
   }
   return reasons;
+}
+
+/**
+ * Why the EIP-712 domain in `extra` is not the asset's (#143); undefined if it is.
+ * @x402/evm signs `extra.name` and `extra.version` as they are, with no
+ * fallback, so they must equal the expected strings exactly: the domain is
+ * hashed, and a different case or a number would sign another domain. An
+ * option without them is refused too: the library cannot sign it anyway.
+ */
+function domainMismatch(extra: Record<string, unknown> | undefined, expected: AssetDomain | undefined): string | undefined {
+  if (!expected) return 'no known EIP-712 domain for the asset: set payment.assetDomain';
+  const name = extra?.['name'];
+  const version = extra?.['version'];
+  if (name === undefined || name === null || name === '' || version === undefined || version === null || version === '') {
+    return `no EIP-712 domain (extra.name and extra.version) for the asset; expected ${JSON.stringify(expected.name)} version ${JSON.stringify(expected.version)}`;
+  }
+  if (name !== expected.name || version !== expected.version) {
+    return `EIP-712 domain ${JSON.stringify(name)} version ${JSON.stringify(version)} is not the expected ${JSON.stringify(expected.name)} version ${JSON.stringify(expected.version)}`;
+  }
+  return undefined;
 }
 
 /** What happened to one request attempt, recorded by the SDK's own code and hooks */

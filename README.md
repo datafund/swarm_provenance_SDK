@@ -72,14 +72,17 @@ or the request fails with `PaymentRefusedError` (`PAYMENT_REFUSED`) and nothing 
 |--------|---------|--------|
 | `maxAmount` | `'1'` on Base Sepolia with test USDC; **required everywhere else** | Largest single payment, in tokens (`'0.50'` = 50 cents of USDC) |
 | `payTo` | any | Allowed recipients |
-| `asset` + `assetDecimals` | the network's USDC (6) | Token to pay with; both required on networks without a known USDC |
+| `asset` + `assetDecimals` + `assetDomain` | the network's USDC (6) | Token to pay with, its decimals and its EIP-712 domain (`{ name, version }`, the token's `name()` and `version()` on chain). All three are required with a custom token, and on networks without a known USDC |
 | `maxTimeoutSeconds` | `600` | Longest authorization validity the gateway may ask for |
 | `onBeforePayment` | none | `(payment) => boolean`: sees amount, asset, recipient, network; return `false` to refuse. A payment may still not happen after it (signing fails, timeout): do not count spend here |
 | `payForReads` | `false` | Also pay for reads; by default reads use the free tier (`X-Payment-Mode: free`, rate-limited) |
 | `payForPool` | `false` | Also pay for pool stamps when the gateway asks for payment; by default that 402 is not paid (see below) |
 
 Scheme `exact` with the EIP-3009 transfer method is the only one accepted (no Permit2
-approvals). Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
+approvals). The EIP-712 domain in the 402 (`extra.name` and `extra.version`) must be the
+token's own: `'USD Coin'` / `'2'` for Base mainnet USDC, `'USDC'` / `'2'` for Base Sepolia
+USDC, or `assetDomain` for a custom token. A 402 with another domain, or with none, is
+refused before signing. A payment signed over a wrong domain would fail at the facilitator. Only writes (`POST`) are paid unless `payForReads`; reads go to the free tier.
 
 **Pool stamps are not paid unless you set `payForPool`.** `acquireStamp()` and `upload()` without
 `stampId` take a stamp from the gateway's pool, which is free within a daily allowance. Callers
@@ -978,7 +981,8 @@ issue numbers and lists the open release-gate items.
   and `v1Network` that disagree, or a lone unknown `v1Network`, are configuration errors. The
   default stays Base Sepolia.
 - x402 mode enforces a payment policy (#106): `maxAmount` (default `'1'` on Base Sepolia test
-  USDC, required elsewhere), USDC only (or `asset` + `assetDecimals`), `exact`/EIP-3009 only,
+  USDC, required elsewhere), USDC only (or `asset` + `assetDecimals` + `assetDomain`), the
+  token's EIP-712 domain (#143), `exact`/EIP-3009 only,
   validity up to `maxTimeoutSeconds` (default 600 s, configurable), optional `payTo` and
   `onBeforePayment`. Refusals throw
   `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
@@ -1039,9 +1043,22 @@ issue numbers and lists the open release-gate items.
   (#106, #107, #112). Before the payment is sent: `PaymentError` (`PAYMENT_FAILED`). After it is
   sent: `PaymentError` (`PAYMENT_UNCONFIRMED`) with `error.payment`. A wallet rejection:
   `PaymentRefusedError`. Code that catches `GatewayConnectionError` around x402 calls no longer
-  catches these. In any mode, a success response to `pricing()`, `acquireStamp()` or `upload()`
-  that is not valid JSON throws `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw
-  `SyntaxError` (the other read methods still throw `SyntaxError`; #173).
+  catches these. In any mode, a success response that is not valid JSON throws
+  `GatewayConnectionError` (`INVALID_RESPONSE`) instead of a raw `SyntaxError`. This applies to
+  `pricing()`, `acquireStamp()`, `upload()`, `download()`, `downloadDocument()`, `notaryInfo()`
+  and `poolStatus()` (#173). `download()`, `downloadDocument()`, `notaryInfo()` and `poolStatus()`
+  also throw `INVALID_RESPONSE` for a success body that cannot be read, is not a JSON object, or
+  lacks the fields the method needs. Before, a raw `TypeError` escaped or `notaryInfo()` returned
+  empty values. `downloadDocument()` reports a record with no `data` field or no `content_hash`
+  as `INVALID_RESPONSE`, not `CONTENT_HASH_MISMATCH` (#179). A record in the other method's
+  format names the right method: `download()` on a raw upload says to use `downloadDocument()`,
+  and `downloadDocument()` on a base64 upload says to use `download()`. The hint is given only
+  when the record's hash proves its format, and the codes stay `INVALID_RESPONSE` or
+  `CONTENT_HASH_MISMATCH`. A record whose hash matches neither format gets no hint: the
+  #179 message for non-string `data` in `download()`, else "Content hash verification failed".
+  In browsers, `download()` reports `data` that is not valid base64 as `CONTENT_HASH_MISMATCH`,
+  as in Node.js, not as a raw `InvalidCharacterError`. A `CONTENT_HASH_MISMATCH` after a paid
+  read also carries `error.payment` (#190).
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.

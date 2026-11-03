@@ -41,10 +41,10 @@ import {
   PaymentRefusedError,
   type PaymentAttempt,
 } from './errors.js';
-import { buildMetadata, buildDocumentMetadata, extractContent, verifyContentHash, verifyDocumentHash } from './metadata.js';
+import { buildMetadata, buildDocumentMetadata, extractContent, verifyDocumentHash } from './metadata.js';
 import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText } from './canonical-json.js';
-import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds } from './utils.js';
+import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds, sha256Hex, base64ToBytes } from './utils.js';
 import {
   base64Decode,
   formatAtomic,
@@ -205,7 +205,11 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const data = (await response.json()) as GatewayNotaryInfoResponse;
+    const data = await this.readJson<GatewayNotaryInfoResponse>(response);
+    // address may be null or absent (notary disabled or not configured): not required
+    if (!isRecord(data) || typeof data.enabled !== 'boolean' || typeof data.available !== 'boolean') {
+      throw this.shapeError('a JSON object with boolean "enabled" and "available"', response);
+    }
     const info: NotaryInfo = {
       enabled: data.enabled,
       available: data.available,
@@ -232,7 +236,19 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const data = (await response.json()) as GatewayPoolStatusResponse;
+    const data = await this.readJson<GatewayPoolStatusResponse>(response);
+    if (
+      !isRecord(data) ||
+      typeof data.enabled !== 'boolean' ||
+      typeof data.total_stamps !== 'number' ||
+      !isRecord(data.current_levels) ||
+      !isRecord(data.reserve_config)
+    ) {
+      throw this.shapeError(
+        'a JSON object with boolean "enabled", number "total_stamps" and objects "current_levels" and "reserve_config"',
+        response
+      );
+    }
     return {
       enabled: data.enabled,
       available: Object.fromEntries(
@@ -315,13 +331,17 @@ export class ProvenanceClient {
       const error = await this.handleError(response);
       if (error instanceof PaymentOutcomeError) throw error;
       if (response.status === 402 && !error.payment) {
-        throw new StampError(
-          `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it.` +
-            (payForPool
-              ? ''
-              : ' To let the SDK pay for pool stamps within the payment policy, use x402 mode with ' +
-                'payment.payForPool: true, or pass a stampId you own.'),
-          error.code ?? 'PAYMENT_REQUIRED'
+        // withPayment keeps the 402's body (price options, quota code) (#163)
+        throw withPayment(
+          new StampError(
+            `${error.message.replace(/[.\s]*$/, '')}. The pool asked for payment, and the SDK did not pay it.` +
+              (payForPool
+                ? ''
+                : ' To let the SDK pay for pool stamps within the payment policy, use x402 mode with ' +
+                  'payment.payForPool: true, or pass a stampId you own.'),
+            error.code ?? 'PAYMENT_REQUIRED'
+          ),
+          error,
         );
       }
       throw withPayment(
@@ -428,9 +448,15 @@ export class ProvenanceClient {
       throw await this.handleError(response);
     }
 
-    const text = await response.text();
-    const raw = JSON.parse(text) as Record<string, unknown>;
-    const wrapped = Boolean(raw['metadata'] && typeof raw['metadata'] === 'object');
+    const text = await this.readText(response);
+    const raw = this.parseJson<unknown>(text, response);
+    const record = isRecord(raw) ? (isRecord(raw['metadata']) ? raw['metadata'] : raw) : undefined;
+    // A record without a data field or a content_hash is malformed, not tampered with (#179).
+    // data may be any JSON value: raw uploads accept arrays, null, numbers and strings.
+    if (!isRecord(raw) || !record || !('data' in record) || typeof record['content_hash'] !== 'string') {
+      throw this.shapeError('a JSON object with a "data" field and a string "content_hash" (directly or under "metadata")', response);
+    }
+    const wrapped = record !== raw;
     const canonicalData = canonicalDataOf(text, wrapped);
 
     let documentData: Record<string, unknown>;
@@ -446,7 +472,10 @@ export class ProvenanceClient {
       contentHash = meta['content_hash'] as string;
       stampId = meta['stamp_id'] as string;
       provenanceStandard = meta['provenance_standard'] as string | undefined;
-      signatures = raw['signatures'] as NotarySignature[] | undefined;
+      // As in the direct format, a signatures value that is not an array is ignored
+      if (Array.isArray(raw['signatures'])) {
+        signatures = raw['signatures'] as NotarySignature[];
+      }
     } else {
       // Direct format: {data: {...}, content_hash: "...", stamp_id: "...", ...}
       documentData = raw['data'] as Record<string, unknown>;
@@ -467,9 +496,11 @@ export class ProvenanceClient {
       metadata.provenance_standard = provenanceStandard;
     }
 
-    // Verify content hash
+    // Verify content hash. A base64 record fails here; name download() only
+    // when its hash proves that format, so a tampered record stays plain (#190)
     if (!verifyDocumentHash(metadata, canonicalData)) {
-      throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
+      const base64 = typeof documentData === 'string' && matchesAsBase64(documentData, contentHash);
+      throw this.hashMismatch(response, base64 ? BASE64_IN_DOWNLOAD_DOCUMENT : undefined);
     }
 
     const result: DocumentDownloadResult = {
@@ -762,16 +793,36 @@ export class ProvenanceClient {
     // Parse response - gateway may return:
     // 1. Wrapped format: {metadata: {...}, signatures: [...]}
     // 2. Direct format: {data: "...", content_hash: "...", stamp_id: "...", signatures?: [...]}
-    const text = await response.text();
-    const data = JSON.parse(text) as
+    const text = await this.readText(response);
+    const parsed = this.parseJson<unknown>(text, response);
+    const record = isRecord(parsed) ? (isRecord(parsed['metadata']) ? parsed['metadata'] : parsed) : undefined;
+    // Non-string data is never a base64 record. Name downloadDocument() only when
+    // the hash proves a raw upload, as downloadDocument() checks it (#190)
+    if (
+      record &&
+      'data' in record &&
+      typeof record['data'] !== 'string' &&
+      typeof record['content_hash'] === 'string' &&
+      verifyDocumentHash(record as unknown as DocumentMetadata, canonicalDataOf(text, record !== parsed))
+    ) {
+      throw this.withPayment(new GatewayConnectionError(RAW_IN_DOWNLOAD, response.status, 'INVALID_RESPONSE'), response);
+    }
+    // data is base64-decoded and content_hash compared: both must be strings (#179)
+    if (!record || typeof record['data'] !== 'string' || typeof record['content_hash'] !== 'string') {
+      throw this.shapeError('a JSON object with string "data" and "content_hash" (directly or under "metadata")', response);
+    }
+    const data = parsed as
       | { metadata: ProvenanceMetadata; signatures?: NotarySignature[] }
       | (ProvenanceMetadata & { signatures?: NotarySignature[] });
-    const wrapped = Boolean('metadata' in data && data.metadata && typeof data.metadata === 'object');
+    const wrapped = record !== parsed;
 
     if ('metadata' in data && wrapped) {
       // Wrapped format
       metadata = data.metadata;
-      signatures = data.signatures;
+      // As in the direct format, a signatures value that is not an array is ignored
+      if (Array.isArray(data.signatures)) {
+        signatures = data.signatures;
+      }
     } else {
       // Direct format - signatures at same level as metadata fields
       const directData = data as ProvenanceMetadata & { signatures?: NotarySignature[] };
@@ -791,13 +842,20 @@ export class ProvenanceClient {
       }
     }
 
-    // Extract file content
-    const file = extractContent(metadata);
+    // Extract file content. atob (browsers) throws on invalid base64; Buffer does not
+    let file: Uint8Array | undefined;
+    try {
+      file = extractContent(metadata);
+    } catch {
+      // No bytes: the hash cannot match, as with a Buffer decode of invalid base64
+    }
 
-    // Verify content hash
-    const contentHashValid = verifyContentHash(metadata);
-    if (!contentHashValid) {
-      throw new ProvenanceError('Content hash verification failed', 'CONTENT_HASH_MISMATCH');
+    // Verify content hash. A raw upload whose document is a JSON string fails
+    // here; name downloadDocument() only when its hash proves that format (#190)
+    if (file === undefined || sha256Hex(file) !== metadata.content_hash) {
+      const asDocument = { ...metadata } as unknown as DocumentMetadata;
+      if (verifyDocumentHash(asDocument)) throw this.hashMismatch(response, RAW_STRING_IN_DOWNLOAD);
+      throw this.hashMismatch(response);
     }
 
     const result: DownloadResult = {
@@ -1060,17 +1118,62 @@ export class ProvenanceClient {
     try {
       return (await response.json()) as T;
     } catch (error) {
-      const failure = new GatewayConnectionError(
-        `Invalid response from gateway: ${error instanceof Error ? error.message : String(error)}`,
-        response.status,
-        'INVALID_RESPONSE'
-      );
-      if (this.paidResponses.has(response)) {
-        failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
-        failure.message += ' (a payment was sent with this request and may have been charged)';
-      }
-      throw failure;
+      throw this.invalidResponse(error, response);
     }
+  }
+
+  /**
+   * Parse a successful response body already read as text (downloads keep the
+   * text for canonical hashing). Fails as readJson does (#173).
+   */
+  private parseJson<T>(text: string, response: Response): T {
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      throw this.invalidResponse(error, response);
+    }
+  }
+
+  /** Read a successful response body as text. A read failure is INVALID_RESPONSE, as in readJson (#179) */
+  private async readText(response: Response): Promise<string> {
+    try {
+      return await response.text();
+    } catch (error) {
+      throw this.invalidResponse(error, response);
+    }
+  }
+
+  /** INVALID_RESPONSE for a success body that is JSON but not the shape the method needs (#179) */
+  private shapeError(expected: string, response: Response): GatewayConnectionError {
+    return this.invalidResponse(new Error(`expected ${expected}`), response);
+  }
+
+  /** INVALID_RESPONSE for a success body that is not JSON, flagged if the request was paid */
+  private invalidResponse(error: unknown, response: Response): GatewayConnectionError {
+    const failure = new GatewayConnectionError(
+      `Invalid response from gateway: ${error instanceof Error ? error.message : String(error)}`,
+      response.status,
+      'INVALID_RESPONSE'
+    );
+    return this.withPayment(failure, response);
+  }
+
+  /**
+   * CONTENT_HASH_MISMATCH for a downloaded record, flagged if the request was
+   * paid. `message` names the right method when the hash proves the record is
+   * in the other method's format (#190).
+   */
+  private hashMismatch(response: Response, message = 'Content hash verification failed'): ProvenanceError {
+    return this.withPayment(new ProvenanceError(message, 'CONTENT_HASH_MISMATCH'), response);
+  }
+
+  /** Set error.payment and say so in the message if the request was paid */
+  private withPayment<E extends ProvenanceError>(failure: E, response: Response): E {
+    if (this.paidResponses.has(response)) {
+      failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
+      failure.message += ' (a payment was sent with this request and may have been charged)';
+    }
+    return failure;
   }
 
   /**
@@ -1156,12 +1259,15 @@ export class ProvenanceClient {
 
 /**
  * A wallet's "user rejected the request" (EIP-1193 code 4001; viem's
- * UserRejectedRequestError), here or in the error's cause chain.
+ * UserRejectedRequestError; ethers v6 code ACTION_REJECTED), here or in the
+ * error's cause chain. ethers sets ACTION_REJECTED only for a user rejection
+ * and nests the provider's error under `info.error`, not `cause`; the code is
+ * enough, so `info` is not inspected (#166).
  */
 function isWalletRejection(error: unknown): boolean {
   for (let e = error, depth = 0; e && typeof e === 'object' && depth < 8; e = (e as { cause?: unknown }).cause, depth++) {
     const { code, name } = e as { code?: unknown; name?: unknown };
-    if (code === 4001 || name === 'UserRejectedRequestError') return true;
+    if (code === 4001 || code === 'ACTION_REJECTED' || name === 'UserRejectedRequestError') return true;
   }
   return false;
 }
@@ -1325,6 +1431,33 @@ function canonicalDataOf(text: string, wrapped: boolean): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** download() on a record whose non-string data matches its hash as a JSON value (#190) */
+const RAW_IN_DOWNLOAD =
+  'Record format does not match download(): "data" is not a string and content_hash is its hash ' +
+  'as a JSON value, so this is a raw upload: use downloadDocument() for raw uploads';
+/** download() on a record whose hash is that of its string data as a JSON value (#190) */
+const RAW_STRING_IN_DOWNLOAD =
+  'Record format does not match download(): content_hash is the hash of "data" as a JSON value, ' +
+  'so this is a raw upload: use downloadDocument() for raw uploads';
+/** downloadDocument() on a record whose hash is that of its base64-decoded data (#190) */
+const BASE64_IN_DOWNLOAD_DOCUMENT =
+  'Record format does not match downloadDocument(): content_hash is the hash of the base64-decoded ' +
+  '"data", so this is a base64 upload: use download() for base64 uploads';
+
+/** content_hash is SHA-256 of the base64-decoded data, as download() checks. Invalid base64 is no match */
+function matchesAsBase64(data: string, contentHash: string): boolean {
+  try {
+    return sha256Hex(base64ToBytes(data)) === contentHash;
+  } catch {
+    return false;
+  }
+}
+
+/** A JSON object: not null, not an array */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Minimum interval between re-checks of a cached notary address (see verifySignatures) */

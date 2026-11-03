@@ -18,7 +18,7 @@ const VALID_V1_REQUIREMENT = {
   resource: 'http://test.com',
   description: '',
   mimeType: 'application/json',
-  extra: {},
+  extra: { name: 'USDC', version: '2' },
 };
 
 describe('createX402Fetch', () => {
