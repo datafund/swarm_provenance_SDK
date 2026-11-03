@@ -168,12 +168,13 @@ try {
 ```
 
 One exception (#199): an `INVALID_RESPONSE` for a 200 body that is valid JSON of the wrong
-shape. That body is the gateway's own answer, and the gateway stores it for the key. A retry with
-the same key is not charged again, but it returns the same answer. The error message says so and
-does not advise the retry: contact the gateway operator with `payment.transaction`, or with the
-key when the transaction is not known. A 200 whose body could not be read or is not JSON (a reset
-connection, a proxy's error page) is not the stored answer, so the retry above can recover the
-result.
+shape. That body is the gateway's own answer. A retry with the same key is not charged again,
+but it does not return a valid answer: it gets the same answer again, or
+`IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it. The error message says
+so and does not advise the retry: contact the gateway operator with `payment.transaction`, or with
+the key when the transaction is not known. A 200 whose body could not be read or is not JSON (a
+reset connection, a proxy's error page) is not the gateway's answer, so the retry above can
+recover the result.
 
 The SDK retries by itself only when the gateway asks for it (`IDEMPOTENCY_KEY_IN_PROGRESS` after
 `Retry-After`, capped at 30 s; `IDEMPOTENCY_UNAVAILABLE`), signing a new authorization each time
@@ -1109,6 +1110,16 @@ issue numbers and lists the open release-gate items.
   In browsers, `download()` reports `data` that is not valid base64 as `CONTENT_HASH_MISMATCH`,
   as in Node.js, not as a raw `InvalidCharacterError`. A `CONTENT_HASH_MISMATCH` after a paid
   read also carries `error.payment` (#190).
+- Success bodies of `pricing()`, `acquireStamp()`, `upload()` and `poolStatus()` are checked
+  more strictly (#199). `pricing()` without a boolean `x402_enabled` throws `INVALID_RESPONSE`;
+  before, it returned `x402Enabled: false`. `acquireStamp()` needs a `batch_id` of 64 hex
+  characters, and `upload()` a `reference` of 64 or 128 hex characters with an optional `0x`
+  prefix. A pool `batchId` is returned in lowercase, and `upload()` sends it in lowercase, as it
+  does a caller's `stampId` (#168). `AcquiredStamp.fallbackUsed` and
+  `PoolStatus.lowReserveWarning` are `false` when the gateway leaves them out, and
+  `INVALID_RESPONSE` when they are present but not a boolean, `null` included. After a paid
+  request whose 200 body is valid JSON of the wrong shape, the message no longer advises a retry
+  with the same idempotency key: it says to contact the gateway operator with the transaction.
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.

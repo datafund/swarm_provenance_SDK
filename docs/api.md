@@ -199,7 +199,7 @@ characters, number `depth` and string `size_name`, and a boolean `fallback_used`
 When `fallback_used` is absent, `fallbackUsed` is `false`. `batchId` is returned in lowercase,
 as `upload()` sends a caller's `stampId` (#168). After a paid acquisition, the error has
 `error.payment`. When the body was valid JSON of the wrong shape, the message says that a retry
-with the same `idempotencyKey` returns the same answer (see `upload()`). In x402 mode with `payForPool`, the
+with the same `idempotencyKey` does not return a valid answer (see `upload()`). In x402 mode with `payForPool`, the
 payment errors listed under `upload()` also apply.
 
 #### `upload(content, options?): Promise<UploadResult>`
@@ -279,7 +279,7 @@ A receipt is present only when the request carried a payment the gateway accepte
 | `NotaryError` | the gateway's code | With `sign: 'notary'`: the upload request got an error status (see NotaryError) |
 | `GatewayConnectionError` | the gateway's code | Without `sign: 'notary'`: the upload request got an error status. `body` holds the response |
 | `GatewayConnectionError` | `CONNECTION_FAILED`, `TIMEOUT` | A request could not be sent, got no response, or timed out. With `ownerSigner`, also a timeout while waiting for the signature or the clock |
-| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body cannot be read, is not JSON, or does not have the expected shape (#173, #199): for the upload, an object with a `reference` of 64 or 128 hex characters; for the pool acquisition, the fields `acquireStamp()` needs. Also with `sign: 'notary'`. Nothing is uploaded after a malformed pool answer |
+| `GatewayConnectionError` | `INVALID_RESPONSE` | A success body cannot be read, is not JSON, or does not have the expected shape (#173, #199): for the upload, an object with a `reference` of 64 or 128 hex characters, with an optional `0x` prefix; for the pool acquisition, the fields `acquireStamp()` needs. Also with `sign: 'notary'`. Nothing is uploaded after a malformed pool answer |
 | `PaymentRateLimitError` | `PAYMENT_RATE_LIMIT` | A free-tier request (`'free'` mode, or an owner-proof upload) was rate limited |
 | `PaymentConfigurationError` | `PAYMENT_CONFIGURATION` | x402 mode: the `@x402` packages, Web Crypto or the wallet address are missing. Checked on the first request that may pay |
 | `PaymentRefusedError` | `PAYMENT_REFUSED` | x402 mode: the payment was refused before signing |
@@ -294,11 +294,12 @@ has `payment`, with `payment.idempotencyKey`. `payment.stampId` is set only when
 request itself failed; a failed paid pool acquisition inside `upload()` has no
 `payment.stampId`. Pass those back as `idempotencyKey` and `stampId` to retry without paying
 twice; the error message says how. The exception is `INVALID_RESPONSE` after a paid request
-whose 200 body is valid JSON of the wrong shape. That body is the gateway's own answer, and the
-gateway stores it for the key, so a retry with the same `idempotencyKey` returns the same
-answer. The payment may have been taken. The message says to contact the gateway operator with
+whose 200 body is valid JSON of the wrong shape. That body is the gateway's own answer, so a
+retry with the same `idempotencyKey` does not return a valid answer: it gets the same answer
+again, or `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` when the gateway did not store it (a body over
+its storage limit, or one it marks as not storable). The payment may have been taken. The message says to contact the gateway operator with
 `payment.transaction`, or with the idempotency key when the transaction is not known (#199). A
-200 body that could not be read or is not JSON is not the stored answer: the message advises
+200 body that could not be read or is not JSON is not the gateway's answer: the message advises
 the keyed retry, which can recover the result.
 
 **Raw mode example:**
