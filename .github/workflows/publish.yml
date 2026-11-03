@@ -4,9 +4,40 @@ on:
   push:
     branches: [main]
 
+# Jobs get read-only access unless they set their own permissions.
+permissions:
+  contents: read
+
 jobs:
+  # The ci.yml matrix: Node 18.x and 20.x, and the @x402 2.23.0 and 2.28.0
+  # payment tests. It runs for this commit and with read-only access.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # The gitleaks scan of the pushed range, with read-only access.
+  # secret-scan.yml does not run on its own for a push to main.
+  secret-scan:
+    uses: ./.github/workflows/secret-scan.yml
+    permissions:
+      contents: read
+
   publish:
+    # Publish only if the full ci.yml matrix and the secret scan passed for
+    # this commit.
+    needs: [ci, secret-scan]
     runs-on: ubuntu-latest
+
+    # Only one publish job runs at a time. The group is on this job, not on
+    # the workflow, so the matrix and the scan still run for every push. The
+    # group does not keep push order, so the job publishes and tags only if its
+    # commit is still the tip of main (tip-check step, #188).
+    # No `queue: max`: GitHub accepting the key is not checked on a real run,
+    # and an invalid publish.yml would stop publishing and the main scan (#187).
+    # See CLAUDE.md, Releasing, for every case where nothing publishes and its
+    # recovery.
+    concurrency:
+      group: npm-publish
+      cancel-in-progress: false
 
     permissions:
       contents: write
@@ -25,7 +56,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Type check
         run: pnpm typecheck
@@ -55,12 +86,42 @@ jobs:
             echo "Version ${PACKAGE_VERSION} not yet published."
           fi
 
-      - name: Publish to npm
+      # Run as late as possible, right before publishing, so the answer is
+      # current. If a newer commit is on main, skip publish and tag: that
+      # commit's own run should publish. A push that starts no run (a skip
+      # marker such as `[skip ci]`, or a push made with GITHUB_TOKEN) publishes
+      # nothing. This workflow has no workflow_dispatch, so the only recovery
+      # is a new commit merged to main through a pull request, without a skip
+      # marker (see CLAUDE.md, Releasing).
+      # Fail if the tip cannot be read. `shell: bash` sets pipefail, so a
+      # failing ls-remote stops the step.
+      - name: Check that this commit is still the tip of main
+        id: tip-check
         if: steps.version-check.outputs.published == 'false'
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          TIP_SHA=$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" {print $1}')
+          if [ -z "$TIP_SHA" ]; then
+            echo "::error::Could not read the tip of main from origin."
+            exit 1
+          fi
+          if [ "$TIP_SHA" = "$COMMIT_SHA" ]; then
+            echo "tip=true" >> "$GITHUB_OUTPUT"
+            echo "Commit ${COMMIT_SHA} is the tip of main, publishing."
+          else
+            echo "tip=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipped publish and tag: a different commit (${TIP_SHA}) is on main. Its run should publish; if that run failed, was cancelled or did not start, see CLAUDE.md, Releasing."
+            echo "Skipped npm publish and tag: commit ${COMMIT_SHA} is not the tip of main (${TIP_SHA})." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publish to npm
+        if: steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true'
         run: npm publish --access public --provenance
 
       - name: Verify publish
-        if: steps.version-check.outputs.published == 'false'
+        if: steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true'
         run: |
           echo "Waiting for npm registry to propagate..."
           PACKAGE_NAME="${{ steps.version-check.outputs.name }}"
@@ -77,8 +138,43 @@ jobs:
 
           echo "::warning::Package published but not yet visible on npm registry after 60s. It may take a few more minutes to propagate."
 
-      - name: Tag release
-        if: steps.version-check.outputs.published == 'false'
+      # If an earlier run published this version but its tag push failed, a
+      # re-run or a later push skips the publish steps. Push the missing tag
+      # then, but only from the tip of main. Never publish here. Fail if
+      # origin cannot be read.
+      - name: Check for a missing release tag
+        id: tag-check
+        if: steps.version-check.outputs.published == 'true'
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.version-check.outputs.version }}
         run: |
-          git tag "v${{ steps.version-check.outputs.version }}"
-          git push origin "v${{ steps.version-check.outputs.version }}"
+          TAG_REF="refs/tags/v${VERSION}"
+          TAG_SHA=$(git ls-remote origin "$TAG_REF" | awk -v ref="$TAG_REF" '$2 == ref {print $1}')
+          if [ -n "$TAG_SHA" ]; then
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            echo "Tag v${VERSION} is on origin."
+            exit 0
+          fi
+          TIP_SHA=$(git ls-remote origin refs/heads/main | awk '$2 == "refs/heads/main" {print $1}')
+          if [ -z "$TIP_SHA" ]; then
+            echo "::error::Could not read the tip of main from origin."
+            exit 1
+          fi
+          if [ "$TIP_SHA" = "$COMMIT_SHA" ]; then
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Version ${VERSION} is on npm but tag v${VERSION} is missing on origin. Tagging this commit, the tip of main."
+          else
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Tag v${VERSION} is missing on origin, but this commit is not the tip of main. Not tagging."
+            echo "Did not push tag v${VERSION}: it is missing on origin, but commit ${COMMIT_SHA} is not the tip of main (${TIP_SHA})." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Tag release
+        if: (steps.version-check.outputs.published == 'false' && steps.tip-check.outputs.tip == 'true') || steps.tag-check.outputs.missing == 'true'
+        env:
+          VERSION: ${{ steps.version-check.outputs.version }}
+        run: |
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"

@@ -8,8 +8,10 @@ import {
   GatewayConnectionError,
   PaymentConfigurationError,
   PaymentRefusedError,
+  ProvenanceError,
   StampError,
 } from '../../src/errors.js';
+import { sha256Hex, toBytes } from '../../src/utils.js';
 import type { PaymentRequest, X402PaymentConfig } from '../../src/types.js';
 
 // Drives the REAL @x402/fetch + @x402/evm (whatever version is installed)
@@ -393,6 +395,26 @@ describe('paid pool acquisition is opt-in (#109)', () => {
     expect(payments()).toBe(0);
   });
 
+  it.each([
+    ['acquireStamp()', (c: ProvenanceClient) => c.acquireStamp()],
+    ['upload()', (c: ProvenanceClient) => c.upload('hello')],
+  ])('without payForPool, the StampError from an unpaid pool 402 keeps error.body (%s, #163)', async (_label, call) => {
+    const error = await call(client()).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(StampError);
+    expect((error as StampError).payment).toBeUndefined();
+    expect((error as StampError).body).toEqual({
+      detail: {
+        x402Version: 1,
+        error: 'Payment required',
+        accepts,
+        code: 'DAILY_STAMP_ALLOWANCE_EXHAUSTED',
+        message: 'Daily stamp allowance used up.',
+      },
+    });
+    expect(payments()).toBe(0);
+  });
+
   it('payForPool: true pays an in-policy pool 402 and the upload', async () => {
     const result = await client({ payForPool: true }).upload('hello');
     expect(result.reference).toBe('b'.repeat(64));
@@ -516,6 +538,138 @@ describe('review round 3 (#138)', () => {
     } finally {
       vi.stubGlobal('fetch', gateway);
     }
+  });
+});
+
+describe('paid reads with an unreadable body (#173)', () => {
+  it.each([['download'], ['downloadDocument']] as const)('a paid 200 to %s() that is not JSON keeps the payment flag', async (method) => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('<html>proxy error</html>', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForReads: true })[method]('c'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/a payment was sent with this request and may have been charged/);
+      expect(payments()).toBe(1);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});
+
+describe('paid reads with a body that is not the expected shape (#179)', () => {
+  it.each([['download'], ['downloadDocument']] as const)('a paid 200 {} to %s() keeps the payment flag', async (method) => {
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      return gateway(input, init);
+    });
+    try {
+      const error = await client({ payForReads: true })[method]('c'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayConnectionError);
+      expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      expect((error as GatewayConnectionError).statusCode).toBe(200);
+      expect((error as GatewayConnectionError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/^Invalid response from gateway: expected a JSON object/);
+      expect((error as Error).message).toMatch(/a payment was sent with this request and may have been charged/);
+      expect(payments()).toBe(1);
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  });
+});
+
+describe('paid reads of a record the method cannot verify (#190)', () => {
+  const HELLO = { data: 'aGVsbG8=', content_hash: sha256Hex(toBytes('hello')), stamp_id: STAMP };
+  const RAW = { data: { a: 1 }, content_hash: sha256Hex(toBytes('{"a":1}')), stamp_id: STAMP };
+
+  /**
+   * Answer the paid retry of the download with `body`; return the error.
+   * `browser`: Buffer is removed from when the paid response is made until
+   * the call returns, so the SDK decodes base64 with atob.
+   */
+  async function paidFailure(
+    method: 'download' | 'downloadDocument',
+    body: unknown,
+    browser = false
+  ): Promise<GatewayConnectionError> {
+    const saved = globalThis.Buffer;
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (headers.has('X-PAYMENT')) {
+        seen.push({ method: 'GET', path: '/api/v1/data/', paid: true });
+        const text = JSON.stringify(body);
+        const response = new Response(text, { status: 200 });
+        if (browser) {
+          // Response.text() itself needs Buffer: answer it from the string
+          response.text = () => Promise.resolve(text);
+          (globalThis as { Buffer?: unknown }).Buffer = undefined;
+        }
+        return Promise.resolve(response);
+      }
+      return gateway(input, init);
+    });
+    try {
+      const paying = client({ payForReads: true });
+      const error = await paying[method]('c'.repeat(64))
+        .catch((e: unknown) => e)
+        .finally(() => {
+          globalThis.Buffer = saved;
+        });
+      expect(error).toBeInstanceOf(ProvenanceError);
+      expect((error as ProvenanceError).payment).toMatchObject({ paymentSent: true });
+      expect((error as Error).message).toMatch(/ \(a payment was sent with this request and may have been charged\)$/);
+      expect(payments()).toBe(1);
+      return error as GatewayConnectionError;
+    } finally {
+      vi.stubGlobal('fetch', gateway);
+    }
+  }
+
+  it.each([
+    ['download', { ...HELLO, content_hash: '0'.repeat(64) }],
+    ['downloadDocument', { ...RAW, content_hash: '0'.repeat(64) }],
+  ] as const)('a paid 200 with a wrong hash to %s() keeps the payment flag', async (method, body) => {
+    const error = await paidFailure(method, body);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/^Content hash verification failed \(a payment/);
+  });
+
+  it('a paid 200 base64 record to downloadDocument() names download() and keeps the payment flag', async () => {
+    const error = await paidFailure('downloadDocument', HELLO);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/use download\(\) for base64 uploads/);
+  });
+
+  it('a paid 200 raw record whose data is a JSON string to download() names downloadDocument() and keeps the payment flag', async () => {
+    const error = await paidFailure('download', { data: 'x', content_hash: sha256Hex(toBytes('"x"')), stamp_id: STAMP });
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/use downloadDocument\(\) for raw uploads/);
+  });
+
+  it('a paid 200 string record that atob cannot decode to download() is CONTENT_HASH_MISMATCH with the payment flag', async () => {
+    const error = await paidFailure('download', { data: 'x', content_hash: '0'.repeat(64), stamp_id: STAMP }, true);
+    expect(error.code).toBe('CONTENT_HASH_MISMATCH');
+    expect(error.message).toMatch(/^Content hash verification failed \(a payment/);
+  });
+
+  it('a paid 200 raw record to download() names downloadDocument() and keeps the payment flag', async () => {
+    const error = await paidFailure('download', RAW);
+    expect(error).toBeInstanceOf(GatewayConnectionError);
+    expect(error.code).toBe('INVALID_RESPONSE');
+    expect(error.statusCode).toBe(200);
+    expect(error.message).toMatch(/use downloadDocument\(\) for raw uploads/);
   });
 });
 
@@ -720,6 +874,39 @@ describe('error handling (#112)', () => {
     expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
     expect((error as Error).message).not.toContain('10000');
     expect((error as PaymentRefusedError).refusals[0]?.request.amount).toBe('10000');
+    expect(payments()).toBe(0);
+  });
+
+  it('an ethers v6 ACTION_REJECTED rejection in the wallet is PAYMENT_REFUSED, not a failure (#166)', async () => {
+    // Mirrors ethers v6: JsonRpcApiProvider.getRpcError calls
+    // makeError('user rejected action', 'ACTION_REJECTED', { action, reason, info }).
+    // makeError adds the details to the message, sets `code`, copies the info
+    // fields onto the error and sets `shortMessage`. It sets no `cause`; the
+    // provider's 4001 error is nested under `info.error`. ethers is not a
+    // dependency, so the error is built by hand.
+    const providerError = { code: 4001, message: 'MetaMask Tx Signature: User denied transaction signature.' };
+    const payload = { method: 'eth_signTypedData_v4', params: [], id: 1, jsonrpc: '2.0' };
+    const ethersRejection = Object.assign(
+      new Error(
+        'user rejected action (action="signTypedData", reason="rejected", ' +
+          `info={ "error": ${JSON.stringify(providerError)}, "payload": ${JSON.stringify(payload)} }, ` +
+          'code=ACTION_REJECTED, version=6.16.0)',
+      ),
+      {
+        code: 'ACTION_REJECTED',
+        action: 'signTypedData',
+        reason: 'rejected',
+        info: { payload, error: providerError },
+        shortMessage: 'user rejected action',
+      },
+    );
+    const rejecting = { ...wallet, signTypedData: () => Promise.reject(ethersRejection) };
+    const error = await new ProvenanceClient({ gatewayUrl: 'http://gateway.test', payment: { wallet: rejecting } })
+      .upload('hello', { stampId: STAMP })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PaymentRefusedError);
+    expect((error as PaymentRefusedError).code).toBe('PAYMENT_REFUSED');
+    expect((error as Error).message).toMatch(/rejected in the wallet/);
     expect(payments()).toBe(0);
   });
 
