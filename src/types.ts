@@ -498,7 +498,17 @@ export interface PriceQuote {
   path: string;
   /** Price in US dollars */
   priceUsd: number;
-  /** Amount the 402 would ask for, in the asset's smallest unit (integer string; USDC has 6 decimals) */
+  /**
+   * Amount the 402 would ask for, in the asset's smallest unit (integer string;
+   * USDC has 6 decimals). The gateway's `amount`, else its deprecated
+   * `max_amount_required` (x402 v2 names the field `amount`).
+   */
+  amount: string;
+  /**
+   * The same value as `amount`.
+   * @deprecated Use `amount`. x402 v2 has no `maxAmountRequired`; this field is
+   * removed with x402 v1 in the next major release (#210).
+   */
   maxAmountRequired: string;
   /** Description of the operation */
   description: string;
@@ -587,7 +597,10 @@ export interface GatewayPriceQuote {
   method: string;
   path: string;
   price_usd: number;
-  max_amount_required: string;
+  /** Added by the gateway with x402 v2 (swarm_connect#602) */
+  amount?: string | null;
+  /** Deprecated by the gateway in favour of `amount` */
+  max_amount_required?: string | null;
   description: string;
 }
 

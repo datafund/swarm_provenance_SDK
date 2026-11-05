@@ -300,7 +300,8 @@ export class ProvenanceClient {
       throw this.shapeError(
         'a JSON object with boolean "x402_enabled", and optional fields of the expected types ' +
           '(string "currency", "network", "asset" and "pay_to", number "min_price_usd", object "free_tier" ' +
-          'with boolean "enabled" and string "header", object "quotes" of price quotes)',
+          'with boolean "enabled" and string "header", object "quotes" of price quotes, each with string ' +
+          '"amount" or "max_amount_required", equal if both are sent)',
         response
       );
     }
@@ -1611,16 +1612,26 @@ function optionalOf(value: unknown, type: 'string' | 'number'): boolean {
   return value === undefined || value === null || typeof value === type;
 }
 
-/** A price quote with every field toPriceQuote() copies */
+/**
+ * A price quote with every field toPriceQuote() copies. The amount is `amount`
+ * (D8, swarm_connect#602) or the deprecated `max_amount_required`, at least one
+ * a string; each absent, null or a string; equal when both are sent.
+ */
 function isPriceQuote(value: unknown): value is GatewayPriceQuote {
-  return (
-    isRecord(value) &&
-    typeof value['method'] === 'string' &&
-    typeof value['path'] === 'string' &&
-    typeof value['price_usd'] === 'number' &&
-    typeof value['max_amount_required'] === 'string' &&
-    typeof value['description'] === 'string'
-  );
+  if (
+    !isRecord(value) ||
+    typeof value['method'] !== 'string' ||
+    typeof value['path'] !== 'string' ||
+    typeof value['price_usd'] !== 'number' ||
+    typeof value['description'] !== 'string'
+  ) {
+    return false;
+  }
+  const amount = value['amount'];
+  const max = value['max_amount_required'];
+  if (!optionalOf(amount, 'string') || !optionalOf(max, 'string')) return false;
+  if (typeof amount !== 'string' && typeof max !== 'string') return false;
+  return typeof amount !== 'string' || typeof max !== 'string' || amount === max;
 }
 
 /**
@@ -1769,13 +1780,15 @@ function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceErr
   return target;
 }
 
-/** A gateway price quote in the SDK's field names */
+/** A gateway price quote in the SDK's field names; isPriceQuote() guarantees one amount */
 function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
+  const amount = (quote.amount ?? quote.max_amount_required)!;
   return {
     method: quote.method,
     path: quote.path,
     priceUsd: quote.price_usd,
-    maxAmountRequired: quote.max_amount_required,
+    amount,
+    maxAmountRequired: amount,
     description: quote.description,
   };
 }

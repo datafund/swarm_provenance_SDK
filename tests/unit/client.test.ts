@@ -2244,6 +2244,9 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
     ['pricing', 'quote that is not an object', { ...PRICING, quotes: { data_upload: 'cheap' } }],
     ['pricing', 'quote without price_usd', { ...PRICING, quotes: { data_upload: { ...QUOTE, price_usd: undefined } } }],
     ['pricing', 'quote whose max_amount_required is a number', { ...PRICING, quotes: { data_upload: { ...QUOTE, max_amount_required: 10000 } } }],
+    ['pricing', 'quote whose amount is a number', { ...PRICING, quotes: { data_upload: { ...QUOTE, amount: 10000 } } }],
+    ['pricing', 'quote without amount or max_amount_required', { ...PRICING, quotes: { data_upload: { ...QUOTE, max_amount_required: undefined } } }],
+    ['pricing', 'quote whose amount and max_amount_required disagree', { ...PRICING, quotes: { data_upload: { ...QUOTE, amount: '99000000' } } }],
     ['pricing', 'quote without a description', { ...PRICING, quotes: { data_upload: { ...QUOTE, description: undefined } } }],
     ['pricing', 'free_tier without a header', { ...PRICING, free_tier: { enabled: true } }],
     ['pricing', 'free_tier that is a boolean', { ...PRICING, free_tier: true }],
@@ -2346,7 +2349,7 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
       freeTier: { enabled: true, header: 'X-Payment-Mode: free' },
     });
     expect(Object.keys(pricing.quotes).sort()).toEqual(['bandwidthCredit', 'dataUpload', 'poolAcquire', 'stampPurchase']);
-    expect(pricing.quotes.dataUpload).toEqual({ method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, maxAmountRequired: '10000', description: 'Upload' });
+    expect(pricing.quotes.dataUpload).toEqual({ method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, amount: '10000', maxAmountRequired: '10000', description: 'Upload' });
   });
 
   it('pricing() accepts an answer without the pool and bandwidth quotes, with the free tier off', async () => {
