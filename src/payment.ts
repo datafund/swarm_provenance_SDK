@@ -93,7 +93,7 @@ function resolveNetworks(config: X402PaymentConfig): { network: `${string}:${str
   const v1Network = config.v1Network ?? known?.name;
   if (v1Network === undefined) {
     throw new PaymentConfigurationError(
-      `payment.v1Network is required for ${network}: the gateway names networks the x402 v1 way (e.g. 'base')`
+      `payment.v1Network is required for ${network}: the SDK derives it only for Base and Base Sepolia, and the gateway names networks the x402 v1 way (e.g. 'polygon' for eip155:137)`
     );
   }
   // A known network has exactly one v1 name

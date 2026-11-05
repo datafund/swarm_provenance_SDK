@@ -195,7 +195,7 @@ upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers n
 | `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | `delivered` | It worked and was paid once; the gateway kept no copy of the response. Do not pay again |
 
 An attempt that may pay is bounded by `paidTimeout` (default 120 s, or `timeout` if longer),
-not `timeout`: settlement happens on-chain. Tested with `@x402/*` 2.5.0 to 2.28.x.
+not `timeout`: settlement happens on-chain. Tested with `@x402/*` 2.5.0 to 2.30.0.
 x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
 **Server (Node.js):** load the key from the environment or a secret store, never from source code:
@@ -1026,7 +1026,7 @@ issue numbers and lists the open release-gate items.
   `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
   back in), and attempts that sent a payment are not retried (#107); a failure after payment
   carries `error.payment`. On `@x402/*` 2.23+ the library's $1 default cap is
-  replaced by `maxAmount` (#110). Peer range narrowed to the tested `>=2.5.0 <2.29.0`.
+  replaced by `maxAmount` (#110). Peer range narrowed to the tested `>=2.5.0 <2.31.0`.
 - Chain writes (#115-#118): `ChainSigner` requires `getChainId()` (and may implement
   `switchChain()`); writes refuse a wrong RPC or signer chain and an address without contract
   code; success requires the contract's event in the receipt (else `ChainTransactionError`

@@ -38,7 +38,13 @@ export interface X402PaymentConfig {
    * known chains. Base mainnet requires `maxAmount`.
    */
   network?: 'base' | 'base-sepolia' | `${string}:${string}`;
-  /** x402 v1 network name; only needed for chains other than Base / Base Sepolia */
+  /**
+   * x402 v1 network name (e.g. 'base'). Optional for Base and Base Sepolia:
+   * the SDK derives it from `network`, whether `network` is a v1 name or a
+   * CAIP-2 ID. Required for any other chain, because the gateway's 402 names
+   * the network the v1 way and the SDK has no v1 name for it. Alone, a known
+   * name also selects `network`. It must name the same chain as `network`.
+   */
   v1Network?: string;
   /**
    * Largest single payment the SDK will sign, in whole tokens as a decimal
