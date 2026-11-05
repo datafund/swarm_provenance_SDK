@@ -538,11 +538,12 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy, 
   let fromHeader = false;
 
   if (header) {
-    try {
-      paymentRequired = JSON.parse(base64Decode(header)) as Record<string, unknown>;
+    paymentRequired = decodePaymentHeader(header);
+    if (paymentRequired) {
       fromHeader = true;
-    } catch {
-      // Undecodable: drop it and fall back to the body
+    } else {
+      // Undecodable, not a JSON object or too long: drop it and fall back to the
+      // body, so the library cannot read it either
       headers.delete('PAYMENT-REQUIRED');
     }
   }
@@ -616,6 +617,28 @@ async function policePaymentRequired(response: Response, policy: PaymentPolicy, 
     return new Response(null, { status: 402, statusText: response.statusText, headers });
   }
   return new Response(JSON.stringify(narrowed), { status: 402, statusText: response.statusText, headers });
+}
+
+/**
+ * Longest x402 header (PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-PAYMENT-RESPONSE)
+ * the SDK decodes, in characters: the MCP server's cap. The gateway's largest
+ * is under 1000. A longer header is treated as absent.
+ */
+export const MAX_PAYMENT_HEADER_CHARS = 8192;
+
+/**
+ * An x402 header decoded: base64 of a UTF-8 JSON object. Undefined when the
+ * header is absent, longer than MAX_PAYMENT_HEADER_CHARS, not base64, not JSON
+ * or not an object. The gateway's headers are untrusted input.
+ */
+export function decodePaymentHeader(value: string | null | undefined): Record<string, unknown> | undefined {
+  if (!value || value.length > MAX_PAYMENT_HEADER_CHARS) return undefined;
+  try {
+    const decoded = JSON.parse(base64Decode(value)) as unknown;
+    return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? (decoded as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** base64 of UTF-8 text, as x402 encodes its headers */

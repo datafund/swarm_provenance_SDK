@@ -47,7 +47,7 @@ import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText, notJsonError, NOT_REPRESENTABLE } from './canonical-json.js';
 import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds, sha256Hex, base64ToBytes } from './utils.js';
 import {
-  base64Decode,
+  decodePaymentHeader,
   formatAtomic,
   untilAborted,
   createX402Transport,
@@ -1285,18 +1285,21 @@ export class ProvenanceClient {
         if (typeof fields['suggestion'] === 'string') suggestion = fields['suggestion'];
       }
       bodyTransaction = reported(fields['transaction']) ?? reported(data['transaction']);
-      const price = response.status === 402 ? priceOf(data) : undefined;
-      if (price) {
-        // The gateway's message is cut to leave room for the price, so the price
-        // always shows and the two together stay within the cap
-        const suffix = ` (price: ${price})`;
-        message = suffix.length < MAX_ERROR_TEXT ? `${capText(message, MAX_ERROR_TEXT - suffix.length)}${suffix}` : capText(`${message}${suffix}`);
-      }
     } else if (response.status === 413) {
       // Not the gateway's JSON 413 (FILE_TOO_LARGE): the proxy in front of it refused the body
       code = 'FILE_TOO_LARGE';
       const status = response.statusText ? `${response.status} ${response.statusText}` : String(response.status);
       message = `Upload too large: the gateway's proxy refused the request body (${status}). Send less data.`;
+    }
+
+    // The price asked: the PAYMENT-REQUIRED header first, then the body (#167)
+    const price =
+      response.status === 402 ? priceOf(response.headers, isRecord(parsed) ? parsed : undefined) : undefined;
+    if (price) {
+      // The gateway's message is cut to leave room for the price, so the price
+      // always shows and the two together stay within the cap
+      const suffix = ` (price: ${price})`;
+      message = suffix.length < MAX_ERROR_TEXT ? `${capText(message, MAX_ERROR_TEXT - suffix.length)}${suffix}` : capText(`${message}${suffix}`);
     }
 
     const paid = this.paidResponses.has(response);
@@ -1682,16 +1685,13 @@ interface PaidAttempt {
   approved?: PaymentRequest;
 }
 
-/** The decoded PAYMENT-RESPONSE (v2) or X-PAYMENT-RESPONSE (v1): the facilitator's SettleResponse */
+/**
+ * The facilitator's SettleResponse: the decoded PAYMENT-RESPONSE (v2), else
+ * X-PAYMENT-RESPONSE (v1), in @x402/core's order (D4). The first header present
+ * decides: one that does not decode (or is too long) counts as no receipt.
+ */
 function settleResponse(response: Response): Record<string, unknown> | undefined {
-  const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
-  if (!encoded) return undefined;
-  try {
-    const decoded = JSON.parse(base64Decode(encoded)) as unknown;
-    return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? (decoded as Record<string, unknown>) : undefined;
-  } catch {
-    return undefined; // not decodable: as if absent
-  }
+  return decodePaymentHeader(response.headers.get('PAYMENT-RESPONSE') || response.headers.get('X-PAYMENT-RESPONSE'));
 }
 
 /** A non-empty string that is not the gateway's "unknown" placeholder */
@@ -1936,18 +1936,28 @@ function composeMessage(data: GatewayErrorResponse & Record<string, unknown>): s
 /** Prices named in a 402's message; the rest are counted, and all are in `error.body` */
 const MAX_PRICES_SHOWN = 3;
 
-/** An x402 payment request: top level (the gateway now), else under the deprecated `detail` */
-function paymentRequestOf(data: Record<string, unknown>): { x402Version: number; accepts: unknown[] } | undefined {
+/**
+ * An x402 payment request, in @x402/core's order: the PAYMENT-REQUIRED header
+ * (v2) when it decodes to one, else the body's top level (the gateway now),
+ * else the deprecated `detail` copy.
+ */
+function paymentRequestOf(
+  headers: Headers,
+  data: Record<string, unknown> | undefined
+): { x402Version: number; accepts: unknown[] } | undefined {
   const isRequest = (v: unknown): v is { x402Version: number; accepts: unknown[] } =>
     Boolean(v) && typeof v === 'object' && typeof (v as { x402Version?: unknown }).x402Version === 'number' &&
     Array.isArray((v as { accepts?: unknown }).accepts);
+  const header = decodePaymentHeader(headers.get('PAYMENT-REQUIRED'));
+  if (isRequest(header)) return header;
+  if (data === undefined) return undefined;
   if (isRequest(data)) return data;
   return isRequest(data['detail']) ? data['detail'] : undefined;
 }
 
 /** The price a 402 asks, e.g. "0.01 USDC on base-sepolia"; options joined with "or". Never the raw JSON. */
-function priceOf(data: Record<string, unknown>): string | undefined {
-  const request = paymentRequestOf(data);
+function priceOf(headers: Headers, data: Record<string, unknown> | undefined): string | undefined {
+  const request = paymentRequestOf(headers, data);
   if (!request) return undefined;
   const prices = request.accepts
     .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')

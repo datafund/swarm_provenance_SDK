@@ -1790,6 +1790,48 @@ describe('ProvenanceClient', () => {
       );
     });
 
+    describe('x402 v2: the price from the PAYMENT-REQUIRED header (#167, #209)', () => {
+      const v2Request = (accepts: unknown[] = [{ ...x402Body.accepts[0]!, network: 'eip155:84532', amount: '25000', maxAmountRequired: undefined }]) => ({
+        x402Version: 2,
+        error: 'Payment required',
+        resource: { url: 'http://gateway.test/api/v1/data/' },
+        accepts,
+      });
+      const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
+      const answer = (body: string, headers: Record<string, string>) =>
+        new Response(body, { status: 402, statusText: 'Payment Required', headers: { 'content-type': 'application/json', ...headers } });
+      const upload = () => new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e) as Promise<Error>;
+
+      it("a header-only v2 402 in 'none' mode names the v2 price", async () => {
+        mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request()) }));
+        const error = await upload();
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on eip155:84532)');
+      });
+
+      it('a header-only v2 402 with a body that is not JSON still names the price', async () => {
+        mockFetch.mockResolvedValueOnce(answer('', { 'PAYMENT-REQUIRED': encode(v2Request()) }));
+        expect((await upload()).message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on eip155:84532)');
+      });
+
+      it('a dual-mode 402 (v1 body, v2 header) names the header price, as @x402/core pays it', async () => {
+        mockFetch.mockResolvedValueOnce(answer(JSON.stringify(x402Body), { 'PAYMENT-REQUIRED': encode(v2Request()) }));
+        const error = await upload();
+        expect(error.message).toContain('(price: 0.025 USDC on eip155:84532)');
+        expect(error.message).not.toContain('0.01 USDC');
+      });
+
+      it.each([
+        ['undecodable', '%%%not-base64%%%'],
+        ['too long', encode({ ...v2Request(), padding: 'x'.repeat(9000) })],
+        ['not an object', encode([v2Request()])],
+        ['without accepts', encode({ x402Version: 2, error: 'Payment required' })],
+      ])('a PAYMENT-REQUIRED header that is %s falls back to the body price', async (_name, header) => {
+        mockFetch.mockResolvedValueOnce(answer(JSON.stringify(x402Body), { 'PAYMENT-REQUIRED': header }));
+        expect((await upload()).message).toBe(`${x402Body.error} (price: 0.01 USDC on base-sepolia)`);
+      });
+    });
+
     it('a non-JSON error body is kept as text, capped at 4096 characters', async () => {
       const page = `<html><body>${'Bad gateway. '.repeat(1000)}</body></html>`;
       mockFetch.mockResolvedValueOnce(new Response(page, { status: 502, statusText: 'Bad Gateway' }));
