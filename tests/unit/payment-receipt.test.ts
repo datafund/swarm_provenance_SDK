@@ -50,6 +50,11 @@ const v2Option = (amount = '25000') => ({
   extra: { name: 'USDC', version: '2' },
 });
 
+/** A v2 PaymentRequired, base64-encoded for the PAYMENT-REQUIRED header */
+function v2Header(url: string, accepts: unknown[] = [v2Option()]): string {
+  return Buffer.from(JSON.stringify({ x402Version: 2, error: 'Payment required', resource: { url }, accepts })).toString('base64');
+}
+
 /** The facilitator's SettleResponse, serialized by alias and base64-encoded, as the gateway sends it */
 function receipt(fields: Record<string, unknown> = {}): string {
   const settle = { success: true, transaction: TX_UPLOAD, network: 'base-sepolia', payer: account.address, errorReason: null, ...fields };
@@ -71,8 +76,13 @@ interface Answer {
   body?: unknown;
 }
 
-/** x402 protocol of the stub's 402: v1 in the body, v2 in the PAYMENT-REQUIRED header */
-let protocol: 1 | 2;
+/**
+ * x402 protocol of the stub's 402: v1 in the body, v2 in the PAYMENT-REQUIRED
+ * header, or 'dual': both in one 402 (the gateway's transition mode, epic D2)
+ */
+let protocol: 1 | 2 | 'dual';
+/** The payment header of the last paid request the stub received */
+let paidWith: 'X-PAYMENT' | 'PAYMENT-SIGNATURE' | undefined;
 /** Answer to the paid request, per path */
 let answers: Record<string, Answer>;
 /** Whether pool acquisition asks for payment (else it is free) */
@@ -100,15 +110,16 @@ const gateway = (input: string | URL | Request, init?: RequestInit): Promise<Res
     return json(defaultBody, 200, { 'X-Payment-Mode': 'free-tier' });
   }
   if (!paid && protocol === 2) {
-    const header = Buffer.from(
-      JSON.stringify({ x402Version: 2, error: 'Payment required', resource: { url: request.url }, accepts: [v2Option()] })
-    ).toString('base64');
-    return Promise.resolve(new Response('{}', { status: 402, headers: { 'PAYMENT-REQUIRED': header } }));
+    return Promise.resolve(new Response('{}', { status: 402, headers: { 'PAYMENT-REQUIRED': v2Header(request.url) } }));
+  }
+  if (!paid && protocol === 'dual') {
+    return json({ x402Version: 1, error: 'Payment required', accepts: [v1Option()] }, 402, { 'PAYMENT-REQUIRED': v2Header(request.url) });
   }
   if (!paid) {
     return json({ detail: { x402Version: 1, error: 'Payment required', accepts: [v1Option()] } }, 402);
   }
   payments++;
+  paidWith = request.headers.has('PAYMENT-SIGNATURE') ? 'PAYMENT-SIGNATURE' : 'X-PAYMENT';
   const answer = answers[path] ?? { status: 200, headers: settled(TX_UPLOAD) };
   return json(answer.body ?? defaultBody, answer.status, answer.headers);
 };
@@ -135,6 +146,7 @@ const UPLOAD_RECEIPT = {
 
 beforeEach(() => {
   protocol = 1;
+  paidWith = undefined;
   answers = {};
   poolPaid = false;
   payments = 0;
@@ -182,9 +194,10 @@ describe('paid results carry the payment receipt (#111)', () => {
       headers: { 'PAYMENT-RESPONSE': receipt({ transaction: TX_UPLOAD, network: 'eip155:84532' }) },
     };
     const result = await client().upload('hello', { stampId: STAMP });
+    // One network format (#159): the x402 v1 name, also for a v2 receipt
     expect(result.payment).toEqual({
       transaction: TX_UPLOAD,
-      network: 'eip155:84532',
+      network: 'base-sepolia',
       payer: account.address,
       amount: '25000',
       amountDecimal: '0.025',
@@ -390,5 +403,91 @@ describe('a failed upload() keeps the receipt of the pool stamp it paid for (#15
     const free = (await client().upload('hello').catch((e: unknown) => e)) as GatewayConnectionError;
     expect(free.stampId).toBe(POOL_STAMP);
     expect(free.stampPayment).toBeUndefined();
+  });
+});
+
+/** The receipt for the stub's 0.025 USDC v2 payment, in the SDK's one network format (#159) */
+const V2_RECEIPT = {
+  transaction: TX_UPLOAD,
+  network: 'base-sepolia',
+  payer: account.address,
+  amount: '25000',
+  amountDecimal: '0.025',
+  asset: USDC_SEPOLIA,
+};
+
+describe('x402 v2 shapes (#209)', () => {
+  it('a dual-mode 402 (v1 body, v2 header): the library pays v2, and the SDK reports the v2 price and receipt', async () => {
+    protocol = 'dual';
+    answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': receipt({ network: 'eip155:84532' }) } };
+    const seen: unknown[] = [];
+    const result = await client({ payment: { wallet, onBeforePayment: (request) => void seen.push(request) } }).upload('hello', {
+      stampId: STAMP,
+    });
+    expect(payments).toBe(1);
+    expect(paidWith).toBe('PAYMENT-SIGNATURE');
+    expect(seen).toEqual([expect.objectContaining({ x402Version: 2, amount: '25000', network: 'eip155:84532' })]);
+    expect(result.payment).toEqual(V2_RECEIPT);
+  });
+
+  it('a dual-mode 402 answering the paid request: the message names the v2 price, error.payment the v2 terms', async () => {
+    protocol = 'dual';
+    answers[UPLOAD] = {
+      status: 402,
+      headers: {
+        'PAYMENT-REQUIRED': v2Header('http://gateway.test/api/v1/data/'),
+        'PAYMENT-RESPONSE': receipt({ success: false, transaction: '', network: 'eip155:84532', errorReason: 'invalid_signature' }),
+      },
+      body: { x402Version: 1, error: 'Payment verification failed', accepts: [v1Option()] },
+    };
+    const error = (await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e)) as GatewayConnectionError;
+    expect(paidWith).toBe('PAYMENT-SIGNATURE');
+    expect(error.message.startsWith('Payment verification failed (price: 0.025 USDC on base-sepolia) (a payment was sent')).toBe(true);
+    expect(error.payment).toEqual({
+      paymentSent: true,
+      network: 'base-sepolia',
+      payer: account.address,
+      amount: '25000',
+      amountDecimal: '0.025',
+      asset: USDC_SEPOLIA,
+      idempotencyKey: ANY_KEY,
+      stampId: STAMP,
+    });
+  });
+
+  it('PAYMENT-RESPONSE is read before X-PAYMENT-RESPONSE (D4)', async () => {
+    protocol = 2;
+    const other = '0x' + '3'.repeat(64);
+    answers[UPLOAD] = {
+      status: 200,
+      headers: { 'X-PAYMENT-RESPONSE': receipt({ transaction: other }), 'PAYMENT-RESPONSE': receipt({ network: 'eip155:84532' }) },
+    };
+    const result = await client().upload('hello', { stampId: STAMP });
+    expect(result.payment?.transaction).toBe(TX_UPLOAD);
+  });
+
+  it('#159: a v2 receipt without a network falls back to the signed network, as its v1 name', async () => {
+    protocol = 2;
+    answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': receipt({ network: undefined }) } };
+    expect((await client().upload('hello', { stampId: STAMP })).payment).toEqual(V2_RECEIPT);
+
+    // No receipt at all (hidden by CORS): the signed v2 network, as its v1 name
+    answers[UPLOAD] = { status: 200, headers: {} };
+    expect((await client().upload('hello', { stampId: STAMP })).payment?.network).toBe('base-sepolia');
+  });
+
+  it('#159: v1 and v2 receipt names give the same network; a malformed one is replaced by the signed network', async () => {
+    protocol = 2;
+    for (const network of ['eip155:84532', 'base-sepolia', '<b>Base Sepolia</b>', 42]) {
+      answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': receipt({ network }) } };
+      expect((await client().upload('hello', { stampId: STAMP })).payment?.network).toBe('base-sepolia');
+    }
+  });
+
+  it('a PAYMENT-RESPONSE over 8192 characters counts as no receipt', async () => {
+    protocol = 2;
+    answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': receipt({ network: 'eip155:84532', padding: 'x'.repeat(9000) }) } };
+    const result = await client().upload('hello', { stampId: STAMP });
+    expect(result.payment).toEqual({ network: 'base-sepolia', amount: '25000', amountDecimal: '0.025', asset: USDC_SEPOLIA });
   });
 });

@@ -40,6 +40,24 @@ const DEFAULT_TESTNET_MAX_AMOUNT = '1';
 /** CAIP-2: namespace 3-8 of [-a-z0-9], reference 1-32 of [-_a-zA-Z0-9] */
 const CAIP2 = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
 
+/** An x402 v1 network name, such as 'base-sepolia' */
+const V1_NAME = /^[-a-z0-9]{1,32}$/;
+
+/**
+ * A network as the SDK reports it in receipts and price messages (#159): the
+ * x402 v1 name, whichever version was used. A CAIP-2 ID maps through the
+ * configured pair (`network` / `v1Network`), then the known networks. A
+ * well-formed CAIP-2 ID with no known v1 name is returned as is. Anything that
+ * is neither form, or not a string, is undefined: gateway text is untrusted.
+ */
+export function networkName(id: unknown, policy?: PaymentPolicy): string | undefined {
+  if (typeof id !== 'string') return undefined;
+  if (policy && id === policy.networkByVersion.get(2)) return policy.networkByVersion.get(1);
+  const known = NETWORK_BY_ID.get(id);
+  if (known) return known.name;
+  return V1_NAME.test(id) || CAIP2.test(id) ? id : undefined;
+}
+
 /** Known network records by any of their identifiers (v1 name or v2 CAIP-2) */
 const NETWORK_BY_ID: ReadonlyMap<string, (typeof NETWORKS)[number]> = new Map(
   NETWORKS.flatMap((n) => [[n.name, n], [n.v2, n]] as const)

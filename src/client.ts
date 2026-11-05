@@ -49,6 +49,7 @@ import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfter
 import {
   decodePaymentHeader,
   formatAtomic,
+  networkName,
   untilAborted,
   createX402Transport,
   resolvePaymentPolicy,
@@ -1163,7 +1164,7 @@ export class ProvenanceClient {
     if (isWalletRejection(state.creationFailure) || ((state.creationFailure !== undefined || state.handedToLibrary) && isWalletRejection(error))) {
       // The person declined to sign in the wallet: a refusal, not a failure (#112)
       const request = state.approved;
-      const price = request ? describePrice(request, this.paymentPolicy?.decimals) : undefined;
+      const price = request ? describePrice(request, this.paymentPolicy?.decimals, this.paymentPolicy) : undefined;
       return new PaymentRefusedError(
         `Payment refused: the signature was rejected in the wallet${
           request ? ` (${price ?? `${request.amount} on ${request.network}`} to ${request.payTo})` : ''
@@ -1241,7 +1242,7 @@ export class ProvenanceClient {
   /** Set error.payment and say so in the message if the request was paid */
   private withPayment<E extends ProvenanceError>(failure: E, response: Response): E {
     if (this.paidResponses.has(response)) {
-      failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
+      failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy);
       failure.message += ' (a payment was sent with this request and may have been charged)';
     }
     return failure;
@@ -1259,7 +1260,7 @@ export class ProvenanceClient {
     if (/^free/i.test(response.headers.get('X-Payment-Mode') ?? '')) return undefined;
     const settle = settleResponse(response);
     if (settle && settle['success'] === false) return undefined;
-    return receiptFields(response, settle, paid.approved, this.paymentPolicy?.decimals);
+    return receiptFields(response, settle, paid.approved, this.paymentPolicy);
   }
 
   /**
@@ -1294,7 +1295,7 @@ export class ProvenanceClient {
 
     // The price asked: the PAYMENT-REQUIRED header first, then the body (#167)
     const price =
-      response.status === 402 ? priceOf(response.headers, isRecord(parsed) ? parsed : undefined) : undefined;
+      response.status === 402 ? priceOf(response.headers, isRecord(parsed) ? parsed : undefined, this.paymentPolicy) : undefined;
     if (price) {
       // The gateway's message is cut to leave room for the price, so the price
       // always shows and the two together stay within the cap
@@ -1303,7 +1304,7 @@ export class ProvenanceClient {
     }
 
     const paid = this.paidResponses.has(response);
-    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals) : undefined;
+    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy) : undefined;
     if (payment && typeof fields['nonce'] === 'string' && fields['nonce']) payment.nonce = fields['nonce'];
     if (payment && !payment.transaction && typeof bodyTransaction === 'string') payment.transaction = bodyTransaction;
 
@@ -1703,19 +1704,26 @@ function reported(value: unknown): string | undefined {
  * What a paid response says about its payment: the transaction (header, else
  * receipt), network and payer (receipt; network falls back to the signed
  * requirement), and the amount the SDK signed. The amount is never taken from
- * the gateway: its receipt has none.
+ * the gateway: its receipt has none. The network is always the x402 v1 name
+ * (#159): a receipt network with no v1 name, or a malformed one, is replaced by
+ * the signed network's.
  */
 function receiptFields(
   response: Response,
   settle: Record<string, unknown> | undefined,
   approved: PaymentRequest | undefined,
-  decimals: number | undefined
+  policy: PaymentPolicy | undefined
 ): PaymentReceipt {
+  const decimals = policy?.decimals;
+  const v1Name = (id: unknown) => {
+    const name = networkName(reported(id), policy);
+    return name && !name.includes(':') ? name : undefined;
+  };
   const receipt: PaymentReceipt = {};
   // The gateway sends "unknown" when it has no transaction to name
   const transaction = reported(response.headers.get('X-Payment-Transaction')) ?? reported(settle?.['transaction']);
   if (transaction) receipt.transaction = transaction;
-  const network = reported(settle?.['network']) ?? reported(approved?.network);
+  const network = v1Name(settle?.['network']) ?? v1Name(approved?.network);
   if (network) receipt.network = network;
   const payer = reported(settle?.['payer']);
   if (payer) receipt.payer = payer;
@@ -1734,11 +1742,11 @@ function receiptFields(
  * are added only with a decodable receipt header: without one the SDK cannot
  * tell whether, or on what terms, the payment settled.
  */
-function paymentAttempt(response: Response, paid: PaidAttempt, decimals: number | undefined): PaymentAttempt {
+function paymentAttempt(response: Response, paid: PaidAttempt, policy: PaymentPolicy | undefined): PaymentAttempt {
   const attempt: PaymentAttempt = { paymentSent: true };
   if (paid.idempotencyKey !== undefined) attempt.idempotencyKey = paid.idempotencyKey;
   const settle = settleResponse(response);
-  const fields = receiptFields(response, settle, settle ? paid.approved : undefined, decimals);
+  const fields = receiptFields(response, settle, settle ? paid.approved : undefined, policy);
   if (fields.transaction) attempt.transaction = fields.transaction;
   if (settle) {
     if (fields.network) attempt.network = fields.network;
@@ -1956,31 +1964,41 @@ function paymentRequestOf(
 }
 
 /** The price a 402 asks, e.g. "0.01 USDC on base-sepolia"; options joined with "or". Never the raw JSON. */
-function priceOf(headers: Headers, data: Record<string, unknown> | undefined): string | undefined {
+function priceOf(
+  headers: Headers,
+  data: Record<string, unknown> | undefined,
+  policy: PaymentPolicy | undefined
+): string | undefined {
   const request = paymentRequestOf(headers, data);
   if (!request) return undefined;
   const prices = request.accepts
     .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
-    .map((o) => describePrice(toPaymentRequest(request.x402Version, o)))
+    .map((o) => describePrice(toPaymentRequest(request.x402Version, o), undefined, policy))
     .filter((p): p is string => p !== undefined);
   if (prices.length === 0) return undefined;
   const shown = prices.slice(0, MAX_PRICES_SHOWN).join(' or ');
   return prices.length > MAX_PRICES_SHOWN ? `${shown} (and ${prices.length - MAX_PRICES_SHOWN} more)` : shown;
 }
 
+/** Longest amount shown in a price, in digits: more than any token supply */
+const MAX_AMOUNT_DIGITS = 78;
+
 /**
  * A requested payment as a price, e.g. "0.01 USDC on base-sepolia". USDC is
  * known to have 6 decimals; another asset uses `decimals` (the policy's) when
- * given, else is shown in its smallest units. Undefined if the amount is not an integer.
+ * given, else is shown in its smallest units. Undefined if the amount is not an
+ * integer. The network is named the x402 v1 way, as receipts name it (#159).
+ * The 402 is untrusted: a network or asset that is not well formed shows as '?'.
  */
-function describePrice(request: PaymentRequest, decimals?: number): string | undefined {
-  if (!/^\d+$/.test(request.amount)) return undefined;
-  const network = request.network || '?';
+function describePrice(request: PaymentRequest, decimals?: number, policy?: PaymentPolicy): string | undefined {
+  if (!/^\d+$/.test(request.amount) || request.amount.length > MAX_AMOUNT_DIGITS) return undefined;
+  const network = networkName(request.network, policy) ?? '?';
+  const asset = isAddress(request.asset) ? request.asset : '?';
   const usdc = Object.hasOwn(USDC_BY_NETWORK, request.network) ? USDC_BY_NETWORK[request.network] : undefined;
   if (usdc && usdc.toLowerCase() === request.asset.toLowerCase()) {
     return `${formatAtomic(BigInt(request.amount), 6)} USDC on ${network}`;
   }
   return decimals !== undefined
-    ? `${formatAtomic(BigInt(request.amount), decimals)} of token ${request.asset || '?'} on ${network}`
-    : `${request.amount} smallest units of ${request.asset || '?'} on ${network}`;
+    ? `${formatAtomic(BigInt(request.amount), decimals)} of token ${asset} on ${network}`
+    : `${request.amount} smallest units of ${asset} on ${network}`;
 }

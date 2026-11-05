@@ -268,3 +268,32 @@ describe('createX402Fetch', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('networkName: one network format in receipts and prices (#159)', () => {
+  it('names every network the x402 v1 way, through the configured pair first', async () => {
+    const { networkName, resolvePaymentPolicy } = await import('../../src/payment.js');
+    const wallet = {
+      address: '0x1234567890abcdef1234567890abcdef12345678' as `0x${string}`,
+      signTypedData: vi.fn(),
+      readContract: vi.fn(),
+    };
+    expect(networkName('eip155:84532')).toBe('base-sepolia');
+    expect(networkName('eip155:8453')).toBe('base');
+    expect(networkName('base-sepolia')).toBe('base-sepolia');
+    expect(networkName('polygon')).toBe('polygon');
+    expect(networkName('eip155:137')).toBe('eip155:137');
+    const polygon = resolvePaymentPolicy({
+      wallet,
+      network: 'eip155:137',
+      v1Network: 'polygon',
+      asset: '0x2222222222222222222222222222222222222222',
+      assetDecimals: 6,
+      assetDomain: { name: 'Token', version: '1' },
+      maxAmount: '1',
+    });
+    expect(networkName('eip155:137', polygon)).toBe('polygon');
+    for (const bad of ['', 'Base Sepolia', '<b>', 'x'.repeat(40), 42, undefined, null]) {
+      expect(networkName(bad)).toBeUndefined();
+    }
+  });
+});

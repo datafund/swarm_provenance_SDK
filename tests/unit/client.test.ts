@@ -1806,19 +1806,39 @@ describe('ProvenanceClient', () => {
         mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request()) }));
         const error = await upload();
         expect(error).toBeInstanceOf(GatewayConnectionError);
-        expect(error.message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on eip155:84532)');
+        expect(error.message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on base-sepolia)');
       });
 
       it('a header-only v2 402 with a body that is not JSON still names the price', async () => {
         mockFetch.mockResolvedValueOnce(answer('', { 'PAYMENT-REQUIRED': encode(v2Request()) }));
-        expect((await upload()).message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on eip155:84532)');
+        expect((await upload()).message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on base-sepolia)');
       });
 
       it('a dual-mode 402 (v1 body, v2 header) names the header price, as @x402/core pays it', async () => {
         mockFetch.mockResolvedValueOnce(answer(JSON.stringify(x402Body), { 'PAYMENT-REQUIRED': encode(v2Request()) }));
         const error = await upload();
-        expect(error.message).toContain('(price: 0.025 USDC on eip155:84532)');
+        expect(error.message).toContain('(price: 0.025 USDC on base-sepolia)');
         expect(error.message).not.toContain('0.01 USDC');
+      });
+
+      it('header text that is not a network, address or amount never reaches the message', async () => {
+        const evil = '<script>alert(1)</script>';
+        const accepts = [
+          { ...x402Body.accepts[0]!, network: evil, asset: evil, amount: '5', maxAmountRequired: undefined },
+          { ...x402Body.accepts[0]!, network: 'eip155:84532', amount: evil, maxAmountRequired: undefined },
+        ];
+        mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request(accepts)) }));
+        const error = await upload();
+        expect(error.message).toBe('Gateway error: 402 Payment Required (price: 5 smallest units of ? on ?)');
+        expect(error.message).not.toContain('script');
+      });
+
+      it('a CAIP-2 network with no known v1 name is shown as offered', async () => {
+        const accepts = [{ ...x402Body.accepts[0]!, network: 'eip155:137', asset: '0x2222222222222222222222222222222222222222', amount: '7' }];
+        mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request(accepts)) }));
+        expect((await upload()).message).toBe(
+          'Gateway error: 402 Payment Required (price: 7 smallest units of 0x2222222222222222222222222222222222222222 on eip155:137)'
+        );
       });
 
       it.each([
