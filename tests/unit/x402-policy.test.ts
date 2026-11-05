@@ -888,7 +888,13 @@ describe('review round 4 (#138)', () => {
     ).not.toThrow();
   });
 
-  it('an undecodable PAYMENT-REQUIRED header falls back to the v1 body', async () => {
+  // A header the SDK cannot read is removed, so the library pays v1 from the body too (#209)
+  it.each([
+    ['undecodable', '%%%not-base64%%%'],
+    ['not a JSON object', Buffer.from('[1]').toString('base64')],
+    ['over 8192 characters', Buffer.from(JSON.stringify({ x402Version: 2, accepts: [], pad: 'x'.repeat(7000) })).toString('base64')],
+  ])('a PAYMENT-REQUIRED header that is %s falls back to the v1 body', async (_name, header) => {
+    let sentV1 = false;
     vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
       const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
       if (!headers.has('X-PAYMENT') && !headers.has('PAYMENT-SIGNATURE')) {
@@ -896,15 +902,17 @@ describe('review round 4 (#138)', () => {
         return Promise.resolve(
           new Response(JSON.stringify({ detail: { x402Version: 1, accepts } }), {
             status: 402,
-            headers: { 'PAYMENT-REQUIRED': '%%%not-base64%%%' },
+            headers: { 'PAYMENT-REQUIRED': header },
           }),
         );
       }
+      sentV1 = headers.has('X-PAYMENT') && !headers.has('PAYMENT-SIGNATURE');
       return gateway(input, init);
     });
     try {
       await client().upload('hello', { stampId: STAMP });
       expect(payments()).toBe(1);
+      expect(sentV1).toBe(true);
     } finally {
       vi.stubGlobal('fetch', gateway);
     }

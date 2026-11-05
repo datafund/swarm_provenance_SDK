@@ -60,15 +60,58 @@ describe('pricing()', () => {
       minPriceUsd: 0.01,
       freeTier: { enabled: true, header: 'X-Payment-Mode: free' },
       quotes: {
-        stampPurchase: { method: 'POST', path: '/api/v1/stamps/', priceUsd: 0.5, maxAmountRequired: '500000', description: 'Stamp purchase' },
-        poolAcquire: { method: 'POST', path: '/api/v1/pool/acquire', priceUsd: 0.25, maxAmountRequired: '250000', description: 'Pool acquire' },
-        dataUpload: { method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, maxAmountRequired: '10000', description: 'Data upload' },
-        bandwidthCredit: { method: 'POST', path: '/api/v1/chunks/credit', priceUsd: 0.02, maxAmountRequired: '20000', description: 'Bandwidth credit' },
+        stampPurchase: { method: 'POST', path: '/api/v1/stamps/', priceUsd: 0.5, amount: '500000', maxAmountRequired: '500000', description: 'Stamp purchase' },
+        poolAcquire: { method: 'POST', path: '/api/v1/pool/acquire', priceUsd: 0.25, amount: '250000', maxAmountRequired: '250000', description: 'Pool acquire' },
+        dataUpload: { method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, amount: '10000', maxAmountRequired: '10000', description: 'Data upload' },
+        bandwidthCredit: { method: 'POST', path: '/api/v1/chunks/credit', priceUsd: 0.02, amount: '20000', maxAmountRequired: '20000', description: 'Bandwidth credit' },
       },
     });
     const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toBe(`${GATEWAY}/api/v1/pricing`);
     expect((init?.method ?? 'GET').toUpperCase()).toBe('GET');
+  });
+
+  describe('amount (D8, #209)', () => {
+    const one = (fields: Record<string, unknown>) => ({
+      x402_enabled: true,
+      quotes: { data_upload: { method: 'POST', path: '/api/v1/data/', price_usd: 0.01, description: 'Data upload', ...fields } },
+    });
+    const expected = { method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, amount: '10000', maxAmountRequired: '10000', description: 'Data upload' };
+
+    it.each([
+      ['only max_amount_required (a gateway before #602)', { max_amount_required: '10000' }],
+      ['both, equal', { amount: '10000', max_amount_required: '10000' }],
+      ['only amount (a gateway after v1 removal)', { amount: '10000' }],
+      ['amount, and max_amount_required null', { amount: '10000', max_amount_required: null }],
+    ])('%s: amount and the deprecated maxAmountRequired carry the same value', async (_name, fields) => {
+      mockFetch.mockResolvedValueOnce(json(200, one(fields)));
+      expect((await client().pricing()).quotes.dataUpload).toEqual(expected);
+    });
+
+    it.each([
+      ['empty', ''],
+      ['not digits', 'abc'],
+      ['a decimal', '1.5'],
+      ['79 digits', '1'.repeat(79)],
+    ])('an amount that is %s is refused as INVALID_RESPONSE, in either field', async (_name, value) => {
+      for (const fields of [{ amount: value }, { max_amount_required: value }, { amount: value, max_amount_required: value }]) {
+        mockFetch.mockResolvedValueOnce(json(200, one(fields)));
+        const error = await client().pricing().catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      }
+    });
+
+    it('78 digits is accepted', async () => {
+      const big = '9'.repeat(78);
+      mockFetch.mockResolvedValueOnce(json(200, one({ amount: big })));
+      expect((await client().pricing()).quotes.dataUpload?.amount).toBe(big);
+    });
+
+    it('a quote whose amount and max_amount_required disagree is refused', async () => {
+      mockFetch.mockResolvedValueOnce(json(200, one({ amount: '1', max_amount_required: '10000' })));
+      await expect(client().pricing()).rejects.toThrow(/equal if both are sent/);
+    });
   });
 
   it('returns only x402Enabled and empty quotes when the gateway does not charge', async () => {

@@ -6,7 +6,11 @@ export interface PaymentAttempt {
   transaction?: string;
   /** Gateway-reported payment status, if any */
   status?: string;
-  /** Network the payment was made on: the receipt's, else the one signed for */
+  /**
+   * Network the payment was made on: the receipt's, else the one signed for.
+   * Always the x402 v1 name ('base-sepolia', 'base', or `payment.v1Network`),
+   * whichever x402 version paid (#159); CAIP-2 with x402 v1's removal (#210).
+   */
   network?: string;
   /** Paying address, from the gateway's receipt, if it sent one */
   payer?: string;

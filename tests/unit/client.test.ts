@@ -1770,6 +1770,88 @@ describe('ProvenanceClient', () => {
       expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
     });
 
+    // Pins (#209): the exact message for today's v1-only 402s, top level and under detail
+    it('pin: the exact message of a v1 402 in the body, top level or under detail', async () => {
+      const expected = `${x402Body.error} (price: 0.01 USDC on base-sepolia)`;
+      for (const body of [{ ...x402Body, code: 'HTTP_402', message: x402Body.error }, { detail: x402Body }]) {
+        mockFetch.mockResolvedValueOnce(json(body, 402, 'Payment Required'));
+        const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+        expect((error as Error).message).toBe(expected);
+        expect((error as GatewayConnectionError).statusCode).toBe(402);
+      }
+    });
+
+    it('pin: a v1 402 for another token or network names it as offered', async () => {
+      const option = { ...x402Body.accepts[0]!, network: 'polygon', asset: '0x2222222222222222222222222222222222222222', maxAmountRequired: '7' };
+      mockFetch.mockResolvedValueOnce(json({ ...x402Body, accepts: [option] }, 402));
+      const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(
+        `${x402Body.error} (price: 7 smallest units of 0x2222222222222222222222222222222222222222 on polygon)`
+      );
+    });
+
+    describe('x402 v2: the price from the PAYMENT-REQUIRED header (#167, #209)', () => {
+      const v2Request = (accepts: unknown[] = [{ ...x402Body.accepts[0]!, network: 'eip155:84532', amount: '25000', maxAmountRequired: undefined }]) => ({
+        x402Version: 2,
+        error: 'Payment required',
+        resource: { url: 'http://gateway.test/api/v1/data/' },
+        accepts,
+      });
+      const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
+      const answer = (body: string, headers: Record<string, string>) =>
+        new Response(body, { status: 402, statusText: 'Payment Required', headers: { 'content-type': 'application/json', ...headers } });
+      const upload = () => new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e) as Promise<Error>;
+
+      it("a header-only v2 402 in 'none' mode names the v2 price", async () => {
+        mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request()) }));
+        const error = await upload();
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect(error.message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on base-sepolia)');
+      });
+
+      it('a header-only v2 402 with a body that is not JSON still names the price', async () => {
+        mockFetch.mockResolvedValueOnce(answer('', { 'PAYMENT-REQUIRED': encode(v2Request()) }));
+        expect((await upload()).message).toBe('Gateway error: 402 Payment Required (price: 0.025 USDC on base-sepolia)');
+      });
+
+      it('a dual-mode 402 (v1 body, v2 header) names the header price, as @x402/core pays it', async () => {
+        mockFetch.mockResolvedValueOnce(answer(JSON.stringify(x402Body), { 'PAYMENT-REQUIRED': encode(v2Request()) }));
+        const error = await upload();
+        expect(error.message).toContain('(price: 0.025 USDC on base-sepolia)');
+        expect(error.message).not.toContain('0.01 USDC');
+      });
+
+      it('header text that is not a network, address or amount never reaches the message', async () => {
+        const evil = '<script>alert(1)</script>';
+        const accepts = [
+          { ...x402Body.accepts[0]!, network: evil, asset: evil, amount: '5', maxAmountRequired: undefined },
+          { ...x402Body.accepts[0]!, network: 'eip155:84532', amount: evil, maxAmountRequired: undefined },
+        ];
+        mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request(accepts)) }));
+        const error = await upload();
+        expect(error.message).toBe('Gateway error: 402 Payment Required (price: 5 smallest units of ? on ?)');
+        expect(error.message).not.toContain('script');
+      });
+
+      it('a CAIP-2 network with no known v1 name is shown as offered', async () => {
+        const accepts = [{ ...x402Body.accepts[0]!, network: 'eip155:137', asset: '0x2222222222222222222222222222222222222222', amount: '7' }];
+        mockFetch.mockResolvedValueOnce(answer('{}', { 'PAYMENT-REQUIRED': encode(v2Request(accepts)) }));
+        expect((await upload()).message).toBe(
+          'Gateway error: 402 Payment Required (price: 7 smallest units of 0x2222222222222222222222222222222222222222 on eip155:137)'
+        );
+      });
+
+      it.each([
+        ['undecodable', '%%%not-base64%%%'],
+        ['too long', encode({ ...v2Request(), padding: 'x'.repeat(9000) })],
+        ['not an object', encode([v2Request()])],
+        ['without accepts', encode({ x402Version: 2, error: 'Payment required' })],
+      ])('a PAYMENT-REQUIRED header that is %s falls back to the body price', async (_name, header) => {
+        mockFetch.mockResolvedValueOnce(answer(JSON.stringify(x402Body), { 'PAYMENT-REQUIRED': header }));
+        expect((await upload()).message).toBe(`${x402Body.error} (price: 0.01 USDC on base-sepolia)`);
+      });
+    });
+
     it('a non-JSON error body is kept as text, capped at 4096 characters', async () => {
       const page = `<html><body>${'Bad gateway. '.repeat(1000)}</body></html>`;
       mockFetch.mockResolvedValueOnce(new Response(page, { status: 502, statusText: 'Bad Gateway' }));
@@ -2162,6 +2244,9 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
     ['pricing', 'quote that is not an object', { ...PRICING, quotes: { data_upload: 'cheap' } }],
     ['pricing', 'quote without price_usd', { ...PRICING, quotes: { data_upload: { ...QUOTE, price_usd: undefined } } }],
     ['pricing', 'quote whose max_amount_required is a number', { ...PRICING, quotes: { data_upload: { ...QUOTE, max_amount_required: 10000 } } }],
+    ['pricing', 'quote whose amount is a number', { ...PRICING, quotes: { data_upload: { ...QUOTE, amount: 10000 } } }],
+    ['pricing', 'quote without amount or max_amount_required', { ...PRICING, quotes: { data_upload: { ...QUOTE, max_amount_required: undefined } } }],
+    ['pricing', 'quote whose amount and max_amount_required disagree', { ...PRICING, quotes: { data_upload: { ...QUOTE, amount: '99000000' } } }],
     ['pricing', 'quote without a description', { ...PRICING, quotes: { data_upload: { ...QUOTE, description: undefined } } }],
     ['pricing', 'free_tier without a header', { ...PRICING, free_tier: { enabled: true } }],
     ['pricing', 'free_tier that is a boolean', { ...PRICING, free_tier: true }],
@@ -2264,7 +2349,7 @@ describe('pricing(), acquireStamp() and upload() success bodies that are not the
       freeTier: { enabled: true, header: 'X-Payment-Mode: free' },
     });
     expect(Object.keys(pricing.quotes).sort()).toEqual(['bandwidthCredit', 'dataUpload', 'poolAcquire', 'stampPurchase']);
-    expect(pricing.quotes.dataUpload).toEqual({ method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, maxAmountRequired: '10000', description: 'Upload' });
+    expect(pricing.quotes.dataUpload).toEqual({ method: 'POST', path: '/api/v1/data/', priceUsd: 0.01, amount: '10000', maxAmountRequired: '10000', description: 'Upload' });
   });
 
   it('pricing() accepts an answer without the pool and bandwidth quotes, with the free tier off', async () => {

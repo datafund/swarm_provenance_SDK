@@ -47,8 +47,9 @@ import { verifyAllSignatures } from './notary.js';
 import { canonicalizeJsonText, notJsonError, NOT_REPRESENTABLE } from './canonical-json.js';
 import { toBytes, isAddress, ownerProofMessage, referencePathSegment, retryAfterSeconds, sha256Hex, base64ToBytes } from './utils.js';
 import {
-  base64Decode,
+  decodePaymentHeader,
   formatAtomic,
+  networkName,
   untilAborted,
   createX402Transport,
   resolvePaymentPolicy,
@@ -299,7 +300,8 @@ export class ProvenanceClient {
       throw this.shapeError(
         'a JSON object with boolean "x402_enabled", and optional fields of the expected types ' +
           '(string "currency", "network", "asset" and "pay_to", number "min_price_usd", object "free_tier" ' +
-          'with boolean "enabled" and string "header", object "quotes" of price quotes)',
+          'with boolean "enabled" and string "header", object "quotes" of price quotes, each with string ' +
+          '"amount" or "max_amount_required" of 1-78 digits, equal if both are sent)',
         response
       );
     }
@@ -1163,7 +1165,7 @@ export class ProvenanceClient {
     if (isWalletRejection(state.creationFailure) || ((state.creationFailure !== undefined || state.handedToLibrary) && isWalletRejection(error))) {
       // The person declined to sign in the wallet: a refusal, not a failure (#112)
       const request = state.approved;
-      const price = request ? describePrice(request, this.paymentPolicy?.decimals) : undefined;
+      const price = request ? describePrice(request, this.paymentPolicy?.decimals, this.paymentPolicy) : undefined;
       return new PaymentRefusedError(
         `Payment refused: the signature was rejected in the wallet${
           request ? ` (${price ?? `${request.amount} on ${request.network}`} to ${request.payTo})` : ''
@@ -1241,7 +1243,7 @@ export class ProvenanceClient {
   /** Set error.payment and say so in the message if the request was paid */
   private withPayment<E extends ProvenanceError>(failure: E, response: Response): E {
     if (this.paidResponses.has(response)) {
-      failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals);
+      failure.payment = paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy);
       failure.message += ' (a payment was sent with this request and may have been charged)';
     }
     return failure;
@@ -1259,7 +1261,7 @@ export class ProvenanceClient {
     if (/^free/i.test(response.headers.get('X-Payment-Mode') ?? '')) return undefined;
     const settle = settleResponse(response);
     if (settle && settle['success'] === false) return undefined;
-    return receiptFields(response, settle, paid.approved, this.paymentPolicy?.decimals);
+    return receiptFields(response, settle, paid.approved, this.paymentPolicy);
   }
 
   /**
@@ -1285,13 +1287,6 @@ export class ProvenanceClient {
         if (typeof fields['suggestion'] === 'string') suggestion = fields['suggestion'];
       }
       bodyTransaction = reported(fields['transaction']) ?? reported(data['transaction']);
-      const price = response.status === 402 ? priceOf(data) : undefined;
-      if (price) {
-        // The gateway's message is cut to leave room for the price, so the price
-        // always shows and the two together stay within the cap
-        const suffix = ` (price: ${price})`;
-        message = suffix.length < MAX_ERROR_TEXT ? `${capText(message, MAX_ERROR_TEXT - suffix.length)}${suffix}` : capText(`${message}${suffix}`);
-      }
     } else if (response.status === 413) {
       // Not the gateway's JSON 413 (FILE_TOO_LARGE): the proxy in front of it refused the body
       code = 'FILE_TOO_LARGE';
@@ -1299,8 +1294,18 @@ export class ProvenanceClient {
       message = `Upload too large: the gateway's proxy refused the request body (${status}). Send less data.`;
     }
 
+    // The price asked: the PAYMENT-REQUIRED header first, then the body (#167)
+    const price =
+      response.status === 402 ? priceOf(response.headers, isRecord(parsed) ? parsed : undefined, this.paymentPolicy) : undefined;
+    if (price) {
+      // The gateway's message is cut to leave room for the price, so the price
+      // always shows and the two together stay within the cap
+      const suffix = ` (price: ${price})`;
+      message = suffix.length < MAX_ERROR_TEXT ? `${capText(message, MAX_ERROR_TEXT - suffix.length)}${suffix}` : capText(`${message}${suffix}`);
+    }
+
     const paid = this.paidResponses.has(response);
-    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy?.decimals) : undefined;
+    const payment = paid ? paymentAttempt(response, this.paidResponses.get(response)!, this.paymentPolicy) : undefined;
     if (payment && typeof fields['nonce'] === 'string' && fields['nonce']) payment.nonce = fields['nonce'];
     if (payment && !payment.transaction && typeof bodyTransaction === 'string') payment.transaction = bodyTransaction;
 
@@ -1607,16 +1612,28 @@ function optionalOf(value: unknown, type: 'string' | 'number'): boolean {
   return value === undefined || value === null || typeof value === type;
 }
 
-/** A price quote with every field toPriceQuote() copies */
+/**
+ * A price quote with every field toPriceQuote() copies. The amount is `amount`
+ * (D8, swarm_connect#602) or the deprecated `max_amount_required`, at least one
+ * set; each absent, null or an integer string of 1-78 digits (ATOMIC_AMOUNT);
+ * equal when both are sent.
+ */
 function isPriceQuote(value: unknown): value is GatewayPriceQuote {
-  return (
-    isRecord(value) &&
-    typeof value['method'] === 'string' &&
-    typeof value['path'] === 'string' &&
-    typeof value['price_usd'] === 'number' &&
-    typeof value['max_amount_required'] === 'string' &&
-    typeof value['description'] === 'string'
-  );
+  if (
+    !isRecord(value) ||
+    typeof value['method'] !== 'string' ||
+    typeof value['path'] !== 'string' ||
+    typeof value['price_usd'] !== 'number' ||
+    typeof value['description'] !== 'string'
+  ) {
+    return false;
+  }
+  const amount = value['amount'];
+  const max = value['max_amount_required'];
+  const valid = (v: unknown) => v === undefined || v === null || (typeof v === 'string' && ATOMIC_AMOUNT.test(v));
+  if (!valid(amount) || !valid(max)) return false;
+  if (typeof amount !== 'string' && typeof max !== 'string') return false;
+  return typeof amount !== 'string' || typeof max !== 'string' || amount === max;
 }
 
 /**
@@ -1682,16 +1699,14 @@ interface PaidAttempt {
   approved?: PaymentRequest;
 }
 
-/** The decoded PAYMENT-RESPONSE (v2) or X-PAYMENT-RESPONSE (v1): the facilitator's SettleResponse */
+/**
+ * The facilitator's SettleResponse: the decoded PAYMENT-RESPONSE (v2), else
+ * X-PAYMENT-RESPONSE (v1), in @x402/core's order (D4). The first non-empty
+ * header decides, as in @x402/core (an empty PAYMENT-RESPONSE falls through):
+ * one that does not decode (or is too long) counts as no receipt.
+ */
 function settleResponse(response: Response): Record<string, unknown> | undefined {
-  const encoded = response.headers.get('PAYMENT-RESPONSE') ?? response.headers.get('X-PAYMENT-RESPONSE');
-  if (!encoded) return undefined;
-  try {
-    const decoded = JSON.parse(base64Decode(encoded)) as unknown;
-    return decoded && typeof decoded === 'object' && !Array.isArray(decoded) ? (decoded as Record<string, unknown>) : undefined;
-  } catch {
-    return undefined; // not decodable: as if absent
-  }
+  return decodePaymentHeader(response.headers.get('PAYMENT-RESPONSE') || response.headers.get('X-PAYMENT-RESPONSE'));
 }
 
 /** A non-empty string that is not the gateway's "unknown" placeholder */
@@ -1703,19 +1718,26 @@ function reported(value: unknown): string | undefined {
  * What a paid response says about its payment: the transaction (header, else
  * receipt), network and payer (receipt; network falls back to the signed
  * requirement), and the amount the SDK signed. The amount is never taken from
- * the gateway: its receipt has none.
+ * the gateway: its receipt has none. The network is always the x402 v1 name
+ * (#159): a receipt network with no v1 name, or a malformed one, is replaced by
+ * the signed network's.
  */
 function receiptFields(
   response: Response,
   settle: Record<string, unknown> | undefined,
   approved: PaymentRequest | undefined,
-  decimals: number | undefined
+  policy: PaymentPolicy | undefined
 ): PaymentReceipt {
+  const decimals = policy?.decimals;
+  const v1Name = (id: unknown) => {
+    const name = networkName(reported(id), policy);
+    return name && !name.includes(':') ? name : undefined;
+  };
   const receipt: PaymentReceipt = {};
   // The gateway sends "unknown" when it has no transaction to name
   const transaction = reported(response.headers.get('X-Payment-Transaction')) ?? reported(settle?.['transaction']);
   if (transaction) receipt.transaction = transaction;
-  const network = reported(settle?.['network']) ?? reported(approved?.network);
+  const network = v1Name(settle?.['network']) ?? v1Name(approved?.network);
   if (network) receipt.network = network;
   const payer = reported(settle?.['payer']);
   if (payer) receipt.payer = payer;
@@ -1734,11 +1756,11 @@ function receiptFields(
  * are added only with a decodable receipt header: without one the SDK cannot
  * tell whether, or on what terms, the payment settled.
  */
-function paymentAttempt(response: Response, paid: PaidAttempt, decimals: number | undefined): PaymentAttempt {
+function paymentAttempt(response: Response, paid: PaidAttempt, policy: PaymentPolicy | undefined): PaymentAttempt {
   const attempt: PaymentAttempt = { paymentSent: true };
   if (paid.idempotencyKey !== undefined) attempt.idempotencyKey = paid.idempotencyKey;
   const settle = settleResponse(response);
-  const fields = receiptFields(response, settle, settle ? paid.approved : undefined, decimals);
+  const fields = receiptFields(response, settle, settle ? paid.approved : undefined, policy);
   if (fields.transaction) attempt.transaction = fields.transaction;
   if (settle) {
     if (fields.network) attempt.network = fields.network;
@@ -1761,13 +1783,15 @@ function withPayment<E extends ProvenanceError>(target: E, source: ProvenanceErr
   return target;
 }
 
-/** A gateway price quote in the SDK's field names */
+/** A gateway price quote in the SDK's field names; isPriceQuote() guarantees one amount */
 function toPriceQuote(quote: GatewayPriceQuote): PriceQuote {
+  const amount = (quote.amount ?? quote.max_amount_required)!;
   return {
     method: quote.method,
     path: quote.path,
     priceUsd: quote.price_usd,
-    maxAmountRequired: quote.max_amount_required,
+    amount,
+    maxAmountRequired: amount,
     description: quote.description,
   };
 }
@@ -1936,41 +1960,64 @@ function composeMessage(data: GatewayErrorResponse & Record<string, unknown>): s
 /** Prices named in a 402's message; the rest are counted, and all are in `error.body` */
 const MAX_PRICES_SHOWN = 3;
 
-/** An x402 payment request: top level (the gateway now), else under the deprecated `detail` */
-function paymentRequestOf(data: Record<string, unknown>): { x402Version: number; accepts: unknown[] } | undefined {
+/**
+ * An x402 payment request, in @x402/core's order: the PAYMENT-REQUIRED header
+ * (v2) when it decodes to one, else the body's top level (the gateway now),
+ * else the deprecated `detail` copy.
+ */
+function paymentRequestOf(
+  headers: Headers,
+  data: Record<string, unknown> | undefined
+): { x402Version: number; accepts: unknown[] } | undefined {
   const isRequest = (v: unknown): v is { x402Version: number; accepts: unknown[] } =>
     Boolean(v) && typeof v === 'object' && typeof (v as { x402Version?: unknown }).x402Version === 'number' &&
     Array.isArray((v as { accepts?: unknown }).accepts);
+  const header = decodePaymentHeader(headers.get('PAYMENT-REQUIRED'));
+  if (isRequest(header)) return header;
+  if (data === undefined) return undefined;
   if (isRequest(data)) return data;
   return isRequest(data['detail']) ? data['detail'] : undefined;
 }
 
 /** The price a 402 asks, e.g. "0.01 USDC on base-sepolia"; options joined with "or". Never the raw JSON. */
-function priceOf(data: Record<string, unknown>): string | undefined {
-  const request = paymentRequestOf(data);
+function priceOf(
+  headers: Headers,
+  data: Record<string, unknown> | undefined,
+  policy: PaymentPolicy | undefined
+): string | undefined {
+  const request = paymentRequestOf(headers, data);
   if (!request) return undefined;
   const prices = request.accepts
     .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
-    .map((o) => describePrice(toPaymentRequest(request.x402Version, o)))
+    .map((o) => describePrice(toPaymentRequest(request.x402Version, o), undefined, policy))
     .filter((p): p is string => p !== undefined);
   if (prices.length === 0) return undefined;
   const shown = prices.slice(0, MAX_PRICES_SHOWN).join(' or ');
   return prices.length > MAX_PRICES_SHOWN ? `${shown} (and ${prices.length - MAX_PRICES_SHOWN} more)` : shown;
 }
 
+/** Longest amount read from the gateway, in digits: more than any token supply (2^256 has 78) */
+const MAX_AMOUNT_DIGITS = 78;
+
+/** An amount in a token's smallest unit: an integer string of 1-78 digits */
+const ATOMIC_AMOUNT = new RegExp(`^\\d{1,${MAX_AMOUNT_DIGITS}}$`);
+
 /**
  * A requested payment as a price, e.g. "0.01 USDC on base-sepolia". USDC is
  * known to have 6 decimals; another asset uses `decimals` (the policy's) when
- * given, else is shown in its smallest units. Undefined if the amount is not an integer.
+ * given, else is shown in its smallest units. Undefined if the amount is not an
+ * integer. The network is named the x402 v1 way, as receipts name it (#159).
+ * The 402 is untrusted: a network or asset that is not well formed shows as '?'.
  */
-function describePrice(request: PaymentRequest, decimals?: number): string | undefined {
-  if (!/^\d+$/.test(request.amount)) return undefined;
-  const network = request.network || '?';
+function describePrice(request: PaymentRequest, decimals?: number, policy?: PaymentPolicy): string | undefined {
+  if (!ATOMIC_AMOUNT.test(request.amount)) return undefined;
+  const network = networkName(request.network, policy) ?? '?';
+  const asset = isAddress(request.asset) ? request.asset : '?';
   const usdc = Object.hasOwn(USDC_BY_NETWORK, request.network) ? USDC_BY_NETWORK[request.network] : undefined;
   if (usdc && usdc.toLowerCase() === request.asset.toLowerCase()) {
     return `${formatAtomic(BigInt(request.amount), 6)} USDC on ${network}`;
   }
   return decimals !== undefined
-    ? `${formatAtomic(BigInt(request.amount), decimals)} of token ${request.asset || '?'} on ${network}`
-    : `${request.amount} smallest units of ${request.asset || '?'} on ${network}`;
+    ? `${formatAtomic(BigInt(request.amount), decimals)} of token ${asset} on ${network}`
+    : `${request.amount} smallest units of ${asset} on ${network}`;
 }

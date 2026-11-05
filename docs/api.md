@@ -152,7 +152,9 @@ interface PriceQuote {
   method: string;              // e.g. 'POST'
   path: string;                // e.g. '/api/v1/data/'
   priceUsd: number;
-  maxAmountRequired: string;   // smallest unit of the asset (integer string)
+  amount: string;              // smallest unit of the asset (integer string)
+  /** @deprecated Use amount (same value). Removed with x402 v1 (#210). */
+  maxAmountRequired: string;
   description: string;
 }
 ```
@@ -166,8 +168,10 @@ included, can be absent or `null`. When present, they
 must have the type they are copied as, or the call throws `INVALID_RESPONSE`: string
 `currency`, `network`, `asset` and `pay_to`, number `min_price_usd`, `free_tier` with boolean
 `enabled` and string `header`, and `quotes` as an object. Each of the four quotes, when
-present, must have string `method`, `path`, `max_amount_required` and `description` and
-number `price_usd`. After a paid request (`payForReads`), the error has `error.payment`. A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
+present, must have string `method`, `path` and `description`, number `price_usd`, and the
+amount as `amount` or `max_amount_required`: an integer string of 1-78 digits, equal when
+both are sent. `amount` and
+`maxAmountRequired` both get that value. After a paid request (`payForReads`), the error has `error.payment`. A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
 `TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
 apply.
 
@@ -256,7 +260,7 @@ interface DocumentUploadResult {
 
 interface PaymentReceipt {
   transaction?: string;        // settlement transaction, from the gateway's receipt headers
-  network?: string;
+  network?: string;            // x402 v1 name ('base-sepolia', 'base', or payment.v1Network), for v1 and v2
   payer?: string;
   amount?: string;             // amount signed, in the token's smallest unit
   amountDecimal?: string;      // amount in tokens
@@ -265,7 +269,14 @@ interface PaymentReceipt {
 }
 ```
 
-A receipt is present only when the request carried a payment the gateway accepted.
+A receipt is present only when the request carried a payment the gateway accepted. The
+receipt header is `PAYMENT-RESPONSE` (x402 v2), else `X-PAYMENT-RESPONSE` (v1); one over 8192
+characters, or that does not decode to a JSON object, counts as absent. `network` is the
+receipt's network, else the one the SDK signed for, always named the x402 v1 way: a v2
+`eip155:84532` is reported as `'base-sepolia'` (#159). A receipt network that has no v1 name,
+or is malformed, is replaced by the signed network, so `network` is always a v1 name. A 402
+price message differs: it shows a CAIP-2 ID with no known v1 name as the 402 sent it. `network`
+changes to CAIP-2 with the removal of x402 v1 (#210).
 
 **Errors:**
 
@@ -611,6 +622,15 @@ class ProvenanceError extends Error {
   ellipsis. An empty body leaves `body` unset. Codes and fields that the SDK does not map are
   here, such as the price options of a 402. `PaymentRateLimitError` has no `body`: the SDK
   throws it without reading the response body.
+- A 402 message names the price asked, for example `0.01 USDC on base-sepolia`. It is read
+  from the `PAYMENT-REQUIRED` header (x402 v2) when that decodes to a payment request, else from
+  the body's top level, else its `detail` (#167). For a header that decodes, this is the
+  option x402 mode pays. A header that decodes to a JSON object without a readable `x402Version`
+  and `accepts` is not a payment request: the message then names the body's price, while x402
+  mode refuses that 402 with `PaymentRefusedError` and pays nothing. The network is
+  named the x402 v1 way, as in `PaymentReceipt.network`; a CAIP-2 ID with no known v1 name is
+  shown as sent, and a network or token that is not well formed shows as `?`. The 402 body
+  itself, not the header, is `body`.
 - `retryAfterSeconds` is set on errors from a 429 response when the gateway sent a
   `Retry-After` the SDK can read: whole seconds or an HTTP date (#161). It is also set when
   the SDK did not retry because the wait was longer than 60 seconds. A value above
@@ -625,7 +645,7 @@ interface PaymentAttempt {
   paymentSent: true;
   transaction?: string;      // settlement transaction, if the gateway reported one
   status?: string;           // gateway-reported payment status
-  network?: string;          // network the payment was made on
+  network?: string;          // network the payment was made on, as its x402 v1 name
   payer?: string;            // paying address, from the gateway's receipt
   amount?: string;           // amount signed, in the token's smallest unit (not proof of a charge)
   amountDecimal?: string;    // amount in tokens

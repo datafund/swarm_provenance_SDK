@@ -120,8 +120,9 @@ const { reference, payment, stampPayment } = await client.upload(data);
 
 | Field | Source |
 |-------|--------|
-| `transaction` | The gateway's `X-Payment-Transaction` header, else the `transaction` in its `X-PAYMENT-RESPONSE` (v1) or `PAYMENT-RESPONSE` (v2) receipt. Its placeholder `unknown` is never reported |
-| `network`, `payer` | The receipt. `network` falls back to the network the SDK signed for |
+| `transaction` | The gateway's `X-Payment-Transaction` header, else the `transaction` in its receipt: `PAYMENT-RESPONSE` (v2), else `X-PAYMENT-RESPONSE` (v1), the order `@x402/core` reads them in. Its placeholder `unknown` is never reported |
+| `network` | Always the x402 v1 name (`'base-sepolia'`, `'base'`, or your `payment.v1Network`), whichever x402 version paid: the receipt's network, else the network the SDK signed for. A v2 receipt's `eip155:84532` is reported as `'base-sepolia'`. A receipt network that has no v1 name, or is malformed, is replaced by the signed network. (A 402 price message, by contrast, shows a CAIP-2 ID with no known v1 name as the 402 sent it.) The switch to CAIP-2 comes with the removal of x402 v1 (#210) |
+| `payer` | The receipt |
 | `amount` | What the SDK signed, in the token's smallest unit (integer string): v1 `maxAmountRequired`, v2 `amount`. The gateway's receipt has no amount |
 | `amountDecimal` | `amount` in tokens, using the policy's decimals (6 for USDC) |
 | `asset` | The token contract `amount` is in |
@@ -134,6 +135,8 @@ its receipt reports `success: false`. Errors after a payment carry the same fiel
 `error.payment`. The transaction is set whenever the gateway sent one (header, or the body's
 `transaction`, at the top level or in `detail`). Network, payer and amount are set only when the
 gateway sent a receipt header: without one the SDK cannot tell whether the payment settled.
+A receipt header longer than 8192 characters, or one that does not decode to a JSON object,
+counts as absent.
 
 When `upload()` took its stamp from the pool and then failed, the error also carries `stampId`
 (the stamp it acquired) and, if that stamp was paid for, `stampPayment` (its receipt). This holds
@@ -474,14 +477,18 @@ const prices = await client.pricing({
 //   minPriceUsd?: number, freeTier?: { enabled: boolean, header: string },
 //   quotes: { stampPurchase?, poolAcquire?, dataUpload?, bandwidthCredit? },
 // }
-// Each quote: { method, path, priceUsd: number, maxAmountRequired: string, description }
+// Each quote: { method, path, priceUsd: number, amount: string, maxAmountRequired: string, description }
 ```
 
 - Only the options you set are sent. The gateway validates them: an out-of-range value
   throws `GatewayConnectionError` with status 422 (codes `FILE_TOO_LARGE`, `TOPUP_TOO_LARGE`, or a
   validation message). If the chain price is unavailable, it throws status 503 `PRICING_UNAVAILABLE`.
-- `maxAmountRequired` is the amount the 402 would ask for, in the asset's smallest unit
-  (USDC has 6 decimals). Quotes follow the chain price, so treat them as current, not guaranteed.
+- `amount` is the amount the 402 would ask for, in the asset's smallest unit
+  (USDC has 6 decimals): the gateway's `amount`, else its `max_amount_required`. Quotes follow
+  the chain price, so treat them as current, not guaranteed. `maxAmountRequired` holds the same
+  value and is deprecated: x402 v2 names the field `amount`, and `maxAmountRequired` is removed
+  with x402 v1 (#210). A quote whose amount is not an integer string of 1-78 digits, or whose
+  `amount` and `max_amount_required` differ, is refused (`INVALID_RESPONSE`).
 - `poolAcquire` and `bandwidthCredit` appear only when the gateway offers them. There are
   no quotes for stamp extension, purchases for another owner, or manifests.
 - When x402 is off on the gateway, the result is `{ x402Enabled: false, quotes: {} }`.
@@ -607,7 +614,12 @@ text cut to 4096 characters, and for a body that is not JSON its text, also at m
 characters. A cut text ends in `…`, which counts toward the 4096. Characters are UTF-16
 code units, as JavaScript counts string length; a cut never splits a surrogate pair. A 402 message names the price asked, for
 example `0.01 USDC on base-sepolia`: at most three options, then how many more (all are in
-`error.body`). The gateway's message is cut to leave room for the price, so both fit
+`error.body`). The price is read from the `PAYMENT-REQUIRED` header (x402 v2) when that decodes
+to a payment request, else from the body. A header that decodes to a JSON object without
+`x402Version` and `accepts` is not one: the message then names the body's price, while x402 mode
+refuses that 402 with `PaymentRefusedError`. The network is named the x402 v1 way, as in the
+receipt; a CAIP-2 ID with no known v1 name is shown as sent. A network or token that is not
+well formed shows as `?`. The gateway's message is cut to leave room for the price, so both fit
 within the 4096-character cap. A signature declined in the wallet throws
 `PaymentRefusedError` (`PAYMENT_REFUSED`).
 
@@ -1125,6 +1137,16 @@ issue numbers and lists the open release-gate items.
   `INVALID_RESPONSE` when they are present but not a boolean, `null` included. After a paid
   request whose 200 body is valid JSON of the wrong shape, the message no longer advises a retry
   with the same idempotency key: it says to contact the gateway operator with the transaction.
+- x402 v2 shapes (#209). A 402 message names the price from the `PAYMENT-REQUIRED` header when
+  it decodes, else from the body (#167). `payment.network` and `error.payment.network` always
+  use the x402 v1 name, whichever x402 version paid: a v2 receipt's `'eip155:84532'` is
+  reported as `'base-sepolia'` (#159). CAIP-2 comes with the removal of x402 v1 (#210). 402 messages name networks the same way,
+  and show a network or token that is not well formed as `?`. `PriceQuote.amount` is new;
+  `maxAmountRequired` holds the same value and is deprecated. A `/pricing` quote whose amount is
+  not an integer string of 1-78 digits, or whose `amount` and `max_amount_required` differ,
+  throws `INVALID_RESPONSE`. x402 headers over 8192 characters
+  are ignored; in x402 mode such a `PAYMENT-REQUIRED` header, or one that is not a JSON object,
+  is removed, so the library pays from the v1 body.
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
   "Upload too large: the gateway's proxy refused the request body" (#112).
 - `PaymentWallet` is a type, not an interface: it requires `address` or `account.address`.
