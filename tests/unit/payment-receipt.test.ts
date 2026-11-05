@@ -296,6 +296,31 @@ describe('errors after payment carry the receipt (#111)', () => {
     expect((error as Error).message).toContain(`transaction ${TX_UPLOAD}`);
   });
 
+  it('pin (#209): a paid v1 request answered by a v1 402 names the v1 price and the v1 receipt', async () => {
+    answers[UPLOAD] = {
+      status: 402,
+      headers: { 'X-PAYMENT-RESPONSE': receipt({ success: false, transaction: '', errorReason: 'invalid_signature' }) },
+      body: { x402Version: 1, error: 'Payment verification failed', accepts: [v1Option()] },
+    };
+    const error = (await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e)) as GatewayConnectionError;
+    expect(payments).toBe(1);
+    expect(
+      error.message.startsWith(
+        'Payment verification failed (price: 0.01 USDC on base-sepolia) (a payment was sent with this request and may have been charged).'
+      )
+    ).toBe(true);
+    expect(error.payment).toEqual({
+      paymentSent: true,
+      network: 'base-sepolia',
+      payer: account.address,
+      amount: '10000',
+      amountDecimal: '0.01',
+      asset: USDC_SEPOLIA,
+      idempotencyKey: ANY_KEY,
+      stampId: STAMP,
+    });
+  });
+
   it('500 DELIVERY_FAILED_AFTER_PAYMENT (_paid_request_crashed): transaction and status, no receipt fields', async () => {
     answers[UPLOAD] = crashed(TX_UPLOAD);
     const error = await client().upload('hello', { stampId: STAMP }).catch((e: unknown) => e);

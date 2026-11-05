@@ -1770,6 +1770,26 @@ describe('ProvenanceClient', () => {
       expect((error as Error).message).toContain('0.01 USDC on base-sepolia');
     });
 
+    // Pins (#209): the exact message for today's v1-only 402s, top level and under detail
+    it('pin: the exact message of a v1 402 in the body, top level or under detail', async () => {
+      const expected = `${x402Body.error} (price: 0.01 USDC on base-sepolia)`;
+      for (const body of [{ ...x402Body, code: 'HTTP_402', message: x402Body.error }, { detail: x402Body }]) {
+        mockFetch.mockResolvedValueOnce(json(body, 402, 'Payment Required'));
+        const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+        expect((error as Error).message).toBe(expected);
+        expect((error as GatewayConnectionError).statusCode).toBe(402);
+      }
+    });
+
+    it('pin: a v1 402 for another token or network names it as offered', async () => {
+      const option = { ...x402Body.accepts[0]!, network: 'polygon', asset: '0x2222222222222222222222222222222222222222', maxAmountRequired: '7' };
+      mockFetch.mockResolvedValueOnce(json({ ...x402Body, accepts: [option] }, 402));
+      const error = await new ProvenanceClient({ payment: 'none' }).upload('hello', { stampId: STAMP }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe(
+        `${x402Body.error} (price: 7 smallest units of 0x2222222222222222222222222222222222222222 on polygon)`
+      );
+    });
+
     it('a non-JSON error body is kept as text, capped at 4096 characters', async () => {
       const page = `<html><body>${'Bad gateway. '.repeat(1000)}</body></html>`;
       mockFetch.mockResolvedValueOnce(new Response(page, { status: 502, statusText: 'Bad Gateway' }));
