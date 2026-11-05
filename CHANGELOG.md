@@ -177,8 +177,10 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 - `payment.network` and `error.payment.network` have one format: the x402 v1 name
   (`'base-sepolia'`, `'base'`, or `payment.v1Network`), whichever x402 version paid. A v2
   receipt's `'eip155:84532'` is reported as `'base-sepolia'`. 402 price messages name networks
-  the same way. v1 receipts are unchanged. The switch to CAIP-2 belongs with the removal of x402
-  v1 in the next major release (#210). (#159, #209)
+  the same way, except that a CAIP-2 ID with no known v1 name is shown as the 402 sent it. A
+  receipt network that has no v1 name, or is malformed, is replaced by the signed network.
+  Receipts for well-formed v1 networks are unchanged. The switch to CAIP-2 belongs with the
+  removal of x402 v1 in the next major release (#210). (#159, #209)
 - `PriceQuote.amount` is new: the gateway's `amount`, else its `max_amount_required`.
   `maxAmountRequired` holds the same value and is deprecated; it is removed with x402 v1 (#210).
   A quote whose two amounts differ throws `INVALID_RESPONSE`. (#209)

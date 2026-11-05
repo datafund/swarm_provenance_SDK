@@ -121,7 +121,7 @@ const { reference, payment, stampPayment } = await client.upload(data);
 | Field | Source |
 |-------|--------|
 | `transaction` | The gateway's `X-Payment-Transaction` header, else the `transaction` in its receipt: `PAYMENT-RESPONSE` (v2), else `X-PAYMENT-RESPONSE` (v1), the order `@x402/core` reads them in. Its placeholder `unknown` is never reported |
-| `network` | Always the x402 v1 name (`'base-sepolia'`, `'base'`, or your `payment.v1Network`), whichever x402 version paid: the receipt's network, else the network the SDK signed for. A v2 receipt's `eip155:84532` is reported as `'base-sepolia'`. The switch to CAIP-2 comes with the removal of x402 v1 (#210) |
+| `network` | Always the x402 v1 name (`'base-sepolia'`, `'base'`, or your `payment.v1Network`), whichever x402 version paid: the receipt's network, else the network the SDK signed for. A v2 receipt's `eip155:84532` is reported as `'base-sepolia'`. A receipt network that has no v1 name, or is malformed, is replaced by the signed network. (A 402 price message, by contrast, shows a CAIP-2 ID with no known v1 name as the 402 sent it.) The switch to CAIP-2 comes with the removal of x402 v1 (#210) |
 | `payer` | The receipt |
 | `amount` | What the SDK signed, in the token's smallest unit (integer string): v1 `maxAmountRequired`, v2 `amount`. The gateway's receipt has no amount |
 | `amountDecimal` | `amount` in tokens, using the policy's decimals (6 for USDC) |

@@ -272,8 +272,10 @@ A receipt is present only when the request carried a payment the gateway accepte
 receipt header is `PAYMENT-RESPONSE` (x402 v2), else `X-PAYMENT-RESPONSE` (v1); one over 8192
 characters, or that does not decode to a JSON object, counts as absent. `network` is the
 receipt's network, else the one the SDK signed for, always named the x402 v1 way: a v2
-`eip155:84532` is reported as `'base-sepolia'` (#159). It changes to CAIP-2 with the removal of
-x402 v1 (#210).
+`eip155:84532` is reported as `'base-sepolia'` (#159). A receipt network that has no v1 name,
+or is malformed, is replaced by the signed network, so `network` is always a v1 name. A 402
+price message differs: it shows a CAIP-2 ID with no known v1 name as the 402 sent it. `network`
+changes to CAIP-2 with the removal of x402 v1 (#210).
 
 **Errors:**
 
