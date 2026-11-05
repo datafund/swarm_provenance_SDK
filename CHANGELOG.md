@@ -168,6 +168,23 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   price options and code. Before, `error.body` was not set on it. (#163)
 - x402 mode on Node 18 without Web Crypto throws `PaymentConfigurationError` that says how to
   fix it. Before, the library failed with an unclear error. (#106, PR #138)
+- x402 v2 shapes. A 402 message names the price from the `PAYMENT-REQUIRED` header when it
+  decodes, else from the body: the order `@x402/core` pays in. So a v2 402 that sends the price
+  only in the header now names it, and a 402 with both (the gateway's planned dual mode) names
+  the v2 price the library pays. (#167, #209)
+- `payment.network` and `error.payment.network` have one format: the x402 v1 name
+  (`'base-sepolia'`, `'base'`, or `payment.v1Network`), whichever x402 version paid. A v2
+  receipt's `'eip155:84532'` is reported as `'base-sepolia'`. 402 price messages name networks
+  the same way. v1 receipts are unchanged. The switch to CAIP-2 belongs with the removal of x402
+  v1 in the next major release (#210). (#159, #209)
+- `PriceQuote.amount` is new: the gateway's `amount`, else its `max_amount_required`.
+  `maxAmountRequired` holds the same value and is deprecated; it is removed with x402 v1 (#210).
+  A quote whose two amounts differ throws `INVALID_RESPONSE`. (#209)
+- The receipt is read from `PAYMENT-RESPONSE`, then `X-PAYMENT-RESPONSE`. x402 headers longer
+  than 8192 characters, or that do not decode to a JSON object, are ignored. In x402 mode such
+  a `PAYMENT-REQUIRED` header is removed before the library reads it, so the payment is made
+  from the v1 body. A network or token in a 402 that is not well formed shows as `?` in the
+  message. (#209)
 
 ### Verification
 
