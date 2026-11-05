@@ -68,7 +68,7 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   or 128 hex characters (with an optional `0x` prefix). (#123)
 - `fromPrivateKey` is not in browser builds of `@datafund/swarm-provenance/chain`. Any runtime
   or bundler that resolves the `browser` export condition gets the build without it. (#123)
-- The `@x402/fetch` and `@x402/evm` peer range is `>=2.5.0 <2.29.0`. (#106, #110)
+- The `@x402/fetch` and `@x402/evm` peer range is `>=2.5.0 <2.31.0`. (#106, #110, #208)
 - `ChainClient.healthCheck()` makes a real `eth_call` to the contract
   (`getUserDataRecordsCount`) instead of `eth_chainId`. It returns `false` for a wrong contract
   address. (#101, PR #105)
@@ -375,13 +375,13 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
 
 - CI fails the build when new commits add a secret. (#121)
 - A local editor settings file is removed from the repository and ignored. (#121, PR #103)
-- CI runs the payment tests against `@x402/*` 2.23.0 and 2.28.0. (#110)
+- CI runs the payment tests against `@x402/*` 2.23.0, 2.28.0, 2.29.0 and 2.30.0. (#110, #208)
 - CI checks the built ESM and CJS entries, and an esbuild bundle of them, for `instanceof`
   across the main and chain entries (`scripts/verify-dist-instanceof.mjs`). (#205)
 - Integration tests use the dev gateway by default. (#119)
 - `publish.yml` publishes to npm only after the `ci.yml` matrix passes for the same commit:
-  Node 18 and 20, and the payment tests against `@x402/*` 2.23.0 and 2.28.0. It installs with
-  `--frozen-lockfile`. `ci.yml` runs with read-only repository access. (#174)
+  Node 18 and 20, and the payment tests against `@x402/*` 2.23.0, 2.28.0, 2.29.0 and 2.30.0.
+  It installs with `--frozen-lockfile`. `ci.yml` runs with read-only repository access. (#174)
 - `publish.yml` publishes to npm only after the secret scan passes for the pushed commits, and
   runs only one publish job at a time. The secret scan runs with read-only repository access.
   (#176)

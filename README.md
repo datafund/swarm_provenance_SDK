@@ -1026,7 +1026,7 @@ issue numbers and lists the open release-gate items.
   `PaymentRefusedError`. Reads use the free tier instead of being paid (`payForReads` opts
   back in), and attempts that sent a payment are not retried (#107); a failure after payment
   carries `error.payment`. On `@x402/*` 2.23+ the library's $1 default cap is
-  replaced by `maxAmount` (#110). Peer range narrowed to the tested `>=2.5.0 <2.29.0`.
+  replaced by `maxAmount` (#110). Peer range narrowed to the tested `>=2.5.0 <2.31.0`.
 - Chain writes (#115-#118): `ChainSigner` requires `getChainId()` (and may implement
   `switchChain()`); writes refuse a wrong RPC or signer chain and an address without contract
   code; success requires the contract's event in the receipt (else `ChainTransactionError`
