@@ -88,6 +88,26 @@ describe('pricing()', () => {
       expect((await client().pricing()).quotes.dataUpload).toEqual(expected);
     });
 
+    it.each([
+      ['empty', ''],
+      ['not digits', 'abc'],
+      ['a decimal', '1.5'],
+      ['79 digits', '1'.repeat(79)],
+    ])('an amount that is %s is refused as INVALID_RESPONSE, in either field', async (_name, value) => {
+      for (const fields of [{ amount: value }, { max_amount_required: value }, { amount: value, max_amount_required: value }]) {
+        mockFetch.mockResolvedValueOnce(json(200, one(fields)));
+        const error = await client().pricing().catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(GatewayConnectionError);
+        expect((error as GatewayConnectionError).code).toBe('INVALID_RESPONSE');
+      }
+    });
+
+    it('78 digits is accepted', async () => {
+      const big = '9'.repeat(78);
+      mockFetch.mockResolvedValueOnce(json(200, one({ amount: big })));
+      expect((await client().pricing()).quotes.dataUpload?.amount).toBe(big);
+    });
+
     it('a quote whose amount and max_amount_required disagree is refused', async () => {
       mockFetch.mockResolvedValueOnce(json(200, one({ amount: '1', max_amount_required: '10000' })));
       await expect(client().pricing()).rejects.toThrow(/equal if both are sent/);

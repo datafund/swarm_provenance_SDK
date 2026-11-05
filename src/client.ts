@@ -301,7 +301,7 @@ export class ProvenanceClient {
         'a JSON object with boolean "x402_enabled", and optional fields of the expected types ' +
           '(string "currency", "network", "asset" and "pay_to", number "min_price_usd", object "free_tier" ' +
           'with boolean "enabled" and string "header", object "quotes" of price quotes, each with string ' +
-          '"amount" or "max_amount_required", equal if both are sent)',
+          '"amount" or "max_amount_required" of 1-78 digits, equal if both are sent)',
         response
       );
     }
@@ -1615,7 +1615,8 @@ function optionalOf(value: unknown, type: 'string' | 'number'): boolean {
 /**
  * A price quote with every field toPriceQuote() copies. The amount is `amount`
  * (D8, swarm_connect#602) or the deprecated `max_amount_required`, at least one
- * a string; each absent, null or a string; equal when both are sent.
+ * set; each absent, null or an integer string of 1-78 digits (ATOMIC_AMOUNT);
+ * equal when both are sent.
  */
 function isPriceQuote(value: unknown): value is GatewayPriceQuote {
   if (
@@ -1629,7 +1630,8 @@ function isPriceQuote(value: unknown): value is GatewayPriceQuote {
   }
   const amount = value['amount'];
   const max = value['max_amount_required'];
-  if (!optionalOf(amount, 'string') || !optionalOf(max, 'string')) return false;
+  const valid = (v: unknown) => v === undefined || v === null || (typeof v === 'string' && ATOMIC_AMOUNT.test(v));
+  if (!valid(amount) || !valid(max)) return false;
   if (typeof amount !== 'string' && typeof max !== 'string') return false;
   return typeof amount !== 'string' || typeof max !== 'string' || amount === max;
 }
@@ -1994,8 +1996,11 @@ function priceOf(
   return prices.length > MAX_PRICES_SHOWN ? `${shown} (and ${prices.length - MAX_PRICES_SHOWN} more)` : shown;
 }
 
-/** Longest amount shown in a price, in digits: more than any token supply */
+/** Longest amount read from the gateway, in digits: more than any token supply (2^256 has 78) */
 const MAX_AMOUNT_DIGITS = 78;
+
+/** An amount in a token's smallest unit: an integer string of 1-78 digits */
+const ATOMIC_AMOUNT = new RegExp(`^\\d{1,${MAX_AMOUNT_DIGITS}}$`);
 
 /**
  * A requested payment as a price, e.g. "0.01 USDC on base-sepolia". USDC is
@@ -2005,7 +2010,7 @@ const MAX_AMOUNT_DIGITS = 78;
  * The 402 is untrusted: a network or asset that is not well formed shows as '?'.
  */
 function describePrice(request: PaymentRequest, decimals?: number, policy?: PaymentPolicy): string | undefined {
-  if (!/^\d+$/.test(request.amount) || request.amount.length > MAX_AMOUNT_DIGITS) return undefined;
+  if (!ATOMIC_AMOUNT.test(request.amount)) return undefined;
   const network = networkName(request.network, policy) ?? '?';
   const asset = isAddress(request.asset) ? request.asset : '?';
   const usdc = Object.hasOwn(USDC_BY_NETWORK, request.network) ? USDC_BY_NETWORK[request.network] : undefined;

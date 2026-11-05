@@ -183,7 +183,8 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   removal of x402 v1 in the next major release (#210). (#159, #209)
 - `PriceQuote.amount` is new: the gateway's `amount`, else its `max_amount_required`.
   `maxAmountRequired` holds the same value and is deprecated; it is removed with x402 v1 (#210).
-  A quote whose two amounts differ throws `INVALID_RESPONSE`. (#209)
+  A quote whose amount is not an integer string of 1-78 digits, or whose two amounts differ,
+  throws `INVALID_RESPONSE`. (#209)
 - The receipt is read from `PAYMENT-RESPONSE`, then `X-PAYMENT-RESPONSE`. x402 headers longer
   than 8192 characters, or that do not decode to a JSON object, are ignored. In x402 mode such
   a `PAYMENT-REQUIRED` header is removed before the library reads it, so the payment is made

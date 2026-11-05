@@ -169,7 +169,8 @@ must have the type they are copied as, or the call throws `INVALID_RESPONSE`: st
 `currency`, `network`, `asset` and `pay_to`, number `min_price_usd`, `free_tier` with boolean
 `enabled` and string `header`, and `quotes` as an object. Each of the four quotes, when
 present, must have string `method`, `path` and `description`, number `price_usd`, and the
-amount as string `amount` or `max_amount_required` (equal when both are sent). `amount` and
+amount as `amount` or `max_amount_required`: an integer string of 1-78 digits, equal when
+both are sent. `amount` and
 `maxAmountRequired` both get that value. After a paid request (`payForReads`), the error has `error.payment`. A connection failure or timeout throws `GatewayConnectionError` (`CONNECTION_FAILED` or
 `TIMEOUT`). In x402 mode with `payForReads`, the payment errors listed under `download()` also
 apply.

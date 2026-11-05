@@ -487,8 +487,8 @@ const prices = await client.pricing({
   (USDC has 6 decimals): the gateway's `amount`, else its `max_amount_required`. Quotes follow
   the chain price, so treat them as current, not guaranteed. `maxAmountRequired` holds the same
   value and is deprecated: x402 v2 names the field `amount`, and `maxAmountRequired` is removed
-  with x402 v1 (#210). A quote whose `amount` and `max_amount_required` differ is refused
-  (`INVALID_RESPONSE`).
+  with x402 v1 (#210). A quote whose amount is not an integer string of 1-78 digits, or whose
+  `amount` and `max_amount_required` differ, is refused (`INVALID_RESPONSE`).
 - `poolAcquire` and `bandwidthCredit` appear only when the gateway offers them. There are
   no quotes for stamp extension, purchases for another owner, or manifests.
 - When x402 is off on the gateway, the result is `{ x402Enabled: false, quotes: {} }`.
@@ -1142,8 +1142,9 @@ issue numbers and lists the open release-gate items.
   use the x402 v1 name, whichever x402 version paid: a v2 receipt's `'eip155:84532'` is
   reported as `'base-sepolia'` (#159). CAIP-2 comes with the removal of x402 v1 (#210). 402 messages name networks the same way,
   and show a network or token that is not well formed as `?`. `PriceQuote.amount` is new;
-  `maxAmountRequired` holds the same value and is deprecated. A `/pricing` quote whose `amount`
-  and `max_amount_required` differ throws `INVALID_RESPONSE`. x402 headers over 8192 characters
+  `maxAmountRequired` holds the same value and is deprecated. A `/pricing` quote whose amount is
+  not an integer string of 1-78 digits, or whose `amount` and `max_amount_required` differ,
+  throws `INVALID_RESPONSE`. x402 headers over 8192 characters
   are ignored; in x402 mode such a `PAYMENT-REQUIRED` header, or one that is not a JSON object,
   is removed, so the library pays from the v1 body.
 - A non-JSON 413 from the gateway's proxy throws with code `FILE_TOO_LARGE` and the message
