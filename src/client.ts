@@ -1699,8 +1699,9 @@ interface PaidAttempt {
 
 /**
  * The facilitator's SettleResponse: the decoded PAYMENT-RESPONSE (v2), else
- * X-PAYMENT-RESPONSE (v1), in @x402/core's order (D4). The first header present
- * decides: one that does not decode (or is too long) counts as no receipt.
+ * X-PAYMENT-RESPONSE (v1), in @x402/core's order (D4). The first non-empty
+ * header decides, as in @x402/core (an empty PAYMENT-RESPONSE falls through):
+ * one that does not decode (or is too long) counts as no receipt.
  */
 function settleResponse(response: Response): Record<string, unknown> | undefined {
   return decodePaymentHeader(response.headers.get('PAYMENT-RESPONSE') || response.headers.get('X-PAYMENT-RESPONSE'));

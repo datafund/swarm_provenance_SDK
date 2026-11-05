@@ -466,6 +466,15 @@ describe('x402 v2 shapes (#209)', () => {
     expect(result.payment?.transaction).toBe(TX_UPLOAD);
   });
 
+  it('an empty PAYMENT-RESPONSE falls through to X-PAYMENT-RESPONSE; an undecodable one does not', async () => {
+    // The first non-empty header decides, as in @x402/core getPaymentSettleResponse
+    answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': '', 'X-PAYMENT-RESPONSE': receipt() } };
+    expect((await client().upload('hello', { stampId: STAMP })).payment).toEqual(UPLOAD_RECEIPT);
+
+    answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': '%%%not-base64', 'X-PAYMENT-RESPONSE': receipt() } };
+    expect((await client().upload('hello', { stampId: STAMP })).payment?.payer).toBeUndefined();
+  });
+
   it('#159: a v2 receipt without a network falls back to the signed network, as its v1 name', async () => {
     protocol = 2;
     answers[UPLOAD] = { status: 200, headers: { 'PAYMENT-RESPONSE': receipt({ network: undefined }) } };

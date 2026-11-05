@@ -168,10 +168,12 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   price options and code. Before, `error.body` was not set on it. (#163)
 - x402 mode on Node 18 without Web Crypto throws `PaymentConfigurationError` that says how to
   fix it. Before, the library failed with an unclear error. (#106, PR #138)
-- x402 v2 shapes. A 402 message names the price from the `PAYMENT-REQUIRED` header when it
-  decodes, else from the body: the order `@x402/core` pays in. So a v2 402 that sends the price
-  only in the header now names it, and a 402 with both (the gateway's planned dual mode) names
-  the v2 price the library pays. (#167, #209)
+- x402 v2 shapes. A 402 message names the price from the `PAYMENT-REQUIRED` header when that
+  decodes to a payment request, else from the body's top level, else its `detail`. So a v2 402
+  that sends the price only in the header now names it, and a 402 with both (the gateway's
+  planned dual mode) names the v2 price the library pays. A header that decodes to a JSON object without a readable
+  `x402Version` and `accepts` is not a payment request: the message then names the body's price,
+  while x402 mode refuses that 402 with `PaymentRefusedError` and pays nothing. (#167, #209)
 - `payment.network` and `error.payment.network` have one format: the x402 v1 name
   (`'base-sepolia'`, `'base'`, or `payment.v1Network`), whichever x402 version paid. A v2
   receipt's `'eip155:84532'` is reported as `'base-sepolia'`. 402 price messages name networks

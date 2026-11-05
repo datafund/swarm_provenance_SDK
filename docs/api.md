@@ -621,7 +621,10 @@ class ProvenanceError extends Error {
   throws it without reading the response body.
 - A 402 message names the price asked, for example `0.01 USDC on base-sepolia`. It is read
   from the `PAYMENT-REQUIRED` header (x402 v2) when that decodes to a payment request, else from
-  the body's top level, else its `detail` (#167): the order `@x402/core` pays in. The network is
+  the body's top level, else its `detail` (#167). For a header that decodes, this is the
+  option x402 mode pays. A header that decodes to a JSON object without a readable `x402Version`
+  and `accepts` is not a payment request: the message then names the body's price, while x402
+  mode refuses that 402 with `PaymentRefusedError` and pays nothing. The network is
   named the x402 v1 way, as in `PaymentReceipt.network`; a CAIP-2 ID with no known v1 name is
   shown as sent, and a network or token that is not well formed shows as `?`. The 402 body
   itself, not the header, is `body`.

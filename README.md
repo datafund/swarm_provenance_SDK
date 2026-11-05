@@ -614,8 +614,10 @@ text cut to 4096 characters, and for a body that is not JSON its text, also at m
 characters. A cut text ends in `…`, which counts toward the 4096. Characters are UTF-16
 code units, as JavaScript counts string length; a cut never splits a surrogate pair. A 402 message names the price asked, for
 example `0.01 USDC on base-sepolia`: at most three options, then how many more (all are in
-`error.body`). The price is read where `@x402/core` reads it: the `PAYMENT-REQUIRED` header
-(x402 v2) when it decodes, else the body. The network is named the x402 v1 way, as in the
+`error.body`). The price is read from the `PAYMENT-REQUIRED` header (x402 v2) when that decodes
+to a payment request, else from the body. A header that decodes to a JSON object without
+`x402Version` and `accepts` is not one: the message then names the body's price, while x402 mode
+refuses that 402 with `PaymentRefusedError`. The network is named the x402 v1 way, as in the
 receipt; a CAIP-2 ID with no known v1 name is shown as sent. A network or token that is not
 well formed shows as `?`. The gateway's message is cut to leave room for the price, so both fit
 within the 4096-character cap. A signature declined in the wallet throws
