@@ -67,12 +67,13 @@ console.log('Content:', new TextDecoder().decode(downloaded.file));
 By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-limited. For higher throughput, configure x402 automatic USDC payments.
 
 **Network:** `payment.network` defaults to `'base-sepolia'` (Base Sepolia, test USDC). That
-matches the staging gateway only. The production gateway asks for `base`, so a config without
-`network: 'base'` (or `'eip155:8453'`) fails there with `PaymentRefusedError` before anything
-is signed. One setting picks the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then required) or
-`'base-sepolia'`. It selects both identifiers the x402 protocol uses (v1 `base`, v2 `eip155:8453`),
-so it must match the gateway's network: if the gateway asks for payment on another network, the
-request fails with `PaymentRefusedError` naming both, before anything is signed.
+matches the staging gateway only. The production gateway asks for `base`, so a config left on
+the Base Sepolia default fails there with `PaymentRefusedError` before anything is signed. One
+setting picks the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then
+required) or `'base-sepolia'`. It selects both identifiers the x402 protocol uses (v1 `base`,
+v2 `eip155:8453`), so it must match the gateway's network: if the gateway asks for payment on
+another network, the request fails with `PaymentRefusedError` naming both, before anything is
+signed.
 
 ```typescript
 // Production gateway, Base mainnet: real USDC. The wallet must be on Base too (viem `base`
@@ -214,7 +215,7 @@ upload changed, or its stamp did) and `IDEMPOTENCY_KEY_INVALID`. Three answers n
 | `code` | `outcome` | What to do |
 |--------|-----------|------------|
 | `IDEMPOTENCY_KEY_SETTLEMENT_UNKNOWN` | `unknown` | The payment may or may not have been collected: check `payment.nonce` on-chain before paying again |
-| `IDEMPOTENCY_KEY_SETTLED_PENDING` | `settled_not_delivered` | Paid (`payment.transaction`), result not available: ask the gateway operator for it or a refund |
+| `IDEMPOTENCY_KEY_SETTLED_PENDING` | `settled_not_delivered` | Paid (`payment.transaction`), result not available: ask the gateway operator for the result (refunds should not be expected during alpha; feedback to info@datafund.io) |
 | `IDEMPOTENCY_KEY_DELIVERED_NOT_STORED` | `delivered` | It worked and was paid once; the gateway kept no copy of the response. Do not pay again |
 
 An attempt that may pay is bounded by `paidTimeout` (default 120 s, or `timeout` if longer),
