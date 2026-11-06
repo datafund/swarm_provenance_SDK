@@ -68,8 +68,8 @@ By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-l
 
 **Network:** `payment.network` defaults to `'base-sepolia'` (Base Sepolia, test USDC). That
 matches the staging gateway only. The production gateway asks for `base`, so a config without
-`network: 'base'` fails there with `PaymentRefusedError` before anything is signed. One setting
-picks the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then required) or
+`network: 'base'` (or `'eip155:8453'`) fails there with `PaymentRefusedError` before anything
+is signed. One setting picks the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then required) or
 `'base-sepolia'`. It selects both identifiers the x402 protocol uses (v1 `base`, v2 `eip155:8453`),
 so it must match the gateway's network: if the gateway asks for payment on another network, the
 request fails with `PaymentRefusedError` naming both, before anything is signed.

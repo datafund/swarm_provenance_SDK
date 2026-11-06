@@ -17,7 +17,7 @@ describe('PaymentWallet accepts a viem WalletClient extended with publicActions'
     expect(
       new ProvenanceClient({
         gatewayUrl: 'https://provenance-gateway.dev.datafund.io',
-        payment: { wallet },
+        payment: { wallet, maxAmount: '0.10' },
       })
     ).toBeInstanceOf(ProvenanceClient);
   });
