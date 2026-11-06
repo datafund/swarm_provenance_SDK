@@ -5,6 +5,12 @@
 
 TypeScript SDK for storing and retrieving provenance data via the Swarm network.
 
+> **Alpha software.** This SDK and the provenance gateway are alpha. There are no guarantees,
+> and refunds should not be expected. The production gateway (the default) charges real USDC on
+> Base mainnet for paid requests: spend small amounts, and test on the staging gateway or the
+> free tier first (see [x402 Payment Mode](#x402-payment-mode)). Send feedback to
+> [info@datafund.io](mailto:info@datafund.io). This address is for feedback, not refunds.
+
 ## Requirements
 
 - Node.js >= 18.0.0
@@ -22,7 +28,8 @@ For blockchain anchoring features, also install viem:
 pnpm add @datafund/swarm-provenance viem
 ```
 
-For x402 paid gateway access (higher rate limits), also install:
+For x402 paid gateway access (higher rate limits; real USDC on the production gateway, see
+[x402 Payment Mode](#x402-payment-mode)), also install:
 
 ```bash
 pnpm add @datafund/swarm-provenance @x402/fetch @x402/evm viem
@@ -49,20 +56,33 @@ console.log('Content:', new TextDecoder().decode(downloaded.file));
 
 ### x402 Payment Mode
 
+> **Alpha software. The production gateway charges real USDC.** The production gateway
+> (`https://provenance-gateway.datafund.io`, the default) charges real USDC on Base mainnet. To
+> pay there, set `network: 'base'` and a small `maxAmount` (required on mainnet; for example
+> `'0.05'`). There are no guarantees, and refunds should not be expected. To test without real
+> money, use the free tier (the default, `payment: 'free'`) or the staging gateway
+> `gatewayUrl: 'https://provenance-gateway.dev.datafund.io'` (Base Sepolia, test USDC). Staging
+> stores data on the real Swarm network and is for integration testing only.
+
 By default, the SDK uses the free tier (`X-Payment-Mode: free`), which is rate-limited. For higher throughput, configure x402 automatic USDC payments.
 
-**Network:** payments default to **Base Sepolia** (testnet USDC, no real value). One setting picks
-the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then required) or
+**Network:** `payment.network` defaults to `'base-sepolia'` (Base Sepolia, test USDC). That
+matches the staging gateway only. The production gateway asks for `base`, so a config without
+`network: 'base'` fails there with `PaymentRefusedError` before anything is signed. One setting
+picks the network: `network: 'base'` for Base mainnet (real USDC; `maxAmount` is then required) or
 `'base-sepolia'`. It selects both identifiers the x402 protocol uses (v1 `base`, v2 `eip155:8453`),
 so it must match the gateway's network: if the gateway asks for payment on another network, the
 request fails with `PaymentRefusedError` naming both, before anything is signed.
 
 ```typescript
-// Base mainnet: the wallet must be on Base too (viem `base` chain, or the
-// injected wallet switched to chain 8453), since payments are signed for it
+// Production gateway, Base mainnet: real USDC. The wallet must be on Base too (viem `base`
+// chain, or the injected wallet switched to chain 8453), since payments are signed for it
 import { base } from 'viem/chains';
 const wallet = createWalletClient({ account, chain: base, transport: http() }).extend(publicActions);
-const client = new ProvenanceClient({ payment: { wallet, network: 'base', maxAmount: '0.10' } });
+const client = new ProvenanceClient({
+  gatewayUrl: 'https://provenance-gateway.datafund.io', // production (the default): real USDC
+  payment: { wallet, network: 'base', maxAmount: '0.05' }, // keep the cap small
+});
 ```
 
 **Payment policy.** Before signing, every payment the gateway asks for must pass these checks,
@@ -201,7 +221,9 @@ An attempt that may pay is bounded by `paidTimeout` (default 120 s, or `timeout`
 not `timeout`: settlement happens on-chain. Tested with `@x402/*` 2.5.0 to 2.30.0.
 x402 mode needs Web Crypto (`globalThis.crypto`): Node.js 20+, or Node 18 with it installed.
 
-**Server (Node.js):** load the key from the environment or a secret store, never from source code:
+**Server (Node.js):** load the key from the environment or a secret store, never from source code.
+This example uses the staging gateway (Base Sepolia, test USDC). For the production gateway
+(real USDC), use the Base mainnet settings shown above under **Network**:
 
 ```typescript
 import { ProvenanceClient } from '@datafund/swarm-provenance';
@@ -219,6 +241,7 @@ const wallet = createWalletClient({
 }).extend(publicActions);
 
 const client = new ProvenanceClient({
+  gatewayUrl: 'https://provenance-gateway.dev.datafund.io', // staging: Base Sepolia test USDC
   // Optionally also pin the recipient: payTo: ['<the gateway operator's payout address>']
   payment: { wallet, maxAmount: '0.10' },
 });
@@ -228,7 +251,9 @@ const result = await client.upload('Hello, World!');
 ```
 
 **Browser:** use the user's injected wallet. Never put a private key in browser code:
-anything shipped to the browser is public.
+anything shipped to the browser is public. This example uses the staging gateway (Base Sepolia,
+test USDC). For the production gateway (real USDC), use the Base mainnet settings shown above
+under **Network**, and switch the wallet to `base` instead of `baseSepolia`:
 
 ```typescript
 import { ProvenanceClient } from '@datafund/swarm-provenance';
@@ -257,7 +282,10 @@ const wallet = createWalletClient({
   transport: custom(provider),
 }).extend(publicActions);
 
-const client = new ProvenanceClient({ payment: { wallet } });
+const client = new ProvenanceClient({
+  gatewayUrl: 'https://provenance-gateway.dev.datafund.io', // staging: Base Sepolia test USDC
+  payment: { wallet },
+});
 ```
 
 Payment modes:
@@ -321,8 +349,9 @@ What the SDK checks, and what it does not:
   `/chain` writes, and a viem wallet client over `custom(window.ethereum)` for x402 payments
   (see [x402 Payment Mode](#x402-payment-mode)). On servers load keys from the environment or a
   secret store. A private key in browser code is public.
-- **Default gateway is production:** `https://provenance-gateway.datafund.io`. Pass
-  `gatewayUrl` to use another (e.g. `https://provenance-gateway.dev.datafund.io` for testing).
+- **Default gateway is production:** `https://provenance-gateway.datafund.io`. x402 payments
+  there are real USDC on Base mainnet. Pass `gatewayUrl` to use another (e.g.
+  `https://provenance-gateway.dev.datafund.io`, Base Sepolia test USDC, for testing).
 - **Data expires.** Swarm storage is rented: data stays available only while the postage stamp
   it was uploaded with is valid. Pool stamps come with roughly a day left; extend the stamp
   through the gateway (`PATCH /api/v1/stamps/{id}/extend`) if you need it longer. A Swarm
