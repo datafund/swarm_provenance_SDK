@@ -393,6 +393,14 @@ README section [Behavior changes since v0.6.1](README.md#behavior-changes-since-
   `ReceiptTimeoutError` (#117), `rpcErrorMessage` (#118), and the types `ProvenanceChainResult`
   (#123) and `ExpectedEvent` (#116).
 
+### Documentation
+
+- The README has an alpha notice: no guarantees, refunds should not be expected, and feedback
+  goes to info@datafund.io. It states that the production gateway (the default) charges real
+  USDC on Base mainnet, and that a config needs `network: 'base'` and a small `maxAmount` to pay
+  there. The x402 server and browser examples now use the staging gateway (Base Sepolia, test
+  USDC). (#221)
+
 ### CI and repository
 
 - CI fails the build when new commits add a secret. (#121)

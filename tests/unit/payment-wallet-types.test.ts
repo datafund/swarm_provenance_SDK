@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createWalletClient, custom, http, publicActions } from 'viem';
-import { baseSepolia } from 'viem/chains';
+import { base, baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { ProvenanceClient } from '../../src/client.js';
 
@@ -14,7 +14,12 @@ describe('PaymentWallet accepts a viem WalletClient extended with publicActions'
       transport: http(),
     }).extend(publicActions);
 
-    expect(new ProvenanceClient({ payment: { wallet } })).toBeInstanceOf(ProvenanceClient);
+    expect(
+      new ProvenanceClient({
+        gatewayUrl: 'https://provenance-gateway.dev.datafund.io',
+        payment: { wallet, maxAmount: '0.10' },
+      })
+    ).toBeInstanceOf(ProvenanceClient);
   });
 
   it('browser setup: injected provider and a JSON-RPC account', () => {
@@ -25,7 +30,27 @@ describe('PaymentWallet accepts a viem WalletClient extended with publicActions'
       transport: custom(provider),
     }).extend(publicActions);
 
-    expect(new ProvenanceClient({ payment: { wallet } })).toBeInstanceOf(ProvenanceClient);
+    expect(
+      new ProvenanceClient({
+        gatewayUrl: 'https://provenance-gateway.dev.datafund.io',
+        payment: { wallet },
+      })
+    ).toBeInstanceOf(ProvenanceClient);
+  });
+
+  it('mainnet setup: production gateway, network base, small maxAmount', () => {
+    const wallet = createWalletClient({
+      account: privateKeyToAccount('0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'),
+      chain: base,
+      transport: http(),
+    }).extend(publicActions);
+
+    expect(
+      new ProvenanceClient({
+        gatewayUrl: 'https://provenance-gateway.datafund.io',
+        payment: { wallet, network: 'base', maxAmount: '0.05' },
+      })
+    ).toBeInstanceOf(ProvenanceClient);
   });
 });
 
